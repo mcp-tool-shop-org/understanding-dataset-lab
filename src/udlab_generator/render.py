@@ -204,6 +204,33 @@ class ProseRequirementSpec:
 
 HARD_CONSTRAINTS_PLACEHOLDER: str = "{hard_constraints_block}"
 
+SIGHTING_VERBS: tuple[str, ...] = (
+    "observed",
+    "looked",
+    "saw",
+    "spotted",
+    "noticed",
+    "inspected",
+    "checked",
+    "viewed",
+    "watched",
+    "glanced",
+    "examined",
+)
+
+BLOCKING_PHRASES: tuple[str, ...] = (
+    "blocked",
+    "could not see",
+    "hidden behind",
+    "obscured",
+    "blocking sight",
+)
+
+SETUP_CHECKLIST_ORDER: str = (
+    "rooms -> containers per room -> fixtures per room -> occluders -> doorways -> "
+    "starting rooms -> goals -> stake -> belief rule -> hearing threshold"
+)
+
 _ACTION_VERBS_BY_KIND: dict[str, tuple[str, ...]] = {
     "enter": ("walked", "entered", "stepped", "came", "arrived", "went", "moved", "returned", "proceeded", "crossed"),
     "leave": ("exited", "left", "departed", "walked", "headed", "went", "stepped", "proceeded", "crossed"),
@@ -222,19 +249,7 @@ _ACTION_VERBS_BY_KIND: dict[str, tuple[str, ...]] = {
         "carried",
         "took",
     ),
-    "see": (
-        "observed",
-        "looked",
-        "saw",
-        "spotted",
-        "noticed",
-        "inspected",
-        "checked",
-        "viewed",
-        "watched",
-        "glanced",
-        "examined",
-    ),
+    "see": SIGHTING_VERBS,
     "say": ("said", "stated", "spoke", "announced", "uttered", "claimed", "reported", "told"),
     "message": ("sent", "messaged", "texted", "transmitted", "notified", "wrote"),
 }
@@ -245,10 +260,15 @@ def format_action_verbs_by_kind_summary() -> str:
     return "; ".join(f"{kind}: {', '.join(verbs)}" for kind, verbs in _ACTION_VERBS_BY_KIND.items())
 
 
+def format_blocking_phrases_summary() -> str:
+    """Format `BLOCKING_PHRASES` into a deterministic prompt string."""
+    return ", ".join(f"'{p}'" for p in BLOCKING_PHRASES)
+
+
 WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ProseRequirementSpec(
         "c_fidelity_paragraph_split",
-        r'Output two paragraphs separated by "\n\n": Paragraph 1 is setup; Paragraph 2 is events.',
+        f'Output two paragraphs separated by "\\n\\n": Paragraph 1 is setup ({SETUP_CHECKLIST_ORDER}); Paragraph 2 is events.',
     ),
     ProseRequirementSpec(
         "c_fidelity_focal_agent",
@@ -261,6 +281,10 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ProseRequirementSpec(
         "c_fidelity_containers",
         "Name both containers of every room from containers_by_room in setup.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_fixtures",
+        "Name each room's fixture from fixtures_by_room in setup.",
     ),
     ProseRequirementSpec(
         "c_fidelity_occluder",
@@ -304,8 +328,10 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
         f"{format_action_verbs_by_kind_summary()}"
         ") with no party between actor and verb; name event room ('in/from/inside/at/of [the] <room>', no other room on intra-room events); "
         "state from_location before to_location on enter/leave/move (or 'entered/arrived in <to> ... from <from>' on enter), where from-locations on enter/move use 'from'/'out of' and to-locations on enter/leave/move use 'to'/'into'/'toward'/'at'/'in'/'onto'; "
-        "on see, name target_object, and when occluded=false and to_location is a container also name to_location ('container bay' is never required as to_location); "
-        "state 'in open view' (never 'blocked') on unoccluded object move/see, and room occluder + 'blocked' (+ 'far-side alcove' on occluded see) when occluded=true; "
+        "on see, name target_object, and when occluded=false and to_location is a container also place target_object at to_location ('container bay' is never required as to_location); "
+        "on unoccluded object move/see, contain no blocking language ("
+        f"{format_blocking_phrases_summary()}"
+        "; 'in open view' optional), and when occluded=true state room occluder + 'blocked'/'blocking sight' (+ 'far-side alcove' on occluded see); "
         "on say, state '<noise_level> dB' and quote utterance verbatim; "
         "on message, state 'to/for/messaged/texted/notified <recipient>' and quote utterance verbatim; end say/message sentences with quoted speech.",
     ),
@@ -846,16 +872,23 @@ def _sentence_matches_event(
         return False
 
     if ev.room.lower() not in frame_low:
-        return False
+        if ev.kind not in ("say", "message"):
+            return False
+    else:
+        # Reject if another room from world.rooms is asserted as the room of an intra-room action
+        if world is not None and ev.kind not in ("enter", "leave"):
+            other_rooms = [r for r in world.rooms if r.lower() != ev.room.lower()]
+            for o_room in other_rooms:
+                if o_room.lower() in frame_low:
+                    return False
+            if not re.search(rf"\b(?:in|from|inside|at|of)\s+(?:the\s+)?{re.escape(ev.room.lower())}\b", frame_low):
+                return False
 
-    # Reject if another room from world.rooms is asserted as the room of an intra-room action
-    if world is not None and ev.kind not in ("enter", "leave"):
+    if ev.kind in ("say", "message") and ev.room.lower() not in frame_low and world is not None:
         other_rooms = [r for r in world.rooms if r.lower() != ev.room.lower()]
         for o_room in other_rooms:
             if o_room.lower() in frame_low:
                 return False
-        if not re.search(rf"\b(?:in|from|inside|at|of)\s+(?:the\s+)?{re.escape(ev.room.lower())}\b", frame_low):
-            return False
 
     if ev.kind == "enter":
         if not (ev.from_location and ev.to_location):
@@ -917,23 +950,27 @@ def _sentence_matches_event(
         ):
             return False
         if ev.occluded and ev.occluder:
-            if ev.occluder.lower() not in s_low or "blocked" not in s_low:
+            if ev.occluder.lower() not in s_low or (
+                "blocked" not in s_low and "blocking sight" not in s_low
+            ):
                 return False
         else:
-            if "in open view" not in s_low or "blocked" in s_low:
+            if any(bp in s_low for bp in BLOCKING_PHRASES):
                 return False
         return True
 
     if ev.kind == "see":
+        if not _actor_precedes_verb_as_subject(frame_low, ev.actor, SIGHTING_VERBS, all_parties):
+            return False
         if not (ev.target_object and ev.target_object.lower() in s_low):
             return False
         if ev.occluded and ev.occluder:
             return (
                 ev.occluder.lower() in s_low
-                and "blocked" in s_low
+                and ("blocked" in s_low or "blocking sight" in s_low)
                 and FAR_SIDE_ALCOVE_STATION.lower() in s_low
             )
-        if "in open view" not in s_low or "blocked" in s_low:
+        if any(bp in s_low for bp in BLOCKING_PHRASES):
             return False
         all_containers = (
             {c.lower() for pair in world.containers_by_room.values() for c in pair}
@@ -943,6 +980,9 @@ def _sentence_matches_event(
         if ev.to_location and ev.to_location.lower() in all_containers:
             if ev.to_location.lower() not in s_low:
                 return False
+            for other_c in all_containers:
+                if other_c != ev.to_location.lower() and other_c in s_low:
+                    return False
         return True
 
     if ev.kind == "say":
@@ -1089,6 +1129,14 @@ def check_prose_render_fidelity(
             _raise_prose_check_error(
                 "c_fidelity_containers",
                 f"Render check (c) failed: containers ({c0!r}, {c1!r}) for room '{room}' missing from setup prose (candidate sentence: {cand!r}).",
+                failing_sentence=cand,
+            )
+        fixture = world.fixtures_by_room.get(room)
+        if fixture and fixture.lower() not in setup_low:
+            cand = _find_sentence_with_substring(setup_text, room)
+            _raise_prose_check_error(
+                "c_fidelity_fixtures",
+                f"Render check (c) failed: fixture '{fixture}' for room '{room}' missing from setup prose (candidate sentence: {cand!r}).",
                 failing_sentence=cand,
             )
         occ = world.occluders_by_room[room]
@@ -1403,10 +1451,12 @@ def render_world_template(world: World, focal_agent: str) -> str:
     room_setup_strs: list[str] = []
     for r in world.rooms:
         c_pair = world.containers_by_room[r]
+        fix = world.fixtures_by_room[r]
         occ = world.occluders_by_room[r]
         occ_art = indefinite_article(occ)
         room_setup_strs.append(
             f"the {r} contains the {c_pair[0]} and the {c_pair[1]} in the {CONTAINER_BAY_STATION} "
+            f"and the {fix} in the {FAR_SIDE_ALCOVE_STATION} "
             f"(with {occ_art} {occ} standing between the {FAR_SIDE_ALCOVE_STATION} and the {CONTAINER_BAY_STATION} "
             f"that blocks an agent in the {FAR_SIDE_ALCOVE_STATION} from seeing events at or the contents of "
             f"the containers behind it, while an agent in the {CONTAINER_BAY_STATION} sees them in open view)"

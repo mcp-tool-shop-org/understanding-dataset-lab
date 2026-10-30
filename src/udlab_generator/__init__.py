@@ -48,6 +48,7 @@ from udlab_generator.probe import (
 )
 from udlab_generator.render import (
     BANNED_ADVERBS,
+    BLOCKING_PHRASES,
     CHECKPOINT_FILENAME,
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_VRAM_HALT_MIB,
@@ -65,6 +66,8 @@ from udlab_generator.render import (
     PINNED_WRITER_MODEL_TAG,
     SEALED_CHECKPOINT_FILENAME,
     SEALED_RESPONSES_FILENAME,
+    SETUP_CHECKLIST_ORDER,
+    SIGHTING_VERBS,
     WRITER_PROMPT_PATH,
     WRITER_PROSE_REQUIREMENTS,
     WRITER_PROSE_REQUIREMENTS_BY_ID,
@@ -96,6 +99,7 @@ from udlab_generator.render import (
     default_ollama_http_transport,
     estimate_prompt_tokens,
     format_action_verbs_by_kind_summary,
+    format_blocking_phrases_summary,
     format_writer_prompt,
     get_checker_enforced_check_ids,
     indefinite_article,

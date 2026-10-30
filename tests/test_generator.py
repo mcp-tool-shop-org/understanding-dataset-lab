@@ -2354,13 +2354,13 @@ def _build_natural_model_prose_scen_0000() -> tuple[str, str]:
     """
     natural_setup = (
         "In the archival registry, the narrative follows Eva across four interconnected rooms: "
-        "the vault room contains the oak drawer and the steel cabinet at its container bay, where a frosted partition "
+        "the vault room contains the oak drawer and the steel cabinet at its container bay and the wall barometer in the far-side alcove, where a frosted partition "
         "stands between the far-side alcove and the container bay; "
-        "the reading room contains the slate tray and the cedar shelf at its container bay, divided from the far-side alcove "
+        "the reading room contains the slate tray and the cedar shelf at its container bay and the wall clock in the far-side alcove, divided from the far-side alcove "
         "by a tall bookstack; "
-        "the bindery room contains the linen bin and the copper rack in the container bay, separated from the far-side alcove "
+        "the bindery room contains the linen bin and the copper rack in the container bay and the humidity dial in the far-side alcove, separated from the far-side alcove "
         "by a canvas screen; "
-        "and the sorting room contains the maple cubby and the iron safe in the container bay, with a rolling pillar "
+        "and the sorting room contains the maple cubby and the iron safe in the container bay and the ventilation grille in the far-side alcove, with a rolling pillar "
         "between the far-side alcove and the container bay so that anyone at the container bay sees the containers in open view "
         "while anyone in the far-side alcove has their view blocked. "
         "Open doorways link the vault room and the reading room, the reading room and the bindery room, "
@@ -2688,13 +2688,13 @@ def test_35_phrasing_1_natural_doorway_sentences_pass() -> None:
     # Omitting one edge (bindery room <-> sorting room) from any setup sentence must still fail
     setup_missing_edge = (
         "In the archival registry, Eva works across four rooms: "
-        "the vault room contains the oak drawer and the steel cabinet at its container bay with a frosted partition "
+        "the vault room contains the oak drawer and the steel cabinet at its container bay and the wall barometer in the far-side alcove with a frosted partition "
         "between the far-side alcove and the container bay. "
-        "The reading room contains the slate tray and the cedar shelf at its container bay with a tall bookstack "
+        "The reading room contains the slate tray and the cedar shelf at its container bay and the wall clock in the far-side alcove with a tall bookstack "
         "between the far-side alcove and the container bay. "
-        "The bindery room contains the linen bin and the copper rack at its container bay with a canvas screen "
+        "The bindery room contains the linen bin and the copper rack at its container bay and the humidity dial in the far-side alcove with a canvas screen "
         "between the far-side alcove and the container bay. "
-        "The sorting room contains the maple cubby and the iron safe at its container bay with a rolling pillar "
+        "The sorting room contains the maple cubby and the iron safe at its container bay and the ventilation grille in the far-side alcove with a rolling pillar "
         "between the far-side alcove and the container bay. "
         "A doorway links the vault room and the reading room, and another doorway links the reading room and the bindery room "
         "(doorway hearing threshold 50 dB). "
@@ -2936,12 +2936,12 @@ def _build_sj_writer_in_the_loop_scen_0000() -> tuple[str, list[str]]:
     sj_setup = (
         "Following Eva through the archival registry, the workspace spans four rooms: the vault room, "
         "the reading room, the bindery room, and the sorting room. In the vault room, the oak drawer and "
-        "the steel cabinet sit at the container bay, while a frosted partition stands between the far-side "
+        "the steel cabinet sit at the container bay and the wall barometer in the far-side alcove, while a frosted partition stands between the far-side "
         "alcove and the container bay. In the reading room, the slate tray and the cedar shelf occupy the "
-        "container bay, with a tall bookstack standing between the far-side alcove and the container bay. "
-        "In the bindery room, the linen bin and the copper rack are located at the container bay, where a "
+        "container bay and the wall clock sits in the far-side alcove, with a tall bookstack standing between the far-side alcove and the container bay. "
+        "In the bindery room, the linen bin and the copper rack are located at the container bay and the humidity dial in the far-side alcove, where a "
         "canvas screen stands between the far-side alcove and the container bay. In the sorting room, the "
-        "maple cubby and the iron safe rest at the container bay, and a rolling pillar stands between the "
+        "maple cubby and the iron safe rest at the container bay and the ventilation grille in the far-side alcove, and a rolling pillar stands between the "
         "far-side alcove and the container bay; in each room, the occluder blocks sight from the far-side "
         "alcove while the container bay sees the containers in open view. Doorways connect the vault room "
         "with the reading room, link the reading room to the bindery room, and join the bindery room to the "
@@ -3779,6 +3779,330 @@ def test_46_sealed_response_store_private_never_in_part_public(tmp_path: Path) -
     # Also verify that check_not_in_key_order actively rejects `response_text` or `thinking_text` in public items:
     with pytest.raises(SealingError, match="Forbidden key/seed fields"):
         check_not_in_key_order([{"item_id": "item_0001", "response_text": "leaked"}], [{"pass_index": 1}], {})
+
+
+def test_47_meaning_based_see_and_one_verb_list() -> None:
+    """Test 47 (Card sq Req 1 & 2):
+    - Meaning-based unoccluded 'see' passes when sentence names actor, object, room, places object at
+      event's container (or station rule as before), uses a sighting verb from one list, and contains no blocking language;
+      'in open view' is optional for unoccluded events.
+    - Mandatory refusal tests (a)-(e):
+      (a) unoccluded event whose sentence contains blocking language ('blocked', 'could not see', 'hidden behind', 'obscured');
+      (b) occluded event whose sentence lacks 'blocked' or names no occluder;
+      (c) sighting in the wrong room;
+      (d) sighting of the wrong object;
+      (e) sighting at the wrong container.
+    - Plus the pass case built from refusal-1 wording ('Eva observed the index reel in the linen bin in the bindery room.').
+    - One verb list: SIGHTING_VERBS and BLOCKING_PHRASES are one list in code, rendered into the prompt's generated
+      constraints block, and used by the checker.
+    """
+    import udlab_generator.render as ug_render
+    from udlab_generator.render import _sentence_matches_event
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]  # Eva
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    # Add fixtures to sj_setup so it satisfies the setup checklist including fixtures per room:
+    setup_with_fixtures = (
+        f"{sj_setup} Fixtures per room: a wall barometer in the vault room, a wall clock in the reading room, "
+        f"a humidity dial in the bindery room, and a ventilation grille in the sorting room."
+    )
+
+    # 2. Pass case built from Refusal-1 wording (no literal 'in open view'):
+    ev_1 = w.events[0]
+    assert ev_1.kind == "see" and not ev_1.occluded and ev_1.actor == "Eva"
+    assert ev_1.room == "bindery room" and ev_1.target_object == "index reel" and ev_1.to_location == "linen bin"
+    refusal_1_pass_sent = "Eva observed the index reel in the linen bin in the bindery room."
+    assert _sentence_matches_event(refusal_1_pass_sent, ev_1, w.noise_threshold, world=w)
+
+    # 1. One list in code for sighting verbs and blocking phrases, rendered into prompt constraints and used by checker
+    sighting_verbs = getattr(ug_render, "SIGHTING_VERBS", None)
+    blocking_phrases = getattr(ug_render, "BLOCKING_PHRASES", None)
+    assert isinstance(sighting_verbs, tuple) and len(sighting_verbs) >= 10
+    assert isinstance(blocking_phrases, tuple) and (
+        "blocked",
+        "could not see",
+        "hidden behind",
+        "obscured",
+    ) == blocking_phrases[:4]
+    assert ug_render._ACTION_VERBS_BY_KIND["see"] == sighting_verbs
+
+    prompt_text = format_writer_prompt(w, fa)
+    for v in sighting_verbs:
+        assert v in prompt_text
+    for bp in blocking_phrases:
+        assert bp in prompt_text
+    ug_render.verify_prompt_and_checker_requirements_aligned(prompt_text)
+
+    prose_pass = f"{setup_with_fixtures}\n\n{' '.join([refusal_1_pass_sent, *sj_sents[1:]])}"
+    assert check_rendered_prose(prose_pass, w, focal_agent=fa) == ()
+
+    # Mandatory refusal (a): unoccluded event whose sentence contains blocking language
+    for bad_phrase in ("blocked", "could not see", "hidden behind", "obscured"):
+        sent_a = f"In the bindery room, Eva observed the index reel in the linen bin ({bad_phrase})."
+        assert not _sentence_matches_event(sent_a, ev_1, w.noise_threshold, world=w), (
+            f"Unoccluded see must reject blocking phrase {bad_phrase!r}"
+        )
+        with pytest.raises(RenderCheckError) as exc_a:
+            check_rendered_prose(
+                f"{setup_with_fixtures}\n\n{' '.join([sent_a, *sj_sents[1:]])}",
+                w,
+                focal_agent=fa,
+            )
+        assert exc_a.value.check_id == "c_fidelity_missing_event"
+
+    # Mandatory refusal (b): occluded event whose sentence lacks 'blocked' or names no occluder
+    ev_17 = w.events[16]
+    assert ev_17.kind == "see" and ev_17.occluded and ev_17.occluder == "rolling pillar"
+    ev_29 = w.events[28]
+    assert ev_29.kind == "see" and ev_29.occluded and ev_29.occluder == "rolling pillar"
+    sent_b_no_blocked = "In the sorting room, from the far-side alcove, Dan looked toward the iron safe behind the rolling pillar."
+    sent_b_no_occluder = "In the sorting room, from the far-side alcove, Dan looked toward the iron safe, but his view was blocked."
+    for sent_b in (sent_b_no_blocked, sent_b_no_occluder):
+        assert not _sentence_matches_event(sent_b, ev_17, w.noise_threshold, world=w)
+        assert not _sentence_matches_event(sent_b, ev_29, w.noise_threshold, world=w)
+        sents_b = list(sj_sents)
+        sents_b[28] = sent_b
+        with pytest.raises(RenderCheckError) as exc_b:
+            check_rendered_prose(f"{setup_with_fixtures}\n\n{' '.join(sents_b)}", w, focal_agent=fa)
+        assert exc_b.value.check_id == "c_fidelity_missing_event"
+
+    # Mandatory refusal (c): sighting in the wrong room
+    sent_c = "Eva observed the index reel in the linen bin in the sorting room."
+    assert not _sentence_matches_event(sent_c, ev_1, w.noise_threshold, world=w)
+    with pytest.raises(RenderCheckError) as exc_c:
+        check_rendered_prose(
+            f"{setup_with_fixtures}\n\n{' '.join([sent_c, *sj_sents[1:]])}",
+            w,
+            focal_agent=fa,
+        )
+    assert exc_c.value.check_id == "c_fidelity_missing_event"
+
+    # Mandatory refusal (d): sighting of the wrong object
+    sent_d = "Eva observed the brass ledger in the linen bin in the bindery room."
+    assert not _sentence_matches_event(sent_d, ev_1, w.noise_threshold, world=w)
+    with pytest.raises(RenderCheckError) as exc_d:
+        check_rendered_prose(
+            f"{setup_with_fixtures}\n\n{' '.join([sent_d, *sj_sents[1:]])}",
+            w,
+            focal_agent=fa,
+        )
+    assert exc_d.value.check_id == "c_fidelity_missing_event"
+
+    # Mandatory refusal (e): sighting at the wrong container
+    sent_e = "Eva observed the index reel in the copper rack in the bindery room."
+    assert not _sentence_matches_event(sent_e, ev_1, w.noise_threshold, world=w)
+    with pytest.raises(RenderCheckError) as exc_e:
+        check_rendered_prose(
+            f"{setup_with_fixtures}\n\n{' '.join([sent_e, *sj_sents[1:]])}",
+            w,
+            focal_agent=fa,
+        )
+    assert exc_e.value.check_id == "c_fidelity_missing_event"
+
+
+def test_48_setup_checklist_order_in_prompt_and_content_not_order_in_checker() -> None:
+    """Test 48 (Card sq Req 3):
+    - Prompt states the setup checklist order:
+      rooms -> containers per room -> fixtures per room -> occluders -> doorways -> starting rooms -> goals -> stake -> belief rule -> hearing threshold.
+    - The check tests content, not order: a setup with everything present in another order passes;
+      a setup missing any room's containers or fixtures fails, naming what's missing.
+    """
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]  # Eva
+    prompt_str = format_writer_prompt(w, fa)
+
+    expected_order_str = (
+        "rooms -> containers per room -> fixtures per room -> occluders -> doorways -> "
+        "starting rooms -> goals -> stake -> belief rule -> hearing threshold"
+    )
+    assert expected_order_str in prompt_str
+
+    _, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    events_para = " ".join(sj_sents)
+
+    # 1. Setup with everything present in a completely different order (hearing threshold -> belief rule -> stake -> goals -> starting rooms -> doorways -> occluders -> fixtures -> containers -> rooms) passes:
+    reordered_setup = (
+        "The doorway hearing threshold is 50 dB, so speech at or above 50 dB carries across one doorway while quieter speech stays in the room. "
+        "Each agent assumes an object remains where that agent last saw it in open view or heard a witness state it was placed, and assumes another agent looks where they last saw or communicated that agent perceiving it. "
+        "Gia is off-site and depends on the location of the brass ledger for tomorrow's courier handoff. "
+        "Eva plans to complete the quarterly audit packet, Dan plans to verify the municipal deed transfer, and Cara plans to catalog the incoming charter folio. "
+        "Eva, Dan, and Cara begin in the bindery room while Gia is absent. "
+        "Doorways link the vault room to the reading room, the reading room to the bindery room, and the bindery room to the sorting room. "
+        "Each room has a container bay and a far-side alcove separated by an occluder that blocks sight from the far-side alcove while the container bay sees containers in open view: "
+        "a frosted partition in the vault room, a tall bookstack in the reading room, a canvas screen in the bindery room, and a rolling pillar in the sorting room. "
+        "Fixtures are a wall barometer in the vault room, a wall clock in the reading room, a humidity dial in the bindery room, and a ventilation grille in the sorting room. "
+        "Containers are an oak drawer and steel cabinet in the vault room, a slate tray and cedar shelf in the reading room, a linen bin and copper rack in the bindery room, and a maple cubby and iron safe in the sorting room."
+    )
+    assert check_rendered_prose(f"{reordered_setup}\n\n{events_para}", w, focal_agent=fa) == ()
+
+    # 2. Setup missing any room's containers fails with c_fidelity_containers, naming the missing container(s) and room:
+    missing_containers_setup = reordered_setup.replace(
+        "an oak drawer and steel cabinet in the vault room, ",
+        "",
+    )
+    with pytest.raises(RenderCheckError) as exc_cont:
+        check_rendered_prose(f"{missing_containers_setup}\n\n{events_para}", w, focal_agent=fa)
+    assert exc_cont.value.check_id == "c_fidelity_containers"
+    assert "oak drawer" in str(exc_cont.value)
+    assert "steel cabinet" in str(exc_cont.value)
+    assert "vault room" in str(exc_cont.value)
+
+    # 3. Setup missing any room's fixture fails with c_fidelity_fixtures, naming the missing fixture and room:
+    missing_fixture_setup = reordered_setup.replace(
+        "a humidity dial in the bindery room, ",
+        "",
+    )
+    with pytest.raises(RenderCheckError) as exc_fix:
+        check_rendered_prose(f"{missing_fixture_setup}\n\n{events_para}", w, focal_agent=fa)
+    assert exc_fix.value.check_id == "c_fidelity_fixtures"
+    assert "humidity dial" in str(exc_fix.value)
+    assert "bindery room" in str(exc_fix.value)
+
+
+def test_49_max_retries_1_records_refusal_and_saves_both_texts(tmp_path: Path) -> None:
+    """Test 49 (Card sq Req 4):
+    `--max-retries 1`: a retry is recorded with the first attempt's refusal kept, and both texts are saved
+    in `sealed_store/responses.sealed.jsonl`.
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+    )
+
+    configs_1 = make_balanced_configs(1, base_seed=20261030)
+    w0 = generate_world(configs_1[0])
+    passing_r0 = render_world_template(w0, w0.agents[0])
+    passing_r1 = render_world_template(w0, w0.agents[1])
+    # Attempt 0 for r1 omits containers in vault room -> fails with c_fidelity_containers
+    failing_r1_attempt0 = passing_r1.replace("contains the oak drawer and the steel cabinet", "has storage")
+
+    call_counter = 0
+
+    def _retry_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal call_counter
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            idx = call_counter
+            call_counter += 1
+            if idx == 0:
+                txt = passing_r0
+            elif idx == 1:
+                txt = failing_r1_attempt0
+            else:
+                txt = passing_r1
+            return {
+                "message": {"role": "assistant", "content": txt, "thinking": f"think_{idx}"},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3000,
+                "eval_count": 780,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_dir = tmp_path / "sq_max_retries_1"
+    summary = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        max_retries=1,
+        grant_id="test-grant-sq-retry",
+        http_transport=_retry_transport,
+        start_owned_server=False,
+    )
+    assert summary["max_retries"] == 1
+    assert summary["scenarios_kept"] == 1
+    assert summary["renderings_kept"] == 2
+    assert summary["calls_kept"] == 2
+    assert summary["calls_refused"] == 1
+    assert summary["refusals_by_check_id"] == {"c_fidelity_containers": 1}
+
+    # Check generations.jsonl keeps the first attempt's refusal and records the retry attempt:
+    gen_rows = [
+        json.loads(line)
+        for line in (out_dir / "generations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(gen_rows) == 3
+    assert gen_rows[1]["rendering_index"] == 1 and gen_rows[1]["attempt"] == 0
+    assert gen_rows[1]["checks_passed"] is False
+    assert any("c_fidelity_containers" in r for r in gen_rows[1]["refusal_reasons"])
+    assert gen_rows[2]["rendering_index"] == 1 and gen_rows[2]["attempt"] == 1
+    assert gen_rows[2]["checks_passed"] is True
+    assert gen_rows[2]["refusal_reasons"] == []
+
+    # Check both attempt 0 and attempt 1 texts for r1 are saved in sealed_store/responses.sealed.jsonl:
+    resp_rows = [
+        json.loads(line)
+        for line in (out_dir / "sealed_store" / "responses.sealed.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(resp_rows) == 3
+    r1_saved = [r for r in resp_rows if r["rendering_index"] == 1]
+    assert len(r1_saved) == 2
+    assert r1_saved[0]["attempt"] == 0 and r1_saved[0]["response_text"] == failing_r1_attempt0
+    assert r1_saved[1]["attempt"] == 1 and r1_saved[1]["response_text"] == passing_r1
+
+    # Verify CLI --max-retries 1 parses and passes max_retries=1 to build_and_probe_dataset:
+    import udlab_generator.cli as ug_cli
+    orig_build = ug_cli.build_and_probe_dataset
+    call_counter = 0
+    out_cli_retry = tmp_path / "sq_max_retries_1_cli"
+    ug_cli.build_and_probe_dataset = lambda **kw: orig_build(
+        **{**kw, "http_transport": _retry_transport, "start_owned_server": False}
+    )
+    try:
+        rc_retry = cli_main(
+            [
+                "--write",
+                "--writer",
+                "ollama",
+                "--count",
+                "1",
+                "--seed",
+                "20261030",
+                "--max-retries",
+                "1",
+                "--out-dir",
+                str(out_cli_retry),
+                "--grant-id",
+                "test-grant-sq-retry-cli",
+            ]
+        )
+    finally:
+        ug_cli.build_and_probe_dataset = orig_build
+    assert rc_retry == 0
+    cli_summary = json.loads((out_cli_retry / "build_summary.json").read_text(encoding="utf-8"))
+    assert cli_summary["max_retries"] == 1
+    assert cli_summary["scenarios_kept"] == 1
+    assert cli_summary["calls_kept"] == 2
+    assert cli_summary["calls_refused"] == 1
+    cli_resp_rows = [
+        json.loads(line)
+        for line in (out_cli_retry / "sealed_store" / "responses.sealed.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(cli_resp_rows) == 3
+    assert [r["response_text"] for r in cli_resp_rows if r["rendering_index"] == 1] == [
+        failing_r1_attempt0,
+        passing_r1,
+    ]
+
 
 
 
