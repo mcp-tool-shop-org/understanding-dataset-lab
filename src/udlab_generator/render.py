@@ -1696,8 +1696,11 @@ def _sentence_states_non_arrival_action(
 ) -> bool:
     """Return True if `s_low` states an action other than arriving or entering, by any party: a sighting, a
     spoken line (`say` verb or a `<n> dB` level), a message, or a `move` verb applied to a named thing
-    (object, container, occluder, fixture, note item, side mechanism, or station). Such a sentence is never
-    an `enter` sentence, whoever its subject is, so an `enter` event can never consume it."""
+    (object, container, occluder, fixture, note item, side mechanism, or station). "Applied to" means the
+    thing is the verb's object (`moved the <thing>`) or its source (`stepped from the <station>`); a thing
+    named elsewhere in an arrival sentence (`stepped into <room> past the <occluder>`) does not count.
+    Such a sentence is never an `enter` sentence, whoever its subject is, so an `enter` event can never
+    consume it."""
     if re.search(r"\b\d+\s*db\b", s_low):
         return True
     named_things: set[str] = {CONTAINER_BAY_STATION.lower(), FAR_SIDE_ALCOVE_STATION.lower()}
@@ -1709,7 +1712,14 @@ def _sentence_states_non_arrival_action(
         dom = next((d for d in DOMAINS if d.name == world.domain_name), None)
         if dom is not None:
             named_things.update(x.lower() for x in (dom.note_item, dom.side_mechanism))
-    names_a_thing = any(thing in s_low for thing in named_things)
+    move_verb_alt = "|".join(re.escape(v) for v in _ACTION_VERBS_BY_KIND["move"])
+    thing_alt = "|".join(re.escape(t) for t in sorted(named_things, key=len, reverse=True))
+    move_verb_applied_to_thing = bool(
+        re.search(
+            rf"\b(?:{move_verb_alt})\s+(?:(?:from|out of)\s+)?(?:(?:the|a|an|his|her|their|its)\s+)?(?:{thing_alt})\b",
+            s_low,
+        )
+    )
     for party in all_parties:
         if _actor_precedes_verb_as_subject(s_low, party, SIGHTING_VERBS, all_parties):
             return True
@@ -1717,7 +1727,7 @@ def _sentence_states_non_arrival_action(
             return True
         if _actor_precedes_verb_as_subject(s_low, party, _ACTION_VERBS_BY_KIND["message"], all_parties):
             return True
-        if names_a_thing and _actor_precedes_verb_as_subject(
+        if move_verb_applied_to_thing and _actor_precedes_verb_as_subject(
             s_low, party, _ACTION_VERBS_BY_KIND["move"], all_parties
         ):
             return True

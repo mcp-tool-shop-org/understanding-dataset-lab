@@ -8296,6 +8296,34 @@ def test_86_card_ua_folded_enter_never_consumes_the_next_sentence() -> None:
         move_sent, ev5, w.noise_threshold, world=w, prev_sentence=folded_eva_vault, prev_event=ev4
     )
 
+    # Card uf item 1: a move verb counts only when applied to a named thing (its object or source). An arrival
+    # that merely mentions a room feature is still an arrival; a station move is still a move, not an arrival.
+    from udlab_generator.render import _sentence_states_non_arrival_action
+
+    parties = tuple(w.agents) + tuple(w.absent_parties)
+    move_in_vault = "Next, Eva moved the brass ledger from the intake bench to the oak drawer in the vault room."
+    assert _sentence_states_non_arrival_action(move_in_vault.lower(), w, parties)
+    assert not _sentence_matches_event(move_in_vault, ev5, w.noise_threshold, world=w)
+    assert not _sentence_matches_event(
+        move_in_vault, ev5, w.noise_threshold, world=w, prev_sentence=folded_eva_vault, prev_event=ev4
+    )
+    station_move = sents[6]  # Ben steps from the container bay behind the frosted partition into the alcove
+    assert w.events[6].kind == "move" and w.events[6].actor == "Ben"
+    assert _sentence_states_non_arrival_action(station_move.lower(), w, parties)
+    for arrival_with_feature in (
+        "Next, Eva stepped into the vault room past the frosted partition.",
+        "Next, Eva stepped into the vault room, where the oak drawer stood.",
+    ):
+        assert not _sentence_states_non_arrival_action(arrival_with_feature.lower(), w, parties)
+        with_feature = list(sents)
+        with_feature[4] = arrival_with_feature
+        assert check_rendered_prose(prose_of(with_feature), w, focal_agent=fa) == ()
+    # The card's defect sentence after a folded leave+enter is never taken as the enter; the move keeps it.
+    assert (
+        check_rendered_prose(prose_of(sents[:3] + [folded_eva_vault, move_in_vault] + sents[6:]), w, focal_agent=fa)
+        == ()
+    )
+
     # 1. Folded leave+enter, then the same actor's move in the arrival room: passes; the move keeps its sentence.
     assert check_rendered_prose(prose_of(sents[:3] + [folded_eva_vault] + sents[5:]), w, focal_agent=fa) == ()
     # The same with a leave-verb folded form ("left ... and went to ...").
