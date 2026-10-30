@@ -12,7 +12,11 @@ import random
 import secrets
 from typing import Any
 
-from udlab_generator.keys import build_public_pressure_probe_template, build_pressure_probe_turn2
+from udlab_generator.keys import (
+    build_pressure_probe_turn2,
+    build_public_pressure_probe_map,
+    build_public_pressure_probe_template,
+)
 from udlab_generator.render import RenderedScenario
 
 FORBIDDEN_PUBLIC_FIELDS: frozenset[str] = frozenset(
@@ -174,27 +178,44 @@ def check_not_in_key_order(
                 "Key-order leak detected: items are in unshuffled sequential scenario_id order."
             )
 
-        # 5. Check binary key sequences across Pass-1 bundles for contiguous grouping or periodic alternation.
-        for target_qtype in ("P", "K"):
+        # 5. Check key sequences across Pass-1 bundles for ALL question types (`P, K, B1, B2, X, U, S, D`)
+        # to catch contiguous grouping, sorted key ordering, or periodic alternation.
+        for target_qtype in ("P", "K", "B1", "B2", "X", "U", "S", "D"):
             seq: list[str] = []
+            asym_seq: list[str] = []
             for r in pass1_rows:
                 for q in r.get("questions", []):
                     if q.get("question_type") == target_qtype:
-                        seq.append(str(q.get("key", "")))
+                        raw_k = q.get("key", "")
+                        seq.append(
+                            json.dumps(raw_k, sort_keys=True)
+                            if isinstance(raw_k, list)
+                            else str(raw_k)
+                        )
+                        if "is_ego_asymmetric" in q:
+                            asym_seq.append("1" if q.get("is_ego_asymmetric") else "0")
                         break
-            if len(seq) >= 8 and len(set(seq)) >= 2:
-                transitions = sum(1 for i in range(1, len(seq)) if seq[i] != seq[i - 1])
-                if transitions <= 2:
-                    raise SealingError(
-                        f"Key-order leak detected: '{target_qtype}' keys are grouped contiguously ({transitions} transitions)."
+            for seq_label, candidate_seq in (("raw", seq), ("asymmetry", asym_seq)):
+                distinct_vals = set(candidate_seq)
+                if len(candidate_seq) >= 8 and len(distinct_vals) >= 2:
+                    transitions = sum(
+                        1 for i in range(1, len(candidate_seq)) if candidate_seq[i] != candidate_seq[i - 1]
                     )
-                half = len(seq) // 2
-                if len(seq) == 2 * half and (
-                    seq == ["yes", "no"] * half or seq == ["no", "yes"] * half
-                ):
-                    raise SealingError(
-                        f"Key-order leak detected: '{target_qtype}' keys follow a strict periodic alternating sequence."
-                    )
+                    if len(distinct_vals) <= len(candidate_seq) // 2 and transitions <= max(2, len(distinct_vals)):
+                        raise SealingError(
+                            f"Key-order leak detected: '{target_qtype}' {seq_label} keys are grouped contiguously ({transitions} transitions)."
+                        )
+                    if candidate_seq == sorted(candidate_seq) or candidate_seq == sorted(candidate_seq, reverse=True):
+                        raise SealingError(
+                            f"Key-order leak detected: '{target_qtype}' {seq_label} keys are sorted in monotonic key order."
+                        )
+                    for period in (2, 4):
+                        if len(candidate_seq) >= 2 * period and len(set(candidate_seq[:period])) >= 2:
+                            tiled = (candidate_seq[:period] * ((len(candidate_seq) // period) + 1))[: len(candidate_seq)]
+                            if candidate_seq == tiled:
+                                raise SealingError(
+                                    f"Key-order leak detected: '{target_qtype}' {seq_label} keys follow a strict period-{period} alternating sequence."
+                                )
 
 
 def _render_public_from_sealed(
@@ -210,10 +231,12 @@ def _render_public_from_sealed(
         for q in s_row["questions"]:
             qid = str(q["question_id"])
             qtext = str(q["question_text"])
+            cand_turn2_map = dict(q.get("pressure_probe_turn2_by_candidate", {}))
             pub_questions.append(
                 {
                     "question_id": qid,
                     "question_text": qtext,
+                    "pressure_probe_turn2_by_candidate": cand_turn2_map,
                     "pressure_probe_turn2_template": build_public_pressure_probe_template(qid, qtext),
                 }
             )
@@ -313,6 +336,9 @@ def write_sealed_dataset(
                     "pressure_lure_answer": qk.pressure_lure_answer,
                     "pressure_probe_turn2": build_pressure_probe_turn2(
                         qid, qk.question_text, qk.pressure_lure_answer
+                    ),
+                    "pressure_probe_turn2_by_candidate": build_public_pressure_probe_map(
+                        qid, qk.question_text, qk.candidate_lures
                     ),
                 }
             )

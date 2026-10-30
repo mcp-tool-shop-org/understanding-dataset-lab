@@ -7,3 +7,8 @@ dist/
 build/
 *.egg-info/
 artifacts/
+**/sealed_store/
+**/*.sealed.json
+**/*.sealed.jsonl
+.private_seed*
+*.secret

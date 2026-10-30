@@ -9,27 +9,211 @@ import math
 import re
 from typing import Any
 
+from udlab_generator.world import DOMAINS
+
 WORD_RE = re.compile(r"[a-z0-9']+", re.IGNORECASE)
 VERB_TOKENS: frozenset[str] = frozenset(
     {
         "moved",
+        "moves",
+        "move",
+        "moving",
+        "placed",
+        "places",
+        "place",
+        "placing",
+        "put",
+        "puts",
+        "putting",
+        "shifted",
+        "shifts",
+        "transferred",
+        "transfers",
+        "carried",
+        "carries",
+        "stored",
+        "stores",
+        "set",
+        "sets",
         "walked",
+        "walks",
+        "walk",
+        "walking",
+        "stepped",
+        "steps",
+        "entered",
+        "enters",
+        "enter",
+        "entering",
+        "arrived",
+        "arrives",
+        "went",
+        "goes",
+        "returned",
+        "returns",
         "exited",
+        "exits",
+        "exit",
+        "exiting",
+        "left",
+        "leaves",
+        "leaving",
+        "departed",
+        "departs",
         "observed",
+        "observes",
+        "observe",
+        "observing",
+        "saw",
+        "sees",
+        "seen",
         "looked",
+        "looks",
+        "look",
+        "looking",
+        "spotted",
+        "spots",
+        "noticed",
+        "notices",
+        "watched",
+        "watches",
+        "inspected",
+        "inspects",
+        "checked",
+        "checks",
+        "viewed",
+        "views",
         "said",
+        "says",
+        "say",
+        "saying",
+        "stated",
+        "states",
+        "told",
+        "tells",
+        "spoke",
+        "speaks",
+        "announced",
+        "announces",
+        "mentioned",
+        "mentions",
+        "claimed",
+        "claims",
+        "reported",
+        "reports",
+        "uttered",
+        "utters",
         "sent",
+        "sends",
+        "send",
+        "sending",
+        "messaged",
+        "messages",
+        "texted",
+        "texts",
+        "notified",
+        "notifies",
+        "transmitted",
+        "transmits",
+        "wrote",
+        "writes",
         "plans",
+        "planned",
+        "plan",
+        "planning",
+        "intends",
+        "intended",
+        "aims",
+        "aimed",
+        "needs",
+        "needed",
         "depends",
+        "depended",
+        "depend",
+        "depending",
+        "relies",
+        "relied",
+        "requires",
+        "required",
         "adjusted",
+        "adjusts",
+        "adjust",
+        "adjusting",
+        "turned",
+        "turns",
+        "pulled",
+        "pulls",
         "starts",
+        "started",
+        "start",
+        "starting",
+        "begins",
+        "began",
+        "remains",
+        "remained",
+        "stays",
+        "stayed",
+        "blocked",
+        "blocks",
+        "heard",
+        "hears",
     }
 )
+
+DOMAIN_ENTITY_TOKENS: frozenset[str] = frozenset(
+    tok
+    for d in DOMAINS
+    for phrase in (
+        *d.rooms,
+        *d.objects,
+        *d.occluders,
+        *d.fixtures,
+        d.note_item,
+        d.side_mechanism,
+        *(c for pair in d.containers for c in pair),
+    )
+    for tok in WORD_RE.findall(phrase.lower())
+    if tok not in {"room", "hall", "bay", "vault", "loft", "annex", "chamber", "gallery", "workshop", "alcove", "cage", "locker"}
+)
+
+
+def _is_writer_agnostic_verb(token: str) -> bool:
+    """Return True if `token` is in the action/communication/state verb lexicon or carries verb morphology."""
+    tok = token.lower()
+    if tok in DOMAIN_ENTITY_TOKENS:
+        return False
+    if tok in VERB_TOKENS:
+        return True
+    if len(tok) <= 4:
+        return False
+    return tok.endswith(("ed", "ing")) and tok not in {
+        "frosted",
+        "slatted",
+        "bonded",
+        "galvanized",
+        "restored",
+        "unsigned",
+        "unmarked",
+        "heading",
+        "reading",
+        "sorting",
+        "potting",
+        "drying",
+        "weighing",
+        "framing",
+        "gilding",
+        "switching",
+        "following",
+        "incoming",
+        "establishing",
+        "adjusting",
+        "placing",
+    }
 
 
 @dataclass(frozen=True)
 class ProbeItemResult:
-    """Result for a single shortcut probe."""
+    """Result for a single shortcut probe, including 95% confidence intervals."""
 
     probe_id: str
     description: str
@@ -39,6 +223,10 @@ class ProbeItemResult:
     margin_over_base: float
     max_allowed_margin: float
     passed: bool
+    ci95_low: float = 0.0
+    ci95_high: float = 0.0
+    cluster_ci95_low: float = 0.0
+    cluster_ci95_high: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -243,7 +431,26 @@ def _extract_last_mentioned_location(prose: str, candidate_locs: Sequence[str]) 
 
 
 def _sentence_split(prose: str) -> list[str]:
-    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", prose) if s.strip()]
+    return [s.strip() for s in re.split(r'(?<=[.!?])["\']?\s+', prose) if s.strip()]
+
+
+def _is_setup_or_stake_sentence(sentence: str) -> bool:
+    """Return True if `sentence` is an initial world/goal/stake setup sentence rather than a narrative event."""
+    s_low = sentence.lower()
+    if any(
+        marker in s_low
+        for marker in (
+            "depends on the location",
+            "depends on the baseline",
+            "is off-site and",
+            "are absent off-site",
+            "is absent off-site",
+            "stated goals:",
+            "doorways link the rooms",
+        )
+    ):
+        return True
+    return False
 
 
 def _agent_event_distance_features(
@@ -251,7 +458,7 @@ def _agent_event_distance_features(
     agent_name: str,
     object_name: str,
 ) -> tuple[tuple[float, ...], list[str]]:
-    """Compute name-to-event sentence/token distance and local n-grams around `agent_name`."""
+    """Compute writer-agnostic name-to-event sentence/token distance and local n-grams around `agent_name`."""
     sentences = _sentence_split(prose)
     agent_low = agent_name.lower()
     obj_low = object_name.lower()
@@ -260,7 +467,7 @@ def _agent_event_distance_features(
     obj_sent_indices = [
         i
         for i, s in enumerate(sentences)
-        if obj_low in s.lower() and ("moved" in s.lower() or "said:" in s.lower() or "stored" in s.lower())
+        if obj_low in s.lower() and not _is_setup_or_stake_sentence(s)
     ]
     if not obj_sent_indices:
         obj_sent_indices = [i for i, s in enumerate(sentences) if obj_low in s.lower()]
@@ -283,18 +490,38 @@ def _agent_event_distance_features(
     else:
         min_tok_dist = float(len(tokens))
 
-    # Extract surface n-grams in sentences mentioning `agent_name` (excluding the specific random room name
-    # or including all local context tokens).
+    # Extract surface n-grams in sentences mentioning `agent_name`, normalizing random domain
+    # entity/room/fixture nouns to `<ENTITY>` so syntax/framing cues are probed without
+    # overfitting finite-sample room-name permutations.
     local_tokens: list[str] = []
     for idx in agent_sent_indices:
         for tok in _tokenize(sentences[idx]):
             if tok == agent_low:
                 local_tokens.append("<AGENT>")
+            elif tok in DOMAIN_ENTITY_TOKENS:
+                local_tokens.append("<ENTITY>")
             else:
                 local_tokens.append(tok)
 
     num_feats = (min_sent_dist, min_tok_dist, co_occur, float(len(agent_sent_indices)))
     return num_feats, _ngrams(local_tokens, max_n=2)
+
+
+def _wilson_ci95(p_hat: float, n: int) -> tuple[float, float]:
+    """Compute the 95% Wilson score interval for proportion `p_hat` over `n` samples."""
+    if n <= 0:
+        return 0.0, 1.0
+    z = 1.959963984540054
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = (p_hat + z2 / (2.0 * n)) / denom
+    half_width = (z / denom) * math.sqrt(max(0.0, p_hat * (1.0 - p_hat) / n + z2 / (4.0 * n * n)))
+    return round(max(0.0, center - half_width), 4), round(min(1.0, center + half_width), 4)
+
+
+def _cluster_ci95(p_hat: float, n_clusters: int) -> tuple[float, float]:
+    """Compute the 95% scenario-clustered interval using `n_clusters` scenarios as the sampling unit."""
+    return _wilson_ci95(p_hat, max(n_clusters, 1))
 
 
 def run_shortcut_probe(
@@ -306,6 +533,7 @@ def run_shortcut_probe(
         raise ValueError("sealed_rows must not be empty")
 
     scenario_ids = sorted({str(r["scenario_id"]) for r in sealed_rows})
+    num_scenarios = len(scenario_ids)
 
     # Collect per-type samples across all rows.
     # (a) Question-only classifier on matched `U` vs settled `S` stems (`Who ...?` / `Why ...?`).
@@ -313,23 +541,33 @@ def run_shortcut_probe(
     who_u_flags: list[int] = []
     why_u_flags: list[int] = []
 
-    # (b) First-mentioned and last-mentioned location heuristics on B1 and B2.
+    # (b) First/last-mentioned location heuristics, mention-count heuristics, & OOF classifiers on B1 and B2.
     b1_true_flags: list[int] = []
     b2_true_flags: list[int] = []
     b1_first_hits = 0
     b1_last_hits = 0
+    b1_high_cnt_hits = 0
+    b1_low_cnt_hits = 0
+    b1_eq_cnt_hits = 0
+    b1_neq_cnt_hits = 0
     b1_total = 0
     b2_first_hits = 0
     b2_last_hits = 0
+    b2_high_cnt_hits = 0
+    b2_low_cnt_hits = 0
+    b2_eq_cnt_hits = 0
+    b2_neq_cnt_hits = 0
     b2_total = 0
-    probe_b1_num: list[tuple[str, tuple[float, ...], int]] = []
-    probe_b2_num: list[tuple[str, tuple[float, ...], int]] = []
+    probe_b1_num_true: list[tuple[str, tuple[float, ...], int]] = []
+    probe_b1_num_loc: list[tuple[str, tuple[float, ...], int]] = []
+    probe_b2_num_true: list[tuple[str, tuple[float, ...], int]] = []
+    probe_b2_num_loc: list[tuple[str, tuple[float, ...], int]] = []
 
-    # (c) Mention-count and verb-count heuristics on X.
+    # (c) Writer-agnostic mention-count and verb-count heuristics on X.
     x_unnotified_flags: list[int] = []
     probe_c_num: list[tuple[str, tuple[float, ...], int]] = []
 
-    # (d) Name-to-event sentence distance and n-grams on P and K.
+    # (d) Writer-agnostic name-to-event sentence distance and n-grams on P and K.
     p_yes_flags: list[int] = []
     k_yes_flags: list[int] = []
     probe_dp_num: list[tuple[str, tuple[float, ...], int]] = []
@@ -380,28 +618,76 @@ def run_shortcut_probe(
                     why_u_flags.append(1 if qtype == "U" else 0)
 
             elif qtype == "B1":
+                key_low = str(key_val).lower()
+                first_low = first_loc.lower()
+                last_low = last_loc.lower()
                 is_true_belief = 1 if str(key_val) == str(lure_val) else 0
+                is_first_loc = 1 if key_low == first_low else 0
                 b1_true_flags.append(is_true_belief)
-                if str(key_val).lower() == first_loc.lower():
+                if key_low == first_low:
                     b1_first_hits += 1
-                if str(key_val).lower() == last_loc.lower():
+                if key_low == last_low:
                     b1_last_hits += 1
+                first_count = float(prose.lower().count(first_low)) if first_low else 0.0
+                last_count = float(prose.lower().count(last_low)) if last_low else 0.0
+                high_loc = first_low if first_count > last_count else last_low
+                low_loc = first_low if first_count < last_count else last_low
+                if key_low == high_loc:
+                    b1_high_cnt_hits += 1
+                if key_low == low_loc:
+                    b1_low_cnt_hits += 1
+                eq_flag = 1 if first_count == last_count else 0
+                if eq_flag == is_true_belief:
+                    b1_eq_cnt_hits += 1
+                else:
+                    b1_neq_cnt_hits += 1
                 b1_total += 1
-                first_count = float(prose.lower().count(first_loc.lower())) if first_loc else 0.0
-                last_count = float(prose.lower().count(last_loc.lower())) if last_loc else 0.0
-                probe_b1_num.append((scen_id, (first_count, last_count, first_count - last_count), is_true_belief))
+                b_feats = (
+                    first_count,
+                    last_count,
+                    first_count - last_count,
+                    float(first_count > last_count),
+                    float(first_count < last_count),
+                    float(first_count == last_count),
+                )
+                probe_b1_num_true.append((scen_id, b_feats, is_true_belief))
+                probe_b1_num_loc.append((scen_id, b_feats, is_first_loc))
 
             elif qtype == "B2":
+                key_low = str(key_val).lower()
+                first_low = first_loc.lower()
+                last_low = last_loc.lower()
                 is_true_b2 = 1 if str(key_val) == str(lure_val) else 0
+                is_first_loc = 1 if key_low == first_low else 0
                 b2_true_flags.append(is_true_b2)
-                if str(key_val).lower() == first_loc.lower():
+                if key_low == first_low:
                     b2_first_hits += 1
-                if str(key_val).lower() == last_loc.lower():
+                if key_low == last_low:
                     b2_last_hits += 1
+                first_count = float(prose.lower().count(first_low)) if first_low else 0.0
+                last_count = float(prose.lower().count(last_low)) if last_low else 0.0
+                high_loc = first_low if first_count > last_count else last_low
+                low_loc = first_low if first_count < last_count else last_low
+                if key_low == high_loc:
+                    b2_high_cnt_hits += 1
+                if key_low == low_loc:
+                    b2_low_cnt_hits += 1
+                eq_flag = 1 if first_count == last_count else 0
+                if eq_flag == is_true_b2:
+                    b2_eq_cnt_hits += 1
+                else:
+                    b2_neq_cnt_hits += 1
                 b2_total += 1
-                first_count = float(prose.lower().count(first_loc.lower())) if first_loc else 0.0
-                last_count = float(prose.lower().count(last_loc.lower())) if last_loc else 0.0
-                probe_b2_num.append((scen_id, (first_count, last_count, first_count - last_count), is_true_b2))
+                b_feats = (
+                    first_count,
+                    last_count,
+                    first_count - last_count,
+                    float(first_count > last_count),
+                    float(first_count < last_count),
+                    float(first_count == last_count),
+                )
+                probe_b2_num_true.append((scen_id, b_feats, is_true_b2))
+                probe_b2_num_loc.append((scen_id, b_feats, is_first_loc))
 
             elif qtype == "X":
                 is_unnotified = 1 if str(key_val) != "none" else 0
@@ -411,7 +697,7 @@ def run_shortcut_probe(
                 mention_count = float(len(re.findall(rf"\b{re.escape(ag_low)}\b", prose.lower())))
                 ag_sents = [s for s in sentences if re.search(rf"\b{re.escape(ag_low)}\b", s.lower())]
                 verb_count = float(
-                    sum(1 for s in ag_sents for tok in _tokenize(s) if tok in VERB_TOKENS)
+                    sum(1 for s in ag_sents for tok in _tokenize(s) if _is_writer_agnostic_verb(tok))
                 )
                 sent_count = float(len(ag_sents))
                 probe_c_num.append((scen_id, (mention_count, verb_count, sent_count), is_unnotified))
@@ -438,21 +724,49 @@ def run_shortcut_probe(
     a_base = max(u_count, len(probe_a_samples) - u_count) / max(len(probe_a_samples), 1)
     a_oof = _oof_multinomial_nb(probe_a_samples)
 
-    # (b1) First/last location heuristic + OOF positional classifier on B1
+    # (b1) First/last location heuristic, mention-count heuristic, & OOF classifiers on B1
     b1_pos_count = sum(b1_true_flags)
     b1_base = max(b1_pos_count, len(b1_true_flags) - b1_pos_count) / max(len(b1_true_flags), 1)
     b1_first_acc = b1_first_hits / max(b1_total, 1)
     b1_last_acc = b1_last_hits / max(b1_total, 1)
-    b1_clf_acc = _oof_numeric_classifier(probe_b1_num)
-    b1_oof = max(b1_first_acc, b1_last_acc, b1_clf_acc)
+    b1_high_acc = b1_high_cnt_hits / max(b1_total, 1)
+    b1_low_acc = b1_low_cnt_hits / max(b1_total, 1)
+    b1_eq_acc = b1_eq_cnt_hits / max(b1_total, 1)
+    b1_neq_acc = b1_neq_cnt_hits / max(b1_total, 1)
+    b1_clf_true_acc = _oof_numeric_classifier(probe_b1_num_true)
+    b1_clf_loc_acc = _oof_numeric_classifier(probe_b1_num_loc)
+    b1_oof = max(
+        b1_first_acc,
+        b1_last_acc,
+        b1_high_acc,
+        b1_low_acc,
+        b1_eq_acc,
+        b1_neq_acc,
+        b1_clf_true_acc,
+        b1_clf_loc_acc,
+    )
 
-    # (b2) First/last location heuristic + OOF positional classifier on B2
+    # (b2) First/last location heuristic, mention-count heuristic, & OOF classifiers on B2
     b2_pos_count = sum(b2_true_flags)
     b2_base = max(b2_pos_count, len(b2_true_flags) - b2_pos_count) / max(len(b2_true_flags), 1)
     b2_first_acc = b2_first_hits / max(b2_total, 1)
     b2_last_acc = b2_last_hits / max(b2_total, 1)
-    b2_clf_acc = _oof_numeric_classifier(probe_b2_num)
-    b2_oof = max(b2_first_acc, b2_last_acc, b2_clf_acc)
+    b2_high_acc = b2_high_cnt_hits / max(b2_total, 1)
+    b2_low_acc = b2_low_cnt_hits / max(b2_total, 1)
+    b2_eq_acc = b2_eq_cnt_hits / max(b2_total, 1)
+    b2_neq_acc = b2_neq_cnt_hits / max(b2_total, 1)
+    b2_clf_true_acc = _oof_numeric_classifier(probe_b2_num_true)
+    b2_clf_loc_acc = _oof_numeric_classifier(probe_b2_num_loc)
+    b2_oof = max(
+        b2_first_acc,
+        b2_last_acc,
+        b2_high_acc,
+        b2_low_acc,
+        b2_eq_acc,
+        b2_neq_acc,
+        b2_clf_true_acc,
+        b2_clf_loc_acc,
+    )
 
     # (c) Mention-count and verb-count probe on X
     x_pos_count = sum(x_unnotified_flags)
@@ -480,6 +794,8 @@ def run_shortcut_probe(
 
     def _make_item(pid: str, desc: str, n_samp: int, base: float, oof: float) -> ProbeItemResult:
         margin = oof - base
+        ci_low, ci_high = _wilson_ci95(oof, n_samp)
+        cl_low, cl_high = _cluster_ci95(oof, num_scenarios)
         return ProbeItemResult(
             probe_id=pid,
             description=desc,
@@ -489,6 +805,10 @@ def run_shortcut_probe(
             margin_over_base=round(margin, 4),
             max_allowed_margin=max_margin,
             passed=(margin <= max_margin + 1e-9),
+            ci95_low=ci_low,
+            ci95_high=ci_high,
+            cluster_ci95_low=cl_low,
+            cluster_ci95_high=cl_high,
         )
 
     probe_items = (
@@ -502,14 +822,14 @@ def run_shortcut_probe(
         _make_item(
             "b1_location_heuristics_b1",
             "(b) First/last-mentioned location heuristics & OOF classifier on B1",
-            len(probe_b1_num),
+            len(probe_b1_num_true),
             b1_base,
             b1_oof,
         ),
         _make_item(
             "b2_location_heuristics_b2",
             "(b) First/last-mentioned location heuristics & OOF classifier on B2",
-            len(probe_b2_num),
+            len(probe_b2_num_true),
             b2_base,
             b2_oof,
         ),

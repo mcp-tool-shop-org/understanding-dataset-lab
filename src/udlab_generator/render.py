@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import re
@@ -236,7 +236,8 @@ def render_world_template(world: World, focal_agent: str) -> str:
         f"Following {focal_agent} through the {world.domain_name.replace('_', ' ')}: "
         f"{'; '.join(room_setup_strs)}. "
         f"Doorways link the rooms as follows: {', '.join(doorway_strs)}, and the doorway hearing threshold is {world.noise_threshold} dB. "
-        f"At the start, {', '.join(agent_pos_strs)}, while {', '.join(world.absent_parties)} "
+        f"At the start, {', '.join(agent_pos_strs)}. "
+        f"Meanwhile, {', '.join(world.absent_parties)} "
         f"{'is' if len(world.absent_parties) == 1 else 'are'} absent off-site. "
         f"Stated goals: {'; '.join(goal_strs)}. "
         f"Stakes: {' '.join(stake_strs)}"
@@ -274,23 +275,64 @@ class MockWriter:
         focal_0 = world.agents[0]
         focal_1 = world.agents[1]
 
-        # Compute keys once from the world and independently verify that computing keys
-        # for rendering 0 and rendering 1 yields identical `ScenarioKeys`.
-        keys_0 = compute_scenario_keys(world)
-        keys_1 = compute_scenario_keys(world)
-        if keys_0 != keys_1:
-            raise AssertionError("Perspective-flip invariance violated: keys differ between renderings.")
-
         render_fn = self._custom_renderer or render_world_template
         prose_0 = render_fn(world, focal_0)
         prose_1 = render_fn(world, focal_1)
 
-        # Both renderings must pass the banned-adverb render check.
+        # Both renderings must pass the banned-adverb render check and cover the complete event log.
         check_rendered_prose(prose_0)
         check_rendered_prose(prose_1)
+        for idx_label, prose_text in (("rendering 0", prose_0), ("rendering 1", prose_1)):
+            for ev in world.events:
+                if f"step {ev.step}" not in prose_text:
+                    raise RenderCheckError(
+                        f"Render check failed: incomplete event log in {idx_label} (missing step {ev.step})."
+                    )
 
         prompt_0 = format_writer_prompt(world, focal_0, self._prompt_template)
         prompt_1 = format_writer_prompt(world, focal_1, self._prompt_template)
+
+        # Verify perspective-flip invariance by reconstructing the event trace from each writer prompt
+        # and computing `ScenarioKeys` independently on both focalized representations.
+        def _world_from_prompt(prompt_str: str) -> World:
+            marker = "Complete Event Log:\n"
+            pos = prompt_str.find(marker)
+            if pos < 0:
+                return world
+            raw_after = prompt_str[pos + len(marker) :]
+            end_pos = raw_after.find("\n\nOUTPUT FORMAT:")
+            json_block = raw_after[:end_pos] if end_pos >= 0 else raw_after
+            parsed_list = json.loads(json_block)
+            step_by_num = {int(item["step"]): item for item in parsed_list}
+            if set(step_by_num.keys()) != {ev.step for ev in world.events}:
+                raise RenderCheckError("Writer prompt event log is incomplete.")
+            reconstructed_events = tuple(
+                replace(
+                    ev,
+                    kind=step_by_num[ev.step]["kind"],
+                    actor=step_by_num[ev.step]["actor"],
+                    room=step_by_num[ev.step]["room"],
+                    occluded=bool(step_by_num[ev.step]["occluded"]),
+                    noise_level=int(step_by_num[ev.step]["noise_level"]),
+                    is_bluff=bool(step_by_num[ev.step]["is_bluff"]),
+                    stated_reason=step_by_num[ev.step]["stated_reason"],
+                )
+                for ev in world.events
+            )
+            return replace(
+                world,
+                events=reconstructed_events,
+                unknowable_spec=replace(
+                    world.unknowable_spec,
+                    trace_a=reconstructed_events,
+                    trace_b=reconstructed_events,
+                ),
+            )
+
+        keys_0 = compute_scenario_keys(_world_from_prompt(prompt_0))
+        keys_1 = compute_scenario_keys(_world_from_prompt(prompt_1))
+        if keys_0 != keys_1:
+            raise AssertionError("Perspective-flip invariance violated: keys differ between renderings.")
 
         return (
             RenderedScenario(

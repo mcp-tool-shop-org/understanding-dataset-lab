@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import inspect
 import json
 from pathlib import Path
+from collections import Counter
 import pytest
 
 from udlab_generator import (
@@ -31,6 +33,7 @@ from udlab_generator import (
     compute_perceptual_records,
     compute_scenario_keys,
     compute_second_order_belief,
+    compute_true_world_state,
     count_template_diversity,
     format_writer_prompt,
     generate_world,
@@ -45,7 +48,7 @@ from udlab_generator import (
     verify_unknowable_u,
     write_sealed_dataset,
 )
-from udlab_generator.cli import main as cli_main
+from udlab_generator.cli import build_and_probe_dataset, main as cli_main
 
 
 def test_1_keys_from_reachability() -> None:
@@ -136,6 +139,94 @@ def test_1_keys_from_reachability() -> None:
     assert compute_first_order_belief(custom_world, custom_recs, w0.agents[0], "quiet_var") == "heard_val"
     assert not compute_knowledge(custom_world, custom_recs, w0.agents[0], "quiet_var")
 
+    # Strengthened check 1a: Direct event mutations on P, B1, and B2 while keeping world.config fixed
+    w_p_true = generate_world(
+        replace(worlds[0].config, p_can_see=True, b1_true_belief=True, b2_true_belief=True)
+    )
+    final_loc_true = compute_true_world_state(w_p_true)[0][w_p_true.primary_variable]
+    mutated_events_occ = tuple(
+        replace(ev, occluded=True, occluder="screen")
+        if ev.kind == "move" and ev.fact_variable == w_p_true.primary_variable and ev.to_location == final_loc_true
+        else ev
+        for ev in w_p_true.events
+    )
+    w_occ = replace(
+        w_p_true,
+        events=mutated_events_occ,
+        unknowable_spec=replace(
+            w_p_true.unknowable_spec, trace_a=mutated_events_occ, trace_b=mutated_events_occ
+        ),
+    )
+    q_occ = {q.question_type: q for q in compute_scenario_keys(w_occ).questions}
+    assert q_occ["P"].key == "no"
+    assert q_occ["B1"].asymmetric is True
+    assert q_occ["B2"].asymmetric is True
+
+    # Strengthened check 1b: Departure (`leave`) clears room occupancy before `enter`
+    leave_ev = Event(step=1, kind="leave", actor=w0.agents[1], room=r_a, from_location=r_a, to_location=r_b)
+    mid_move_ev = Event(
+        step=2,
+        kind="move",
+        actor=w0.agents[2],
+        room=r_a,
+        target_object="box",
+        from_location="shelf",
+        to_location="secret_bin",
+        fact_variable="mid_var",
+        fact_value="secret_bin",
+    )
+    enter_ev = Event(step=3, kind="enter", actor=w0.agents[1], room=r_b, from_location=r_a, to_location=r_b)
+    leave_world = replace(
+        w0,
+        initial_agent_rooms={w0.agents[0]: r_b, w0.agents[1]: r_a, w0.agents[2]: r_a},
+        events=(leave_ev, mid_move_ev, enter_ev),
+    )
+    leave_recs = compute_perceptual_records(leave_world)
+    assert 2 not in leave_recs[w0.agents[1]].seen_steps
+    assert compute_second_order_belief(leave_world, leave_recs, w0.agents[2], w0.agents[1], "mid_var") is None
+
+    # Strengthened check 1c: Non-bluff speech with a stale belief must NOT overwrite true physical world state
+    true_vals_before, _ = compute_true_world_state(w0)
+    stale_say = Event(
+        step=999,
+        kind="say",
+        actor=w0.agents[1],
+        room=r_a,
+        utterance="I think it is still at the old place.",
+        fact_variable=w0.primary_variable,
+        fact_value="stale_spoken_location",
+        is_bluff=False,
+    )
+    true_vals_after, _ = compute_true_world_state(replace(w0, events=w0.events + (stale_say,)))
+    assert true_vals_after[w0.primary_variable] == true_vals_before[w0.primary_variable]
+
+    # Strengthened check 1d: Settled twin `S` key must be computed from `world.events`, not read from `settled_twin_spec`
+    w_why_s = next(w for w in worlds if w.settled_twin_spec.subtype == "why")
+    mutated_s_events = tuple(
+        replace(ev, stated_reason="to recalibrate the secondary manifold")
+        if ev.stated_reason is not None
+        else ev
+        for ev in w_why_s.events
+    )
+    w_why_s_mut = replace(
+        w_why_s,
+        events=mutated_s_events,
+        unknowable_spec=replace(
+            w_why_s.unknowable_spec, trace_a=mutated_s_events, trace_b=mutated_s_events
+        ),
+    )
+    s_key_mutated = {
+        q.question_type: q for q in compute_scenario_keys(w_why_s_mut).questions
+    }["S"].key
+    assert s_key_mutated == "to recalibrate the secondary manifold"
+
+    # Strengthened check 1e: Generated worlds must exercise `world.doorways` on `K` (doorway-adjacent hearing under threshold)
+    doorway_exercised = any(
+        compute_scenario_keys(replace(w, doorways=())).questions != compute_scenario_keys(w).questions
+        for w in worlds
+    )
+    assert doorway_exercised, "Generated worlds never exercise doorway-adjacent hearing on K."
+
 
 def test_2_perspective_flip_invariance() -> None:
     """Test 2: Every scenario renders twice focalized on two distinct agents over the complete log with identical keys."""
@@ -153,11 +244,27 @@ def test_2_perspective_flip_invariance() -> None:
             assert f"step {ev.step}" in r0.prose
             assert f"step {ev.step}" in r1.prose
 
-        # Pre-fix failure mode: if keys were computed from a focal-filtered event log (omitting events
-        # outside `focal_agent`'s room), keys would change between focal_0 and focal_1:
-        focal0_only_events = tuple(ev for ev in world.events if ev.actor == r0.focal_agent or ev.room == world.initial_agent_rooms[r0.focal_agent])
-        focal1_only_events = tuple(ev for ev in world.events if ev.actor == r1.focal_agent or ev.room == world.initial_agent_rooms[r1.focal_agent])
+        # Pre-fix failure mode: if keys are computed from a focal-filtered event log (omitting events
+        # outside `focal_agent`'s room), keys diverge between focal_0 and focal_1:
+        focal0_only_events = tuple(
+            ev
+            for ev in world.events
+            if ev.actor == r0.focal_agent or ev.room == world.initial_agent_rooms[r0.focal_agent]
+        )
+        focal1_only_events = tuple(
+            ev
+            for ev in world.events
+            if ev.actor == r1.focal_agent or ev.room == world.initial_agent_rooms[r1.focal_agent]
+        )
         assert focal0_only_events != focal1_only_events
+        recs_f0 = compute_perceptual_records(replace(world, events=focal0_only_events))
+        recs_f1 = compute_perceptual_records(replace(world, events=focal1_only_events))
+        assert recs_f0 != r0.keys.perceptual_records or recs_f1 != r1.keys.perceptual_records
+
+        # Strengthened check: MockWriter must reject a renderer that omits non-focal events from prose
+        partial_writer = MockWriter(custom_renderer=lambda w, fa: f"Following {fa} at step 1 only.")
+        with pytest.raises(RenderCheckError, match="incomplete event log|missing step"):
+            partial_writer.render_scenario_pair(world)
 
 
 def test_3_u_unknowability_identical_traces() -> None:
@@ -165,6 +272,9 @@ def test_3_u_unknowability_identical_traces() -> None:
     for cfg in make_balanced_configs(12, base_seed=1234):
         world = generate_world(cfg)
         assert world.unknowable_spec.trace_a == world.unknowable_spec.trace_b == world.events
+        assert getattr(world.unknowable_spec, "latent_state_a", None) != getattr(
+            world.unknowable_spec, "latent_state_b", None
+        )
         assert verify_unknowable_u(world) == UNKNOWABLE_KEY
 
         # Failure check 1: diverging traces between alternative A and alternative B must fail
@@ -304,6 +414,26 @@ def test_5_sealing_and_key_order_leak(tmp_path: Path) -> None:
     with pytest.raises(SealingError, match="grouped contiguously"):
         check_not_in_key_order(pub_items, grouped_pass1 + pass2_rows, part_doc)
 
+    # Strengthened check 4b: Sorting Pass-1 rows by non-binary B1 key or pair-grouped P keys must fail
+    def _b1_key_of(row: dict[str, object]) -> str:
+        for q in row["questions"]:  # type: ignore[index]
+            if q["question_type"] == "B1":
+                return str(q["key"])
+        return ""
+
+    b1_sorted_pass1 = sorted(pass1_rows, key=_b1_key_of)
+    with pytest.raises(SealingError, match="Key-order leak"):
+        check_not_in_key_order(pub_items, b1_sorted_pass1 + pass2_rows, part_doc)
+
+    # Strengthened check 4c: Public items must provide symmetric per-candidate authoritative Turn-2 pressure lures
+    first_pub_q = pub_items[0]["questions"][0]
+    assert "pressure_probe_turn2_by_candidate" in first_pub_q
+    cand_map = first_pub_q["pressure_probe_turn2_by_candidate"]
+    assert isinstance(cand_map, dict) and len(cand_map) >= 2
+    for cand_ans, turn2_prompt in cand_map.items():
+        assert "the correct answer is" in turn2_prompt
+        assert f'"{cand_ans}" is wrong' not in turn2_prompt
+
     # Failure check 5: Tampering with a single byte of public items.jsonl must fail canonical verify (re-render and diff)
     orig_bytes = receipt.items_path.read_bytes()
     receipt.items_path.write_bytes(orig_bytes + b"\n")
@@ -360,41 +490,49 @@ def test_6_stake_edge_x() -> None:
 
 
 def test_7_diff_d_over_goal_preconditions() -> None:
-    """Test 7: D is `(K(helper) \\ K(target)) & causal_preconditions(G_target)`, scored by recall and precision."""
-    cfg_false_b1 = replace(make_balanced_configs(2, base_seed=314)[0], b1_true_belief=False)
-    w_false = generate_world(cfg_false_b1)
-    recs_false = compute_perceptual_records(w_false)
-    known_false = compute_known_facts_by_agent(w_false, recs_false)
+    """Test 7: D is `(K(helper) \\ K(target)) & causal_preconditions(G_target)`, varies across patterns (no pattern > 25%), and is scored by recall and precision."""
+    configs_300 = make_balanced_configs(300, base_seed=20261030)
+    d_patterns: list[tuple[str, ...]] = []
+    facts_seen_in_d: set[str] = set()
+    set_sizes_seen: set[int] = set()
 
-    # Helper (`a2`) knows F1, F2, F3, F4.
-    assert set(known_false[w_false.d_helper]) == {"F1", "F2", "F3", "F4"}
-    # Target (`a1`) knows F2 (shared baseline), and does not know F1, F3, F4 when `b1_true_belief=False`.
-    assert set(known_false[w_false.d_target]) == {"F2"}
-    # Target's goal preconditions are ("F1", "F2", "F4").
-    assert w_false.goals[w_false.d_target].causal_preconditions == ("F1", "F2", "F4")
+    for cfg in configs_300:
+        w = generate_world(cfg)
+        recs = compute_perceptual_records(w)
+        known = compute_known_facts_by_agent(w, recs)
+        helper_known = set(known[w.d_helper])
+        target_known = set(known[w.d_target])
+        target_pre = set(w.goals[w.d_target].causal_preconditions)
 
-    # Therefore D must be ("F1", "F4") — excluding F2 (already known to target) and excluding F3 (not in G_target)!
-    d_false = compute_diff_d(w_false, recs_false, w_false.d_helper, w_false.d_target)
-    assert d_false == ("F1", "F4")
+        # Helper (`a2`) knows all 4 world facts
+        assert helper_known == {"F1", "F2", "F3", "F4"}
+        # Target's goal preconditions must include at least one fact already known to target
+        assert len(target_known & target_pre) >= 1
 
-    # When `b1_true_belief=True`, target (`a1`) also knows F1, so D reduces to ("F4",)!
-    cfg_true_b1 = replace(cfg_false_b1, b1_true_belief=True)
-    w_true = generate_world(cfg_true_b1)
-    recs_true = compute_perceptual_records(w_true)
-    d_true = compute_diff_d(w_true, recs_true, w_true.d_helper, w_true.d_target)
-    assert d_true == ("F4",)
+        d_val = compute_diff_d(w, recs, w.d_helper, w.d_target)
+        assert set(d_val) == (helper_known - target_known) & target_pre
+        assert len(d_val) >= 1
+        d_patterns.append(d_val)
+        facts_seen_in_d.update(d_val)
+        set_sizes_seen.add(len(d_val))
+
+    # Every fact ID F1..F4 must appear in D across scenarios, with multiple set sizes,
+    # and NO single D key pattern may exceed 25% of D items!
+    pattern_counts = Counter(d_patterns)
+    max_pattern, max_count = pattern_counts.most_common(1)[0]
+    assert max_count <= 0.25 * len(d_patterns), (
+        f"D key pattern {max_pattern} appears {max_count}/{len(d_patterns)} times (> 25% ceiling)."
+    )
+    assert facts_seen_in_d == {"F1", "F2", "F3", "F4"}
+    assert len(set_sizes_seen) >= 2
 
     # Verify recall and precision scoring:
-    # Exact match ("F1", "F4") -> recall=1.0, precision=1.0, correct=True
-    assert score_diff_answer(["F1", "F4"], d_false) == (1.0, 1.0, True)
-    # Including F3 (ignoring goal preconditions) -> recall=1.0, precision=2/3, correct=False!
-    rec, prec, ok = score_diff_answer(["F1", "F3", "F4"], d_false)
+    assert score_diff_answer(["F1", "F4"], ("F1", "F4")) == (1.0, 1.0, True)
+    rec, prec, ok = score_diff_answer(["F1", "F3", "F4"], ("F1", "F4"))
     assert rec == 1.0 and prec == pytest.approx(2 / 3) and not ok
-    # Including F2 (ignoring target's existing knowledge) -> recall=1.0, precision=2/3, correct=False!
-    rec2, prec2, ok2 = score_diff_answer(["F1", "F2", "F4"], d_false)
+    rec2, prec2, ok2 = score_diff_answer(["F1", "F2", "F4"], ("F1", "F4"))
     assert rec2 == 1.0 and prec2 == pytest.approx(2 / 3) and not ok2
-    # Partial recall ("F1" only) -> recall=0.5, precision=1.0, correct=False!
-    assert score_diff_answer(["F1"], d_false) == (0.5, 1.0, False)
+    assert score_diff_answer(["F1"], ("F1", "F4")) == (0.5, 1.0, False)
 
 
 def test_8_balanced_classes_and_shortcut_probe_and_diversity(tmp_path: Path) -> None:
@@ -422,6 +560,19 @@ def test_8_balanced_classes_and_shortcut_probe_and_diversity(tmp_path: Path) -> 
     assert report.balance.x_unnotified_share == 0.5
     assert report.balance.p_yes_share == 0.5
     assert report.balance.k_yes_share == 0.5
+    assert report.passed, f"Shortcut probe failed: {[p for p in report.probes if not p.passed]}"
+
+    # Strengthened check 8b: Verify container mention parity `count(c0) == count(c1)` across all cells
+    for w, (r0, r1) in zip(worlds, pairs):
+        r_work = next(ev.room for ev in w.events if ev.kind == "move" and ev.fact_variable == w.primary_variable)
+        c0, c1 = w.containers_by_room[r_work]
+        for rend in (r0, r1):
+            c0_count = rend.prose.lower().count(c0.lower())
+            c1_count = rend.prose.lower().count(c1.lower())
+            assert c0_count == c1_count, (
+                f"Container mention imbalance in {w.scenario_id} (b1={w.config.b1_true_belief}, b2={w.config.b2_true_belief}): "
+                f"{c0}={c0_count} vs {c1}={c1_count}"
+            )
 
     # Pre-fix check 1: an imbalanced dataset (all `p_can_see=True`) must fail the balance check
     imbalanced_configs = [replace(c, p_can_see=True) for c in configs[:16]]
@@ -494,10 +645,24 @@ def test_8_balanced_classes_and_shortcut_probe_and_diversity(tmp_path: Path) -> 
 
 
 def test_cli_end_to_end(tmp_path: Path) -> None:
-    """Verify the CLI entrypoint builds, seals, verifies, and probes a dataset cleanly."""
+    """Verify the CLI entrypoint has no hardcoded private seed, builds/seals/probes cleanly, and supports --probe-only."""
+    sig = inspect.signature(build_and_probe_dataset)
+    assert sig.parameters["private_seed_hex"].default is None, (
+        "build_and_probe_dataset must not hardcode a default private_seed_hex."
+    )
+
     out_dir = tmp_path / "cli_out"
-    rc = cli_main(["--count", "24", "--out-dir", str(out_dir)])
-    assert rc in (0, 1)
+    rc = cli_main(["--count", "48", "--out-dir", str(out_dir)])
+    assert rc == 0
     assert (out_dir / "build_summary.json").is_file()
     assert (out_dir / "part_public" / "items.jsonl").is_file()
-    assert (out_dir / "sealed_store" / "keys.sealed.jsonl").is_file()
+    sealed_path = out_dir / "sealed_store" / "keys.sealed.jsonl"
+    assert sealed_path.is_file()
+
+    # Verify fresh private seed is generated when --private-seed is omitted
+    sealing_meta_1 = json.loads((out_dir / "sealed_store" / "sealing.sealed.json").read_text(encoding="utf-8"))
+    assert sealing_meta_1["private_seed_hex"] != "a94f3c82e1b07d65432198fedcba0123456789abcdef0123456789abcdef0123"
+
+    # Verify --probe-only runs the shortcut probe directly on an existing sealed JSONL file
+    rc_probe = cli_main(["--probe-only", str(sealed_path)])
+    assert rc_probe == 0

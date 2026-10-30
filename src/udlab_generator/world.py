@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import itertools
 import random
 from typing import Literal
 
 EventKind = Literal["enter", "leave", "move", "say", "see", "message"]
+
+FACT_ID_PERMUTATIONS: tuple[tuple[str, str, str, str], ...] = tuple(
+    itertools.permutations(("F1", "F2", "F3", "F4"))
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,8 @@ class UnknowableSpec:
     side_action_desc: str
     trace_a: tuple[Event, ...]
     trace_b: tuple[Event, ...]
+    latent_state_a: dict[str, str] | None = None
+    latent_state_b: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -337,19 +344,20 @@ def make_balanced_configs(count: int, base_seed: int = 20261030) -> list[Scenari
         raise ValueError("count must be positive")
     rng = random.Random(base_seed)
 
-    half = count // 2
-    rem = count - 2 * half
-
-    def _balanced_bools(axis_salt: int) -> list[bool]:
+    # Pair consecutive scenarios `(2*m, 2*m + 1)` inside each domain so every binary axis
+    # is balanced 50/50 both globally and within each domain.
+    def _domain_stratified_bools(axis_salt: int) -> list[bool]:
         axis_rng = random.Random(base_seed ^ (axis_salt * 0x9E3779B1))
-        vec = [True] * half + [False] * half
-        if rem:
+        vec: list[bool] = []
+        for pair_idx in range(count // 2):
+            pair = [True, False] if axis_rng.randint(0, 1) == 0 else [False, True]
+            vec.extend(pair)
+        if count % 2 == 1:
             vec.append(bool(axis_salt % 2 == 0))
-        axis_rng.shuffle(vec)
         return vec
 
-    p_vec = _balanced_bools(1)
-    k_vec = _balanced_bools(2)
+    p_vec = _domain_stratified_bools(1)
+    k_vec = _domain_stratified_bools(2)
     # Construct `(b1, b2, loc_order_bit)` as an exact 2x2x2 factorial so B1, B2,
     # and first/last container mention order are mutually orthogonal (exact 50/50 in every cell).
     oct_cells = [
@@ -368,8 +376,8 @@ def make_balanced_configs(count: int, base_seed: int = 20261030) -> list[Scenari
     b1_vec = [t[0] for t in b12_triples]
     b2_vec = [t[1] for t in b12_triples]
     loc_bit_vec = [t[2] for t in b12_triples]
-    x_vec = _balanced_bools(5)
-    u_vec = _balanced_bools(6)
+    x_vec = _domain_stratified_bools(5)
+    u_vec = _domain_stratified_bools(6)
 
     configs: list[ScenarioConfig] = []
     for idx in range(count):
@@ -396,11 +404,24 @@ def make_balanced_configs(count: int, base_seed: int = 20261030) -> list[Scenari
     return configs
 
 
+def _select_room_roles(
+    perm_rooms: list[str],
+    doorways: tuple[tuple[str, str], ...],
+    need_hub_sec_adjacent: bool,
+) -> tuple[str, str, str, str]:
+    """Select `(r_hub, r_work, r_sec_a, r_sec_b)` from `perm_rooms` matching doorway adjacency."""
+    for p in itertools.permutations(perm_rooms):
+        if are_rooms_adjacent(p[0], p[2], doorways) == need_hub_sec_adjacent:
+            return p[0], p[1], p[2], p[3]
+    return perm_rooms[0], perm_rooms[1], perm_rooms[2], perm_rooms[3]
+
+
 def _build_event_trace(
     *,
     config: ScenarioConfig,
     domain: DomainSpec,
     rooms: tuple[str, ...],
+    doorways: tuple[tuple[str, str], ...],
     containers_by_room: dict[str, tuple[str, ...]],
     occluders_by_room: dict[str, str],
     fixtures_by_room: dict[str, str],
@@ -413,6 +434,7 @@ def _build_event_trace(
     aux_object: str,
     aux_variable: str,
     noise_threshold: int,
+    fact_id_map: tuple[str, str, str, str],
     u_variant: Literal["A", "B"],
 ) -> tuple[
     tuple[Event, ...],
@@ -424,22 +446,43 @@ def _build_event_trace(
     str,
     str,
     str,
+    dict[str, str],
+    bool,
 ]:
     """Construct a symmetric, shortcut-free chronological event trace for `config`.
 
-    `u_variant='A'` and `u_variant='B'` represent the two underlying counterfactual
-    hypotheses for the `U` question and emit the exact same observable `Event` trace.
+    `u_variant='A'` and `u_variant='B'` represent two distinct latent world states
+    whose observable projection onto `Event` is identical.
     """
-    _ = u_variant
     rng = random.Random(config.seed)
-
-    # Permute the 4 domain rooms per scenario so no room name carries a prior for any key.
-    perm_rooms = list(rooms)
-    rng.shuffle(perm_rooms)
-    r_hub, r_work, r_sec_a, r_sec_b = perm_rooms[0], perm_rooms[1], perm_rooms[2], perm_rooms[3]
-
     a0, a1, a2 = agents[0], agents[1], agents[2]
     extra_agents = agents[3:]
+    reason_a, reason_b = domain.side_reasons
+
+    # Construct the counterfactual latent world state for `u_variant` ('A' vs 'B'):
+    if config.u_is_who:
+        latent_note_placer = a1 if u_variant == "A" else a2
+        latent_side_reason = reason_a
+    else:
+        latent_note_placer = a2
+        latent_side_reason = reason_a if u_variant == "A" else reason_b
+
+    latent_state: dict[str, str] = {
+        "u_variant": u_variant,
+        "note_item_placer": latent_note_placer,
+        "side_mechanism_reason": latent_side_reason,
+    }
+
+    fid_primary, fid_shared, fid_secondary, fid_aux = fact_id_map
+
+    # Permute the 4 domain rooms per scenario so no room name carries a prior for any key.
+    # In `k_doorway_mode` (50% of scenarios), `a2` speaks below `noise_threshold` (40 dB) and `a0`
+    # enters `r_hub`, so `K` is decided directly by whether `(r_hub, r_sec_a)` is a doorway in `doorways`.
+    perm_rooms = list(rooms)
+    rng.shuffle(perm_rooms)
+    k_doorway_mode = bool((config.seed >> 2) & 1)
+    need_adj = config.k_knows if k_doorway_mode else True
+    r_hub, r_work, r_sec_a, r_sec_b = _select_room_roles(perm_rooms, doorways, need_adj)
 
     # Assign which container in r_work is `cont_init` vs `cont_final` using `config.seed & 1`,
     # which is stratified 50/50 inside every `(b1_true_belief, b2_true_belief)` cell.
@@ -452,7 +495,7 @@ def _build_event_trace(
     cont_sec_init, cont_sec_final = containers_by_room[r_sec_a]
     cont_hub_init, cont_hub_final = containers_by_room[r_hub]
 
-    # All core agents begin in `r_hub` to witness the shared baseline fact F2 together.
+    # All core agents begin in `r_hub` to witness the shared baseline fact together.
     initial_rooms: dict[str, str] = {
         a0: r_hub,
         a1: r_hub,
@@ -464,7 +507,7 @@ def _build_event_trace(
     events: list[Event] = []
     step = 1
 
-    # Step 1: Shared baseline fact F2 observed by a0, a1, a2 in r_hub.
+    # Step 1: Shared baseline fact (`fid_shared`) observed by a0, a1, a2 in r_hub.
     shared_var = f"baseline:{aux_object}"
     shared_val = cont_hub_init
     events.append(
@@ -479,7 +522,7 @@ def _build_event_trace(
             occluded=False,
             occluder=None,
             noise_level=20,
-            fact_id="F2",
+            fact_id=fid_shared,
             fact_variable=shared_var,
             fact_value=shared_val,
         )
@@ -556,8 +599,8 @@ def _build_event_trace(
             )
             step += 1
 
-    # Execute the initial placement of `primary_object` in `r_work` with equal mention counts
-    # for `cont_init` and `cont_final` across all 4 `(b1_true_belief, b2_true_belief)` cells:
+    # Execute the initial placement of `primary_object` in `r_work` with exact mention parity
+    # (`count(cont_init) == count(cont_final)`) across all 4 `(b1_true_belief, b2_true_belief)` cells:
     if not config.b1_true_belief and config.b2_true_belief:
         # a1 and a2 first see `primary_object` placed at `cont_final`; then `a2` steps out to `r_hub`
         # while `a1` moves `primary_object` to `cont_init`; then `a1` leaves `r_work` to `r_hub`
@@ -662,7 +705,21 @@ def _build_event_trace(
         step += 1
         a1_current_room = r_hub
     else:
-        # Standard initial placement at `cont_init` in `r_work` (witnessed by a1 and a2).
+        # First inspect `cont_final` in `r_work` before placing `primary_object` in `cont_init`
+        # so both `cont_init` and `cont_final` have equal mention counts before and after the final move.
+        events.append(
+            Event(
+                step=step,
+                kind="see",
+                actor=a2,
+                room=r_work,
+                target_object=cont_final,
+                from_location=r_work,
+                to_location=r_work,
+                occluded=False,
+            )
+        )
+        step += 1
         events.append(
             Event(
                 step=step,
@@ -708,10 +765,6 @@ def _build_event_trace(
             a1_current_room = r_hub
 
     # Symmetric transition for `a0` before the final move of `primary_object` (`p_can_see`):
-    # In EVERY scenario, `a0` leaves `r_hub` and enters `r_p_dest` (`r_work` if `p_can_see`,
-    # else `r_sec_b`). Because `(r_hub, r_work, r_sec_a, r_sec_b)` is a random permutation
-    # of `domain.rooms`, `a0` has the exact same event count, sentence distance, token distance,
-    # and room-name distribution whether `p_can_see` is True or False!
     r_p_dest = r_work if config.p_can_see else r_sec_b
     events.append(
         Event(
@@ -736,7 +789,7 @@ def _build_event_trace(
     )
     step += 1
 
-    # Final move of `primary_object` in `r_work` from `cont_init` to `cont_final` (Fact F1).
+    # Final move of `primary_object` in `r_work` from `cont_init` to `cont_final` (`fid_primary`).
     events.append(
         Event(
             step=step,
@@ -749,7 +802,7 @@ def _build_event_trace(
             occluded=False,
             occluder=None,
             noise_level=20,
-            fact_id="F1",
+            fact_id=fid_primary,
             fact_variable=primary_variable,
             fact_value=cont_final,
         )
@@ -843,7 +896,7 @@ def _build_event_trace(
                 from_location=cont_final,
                 to_location=cont_final,
                 occluded=False,
-                fact_id="F1",
+                fact_id=fid_primary,
                 fact_variable=primary_variable,
                 fact_value=cont_final,
             )
@@ -868,7 +921,7 @@ def _build_event_trace(
         step += 1
     else:
         # In `(T, T)` and `(F, F)`, inspect both `cont_init` and `cont_final` (occluded) so all 4 cells
-        # have the exact same container mention counts before the closing step.
+        # have the exact same `(3, 3)` container mention counts before the message step.
         for c_eq in (cont_init, cont_final):
             events.append(
                 Event(
@@ -885,7 +938,7 @@ def _build_event_trace(
             )
             step += 1
 
-    # Fact F3: `a2` moves `secondary_object` in `r_sec_a` from `cont_sec_init` to `cont_sec_final`.
+    # Secondary fact (`fid_secondary`): `a2` moves `secondary_object` in `r_sec_a` from `cont_sec_init` to `cont_sec_final`.
     events.append(
         Event(
             step=step,
@@ -897,14 +950,14 @@ def _build_event_trace(
             to_location=cont_sec_final,
             occluded=False,
             noise_level=20,
-            fact_id="F3",
+            fact_id=fid_secondary,
             fact_variable=secondary_variable,
             fact_value=cont_sec_final,
         )
     )
     step += 1
 
-    # Fact F4: `a2` observes `aux_object` reserve in `r_sec_a` (`F4`, known to `a2`, unknown to `a1`).
+    # Aux reserve fact (`fid_aux`): `a2` observes `aux_object` reserve in `r_sec_a` (known to `a2`, unknown to `a1`).
     events.append(
         Event(
             step=step,
@@ -916,7 +969,7 @@ def _build_event_trace(
             to_location=cont_hub_final,
             occluded=False,
             noise_level=20,
-            fact_id="F4",
+            fact_id=fid_aux,
             fact_variable=aux_variable,
             fact_value=cont_hub_final,
         )
@@ -924,10 +977,21 @@ def _build_event_trace(
     step += 1
 
     # Symmetric transition for `a0` before `a2`'s speech about `secondary_object` (`k_knows`):
-    # Note that `r_p_dest` is in `{r_work, r_sec_b}`, whereas `{r_sec_a, r_hub}` is disjoint from `{r_work, r_sec_b}`!
-    # Thus `a0` ALWAYS leaves `r_p_dest` and enters `r_k_dest` (`r_sec_a` if `k_knows`, else `r_hub`)
-    # in 100% of scenarios!
-    r_k_dest = r_sec_a if config.k_knows else r_hub
+    # In `k_doorway_mode` (50% of scenarios), `a0` enters `r_hub` and `a2` speaks at `noise_threshold - 10` (40 dB),
+    # so `a0` hears `a2` iff `(r_hub, r_sec_a)` is a doorway in `doorways` (`are_rooms_adjacent == config.k_knows`).
+    # Otherwise, `a2` speaks at `noise_threshold + 10` (60 dB) and `a0` enters `r_sec_a` (if `k_knows`) else `r_hub`.
+    if k_doorway_mode:
+        r_k_dest = r_hub
+        k_say_noise = noise_threshold - 10
+    else:
+        r_k_dest = r_sec_a if config.k_knows else r_hub
+        k_say_noise = noise_threshold + 10
+
+    a1_hears_secondary = (
+        a1_current_room == r_sec_a
+        or (are_rooms_adjacent(a1_current_room, r_sec_a, doorways) and k_say_noise < noise_threshold)
+    )
+
     events.append(
         Event(
             step=step,
@@ -951,7 +1015,6 @@ def _build_event_trace(
     )
     step += 1
 
-    # `a2` speaks (`say`) in `r_sec_a` at `noise_threshold + 10` (so only occupants in `r_sec_a` hear it).
     events.append(
         Event(
             step=step,
@@ -962,8 +1025,8 @@ def _build_event_trace(
             to_location=cont_sec_final,
             utterance=f"The {secondary_object} is stored in the {cont_sec_final}.",
             occluded=False,
-            noise_level=noise_threshold + 10,
-            fact_id="F3",
+            noise_level=k_say_noise,
+            fact_id=fid_secondary,
             fact_variable=secondary_variable,
             fact_value=cont_sec_final,
         )
@@ -986,8 +1049,6 @@ def _build_event_trace(
     step += 1
 
     # Absent party message step (`x_notified`):
-    # Both branches use the exact same verb and clause template (`"is stored at the ..."`),
-    # differing only in whether the message updates `primary_variable` (`F1`) or `shared_var` (`F2`).
     primary_absent = absent_parties[0]
     if config.x_notified:
         events.append(
@@ -1000,7 +1061,7 @@ def _build_event_trace(
                 to_location=cont_final,
                 recipient=primary_absent,
                 utterance=f"Update for {primary_absent}: the {primary_object} is stored at the {cont_final}.",
-                fact_id="F1",
+                fact_id=fid_primary,
                 fact_variable=primary_variable,
                 fact_value=cont_final,
             )
@@ -1016,7 +1077,7 @@ def _build_event_trace(
                 to_location=shared_val,
                 recipient=primary_absent,
                 utterance=f"Update for {primary_absent}: the {aux_object} is stored at the {shared_val}.",
-                fact_id="F2",
+                fact_id=fid_shared,
                 fact_variable=shared_var,
                 fact_value=shared_val,
             )
@@ -1035,16 +1096,17 @@ def _build_event_trace(
                 to_location=shared_val,
                 recipient=secondary_absent,
                 utterance=f"Update for {secondary_absent}: the {aux_object} is stored at the {shared_val}.",
-                fact_id="F2",
+                fact_id=fid_shared,
                 fact_variable=shared_var,
                 fact_value=shared_val,
             )
         )
         step += 1
 
-    # Side events for `U` (unknowable) and `S` (settled twin):
-    reason_a, reason_b = domain.side_reasons
+    # Side events for `U` (unknowable) and `S` (settled twin) projected from `latent_state`:
     if config.u_is_who:
+        # `latent_state["note_item_placer"]` placed `note_item` on the countertop prior to step 1 (unlogged),
+        # so only `a0` seeing it already on the countertop is projected to the observable event log.
         events.append(
             Event(
                 step=step,
@@ -1058,6 +1120,7 @@ def _build_event_trace(
             )
         )
         step += 1
+        settled_why = latent_state["side_mechanism_reason"]
         events.append(
             Event(
                 step=step,
@@ -1068,7 +1131,7 @@ def _build_event_trace(
                 from_location="latch position A",
                 to_location="latch position B",
                 occluded=False,
-                stated_reason=reason_a,
+                stated_reason=settled_why,
             )
         )
         step += 1
@@ -1079,18 +1142,19 @@ def _build_event_trace(
                 actor=a1,
                 room=a1_current_room,
                 target_object=domain.side_mechanism,
-                utterance=f"I adjusted the {domain.side_mechanism} {reason_a}.",
-                stated_reason=reason_a,
+                utterance=f"I adjusted the {domain.side_mechanism} {settled_why}.",
+                stated_reason=settled_why,
                 noise_level=20,
             )
         )
         step += 1
     else:
+        settled_who = latent_state["note_item_placer"]
         events.append(
             Event(
                 step=step,
                 kind="move",
-                actor=a2,
+                actor=settled_who,
                 room=r_sec_a,
                 target_object=domain.note_item,
                 from_location="dispatch folder",
@@ -1099,6 +1163,8 @@ def _build_event_trace(
             )
         )
         step += 1
+        # `a1` adjusts `side_mechanism` for `latent_state["side_mechanism_reason"]`, which is an unstated
+        # internal motive (`stated_reason=None` in the observable projection).
         events.append(
             Event(
                 step=step,
@@ -1115,10 +1181,7 @@ def _build_event_trace(
         step += 1
 
     # Post-message container mention equalizer:
-    # When `x_notified` is True, `cont_final` was mentioned in the message; inspect `cont_init` (occluded)
-    # to keep `count(cont_init) == count(cont_final)`. Then order a closing occluded glance at
-    # `(cont_init, cont_final)` or `(cont_final, cont_init)` 50/50 by seed so `last_mentioned_location`
-    # is 50/50 `cont_init` vs `cont_final` and independent of `b1_true_belief` and `b2_true_belief`.
+    # Keep total mentions of `cont_init` and `cont_final` equal (`6 == 6`) across all scenarios.
     if config.x_notified:
         events.append(
             Event(
@@ -1134,6 +1197,22 @@ def _build_event_trace(
             )
         )
         step += 1
+    else:
+        for c_eq_msg in (cont_init, cont_final):
+            events.append(
+                Event(
+                    step=step,
+                    kind="see",
+                    actor=a1,
+                    room=a1_current_room,
+                    target_object=c_eq_msg,
+                    from_location=a1_current_room,
+                    to_location=a1_current_room,
+                    occluded=True,
+                    occluder=occluders_by_room[a1_current_room],
+                )
+            )
+            step += 1
 
     closing_pair = (c0, c1)
     for c_close in closing_pair:
@@ -1175,32 +1254,33 @@ def _build_event_trace(
         )
     )
 
-    facts: dict[str, FactSpec] = {
-        "F1": FactSpec(
-            fact_id="F1",
+    raw_facts: dict[str, FactSpec] = {
+        fid_primary: FactSpec(
+            fact_id=fid_primary,
             variable=primary_variable,
             value=cont_final,
             description=f"The {primary_object} is located in the {cont_final}.",
         ),
-        "F2": FactSpec(
-            fact_id="F2",
+        fid_shared: FactSpec(
+            fact_id=fid_shared,
             variable=shared_var,
             value=shared_val,
             description=f"The {aux_object} baseline reading is at the {shared_val}.",
         ),
-        "F3": FactSpec(
-            fact_id="F3",
+        fid_secondary: FactSpec(
+            fact_id=fid_secondary,
             variable=secondary_variable,
             value=cont_sec_final,
             description=f"The {secondary_object} is stored in the {cont_sec_final}.",
         ),
-        "F4": FactSpec(
-            fact_id="F4",
+        fid_aux: FactSpec(
+            fact_id=fid_aux,
             variable=aux_variable,
             value=cont_hub_final,
             description=f"The {aux_object} reserve unit is verified in the {cont_hub_final}.",
         ),
     }
+    facts = {fid: raw_facts[fid] for fid in sorted(raw_facts.keys())}
 
     return (
         tuple(events),
@@ -1212,16 +1292,24 @@ def _build_event_trace(
         bluff_claimed_location,
         reason_a,
         reason_b,
+        latent_state,
+        a1_hears_secondary,
     )
+
+
+def _parse_scenario_index(scenario_id: str, seed: int) -> int:
+    if scenario_id.startswith("scen_") and scenario_id[5:].isdigit():
+        return int(scenario_id[5:])
+    return int(hashlib.sha256(f"{scenario_id}:{seed}".encode("utf-8")).hexdigest()[:8], 16)
 
 
 def generate_world(config: ScenarioConfig) -> World:
     """Generate a complete, deterministic `World` from `ScenarioConfig`."""
     rng = random.Random(config.seed)
-    domain_idx = int(hashlib.sha256(f"{config.scenario_id}:{config.seed}".encode("utf-8")).hexdigest()[:8], 16)
-    domain = DOMAINS[domain_idx % len(DOMAINS)]
+    scen_idx = _parse_scenario_index(config.scenario_id, config.seed)
+    domain = DOMAINS[(scen_idx // 2) % len(DOMAINS)]
 
-    name_pool = list(AGENT_NAME_POOLS[(domain_idx // len(DOMAINS)) % len(AGENT_NAME_POOLS)])
+    name_pool = list(AGENT_NAME_POOLS[scen_idx % len(AGENT_NAME_POOLS)])
     rng.shuffle(name_pool)
 
     agents = tuple(name_pool[: config.num_agents])
@@ -1240,6 +1328,10 @@ def generate_world(config: ScenarioConfig) -> World:
     aux_variable = f"reserve:{aux_object}"
     noise_threshold = 50
 
+    # Permute which fact IDs (`F1`..`F4`) correspond to `(primary, shared, secondary, aux)`.
+    fact_id_map = FACT_ID_PERMUTATIONS[(scen_idx * 7 + (config.seed >> 4)) % len(FACT_ID_PERMUTATIONS)]
+    fid_primary, fid_shared, fid_secondary, fid_aux = fact_id_map
+
     (
         trace_a,
         initial_rooms,
@@ -1250,10 +1342,13 @@ def generate_world(config: ScenarioConfig) -> World:
         bluff_claimed_location,
         reason_a,
         reason_b,
+        latent_state_a,
+        a1_hears_secondary,
     ) = _build_event_trace(
         config=config,
         domain=domain,
         rooms=rooms,
+        doorways=doorways,
         containers_by_room=containers_by_room,
         occluders_by_room=occluders_by_room,
         fixtures_by_room=fixtures_by_room,
@@ -1266,13 +1361,15 @@ def generate_world(config: ScenarioConfig) -> World:
         aux_object=aux_object,
         aux_variable=aux_variable,
         noise_threshold=noise_threshold,
+        fact_id_map=fact_id_map,
         u_variant="A",
     )
 
-    trace_b, *_ = _build_event_trace(
+    trace_b, *_, latent_state_b, _ = _build_event_trace(
         config=config,
         domain=domain,
         rooms=rooms,
+        doorways=doorways,
         containers_by_room=containers_by_room,
         occluders_by_room=occluders_by_room,
         fixtures_by_room=fixtures_by_room,
@@ -1285,6 +1382,7 @@ def generate_world(config: ScenarioConfig) -> World:
         aux_object=aux_object,
         aux_variable=aux_variable,
         noise_threshold=noise_threshold,
+        fact_id_map=fact_id_map,
         u_variant="B",
     )
 
@@ -1313,28 +1411,44 @@ def generate_world(config: ScenarioConfig) -> World:
             )
         )
 
+    # Randomize `causal_preconditions(G_target)` across scenarios so `D` varies across all 14 non-empty
+    # subsets of `{F1, F2, F3, F4}` of size 1, 2, and 3 while always including `fid_shared` (already known to `a1`).
+    unknown_to_a1: list[str] = [fid_aux]
+    if not config.b1_true_belief:
+        unknown_to_a1.append(fid_primary)
+    if not a1_hears_secondary:
+        unknown_to_a1.append(fid_secondary)
+    unknown_to_a1.sort()
+
+    diff_rng = random.Random(config.seed ^ 0xA5A5F0F0 ^ (scen_idx * 131))
+    diff_candidates = list(unknown_to_a1)
+    diff_rng.shuffle(diff_candidates)
+    target_diff_size = 1 + ((scen_idx + (config.seed >> 5)) % len(diff_candidates))
+    chosen_diff = diff_candidates[:target_diff_size]
+    a1_preconditions = tuple(sorted({fid_shared, *chosen_diff}))
+
     goals: dict[str, AgentGoal] = {
         a0: AgentGoal(
             agent=a0,
             goal_text=f"{a0} plans to {domain.goal_templates[0]}",
-            causal_preconditions=("F2", "F3"),
+            causal_preconditions=tuple(sorted({fid_shared, fid_secondary})),
         ),
         a1: AgentGoal(
             agent=a1,
             goal_text=f"{a1} plans to {domain.goal_templates[1]}",
-            causal_preconditions=("F1", "F2", "F4"),
+            causal_preconditions=a1_preconditions,
         ),
         a2: AgentGoal(
             agent=a2,
             goal_text=f"{a2} plans to {domain.goal_templates[2]}",
-            causal_preconditions=("F1", "F3", "F4"),
+            causal_preconditions=tuple(sorted({fid_primary, fid_secondary, fid_aux})),
         ),
     }
     for idx, ea in enumerate(agents[3:]):
         goals[ea] = AgentGoal(
             agent=ea,
             goal_text=f"{ea} plans to assist with {domain.goal_templates[idx % len(domain.goal_templates)]}",
-            causal_preconditions=("F2",),
+            causal_preconditions=(fid_shared,),
         )
 
     who_q_text = f"Who placed the {domain.note_item} on the countertop?"
@@ -1350,6 +1464,8 @@ def generate_world(config: ScenarioConfig) -> World:
             side_action_desc=f"placing the {domain.note_item} on the countertop",
             trace_a=trace_a,
             trace_b=trace_b,
+            latent_state_a=latent_state_a,
+            latent_state_b=latent_state_b,
         )
         settled_twin_spec = SettledTwinSpec(
             subtype="why",
@@ -1368,6 +1484,8 @@ def generate_world(config: ScenarioConfig) -> World:
             side_action_desc=f"adjusting the {domain.side_mechanism}",
             trace_a=trace_a,
             trace_b=trace_b,
+            latent_state_a=latent_state_a,
+            latent_state_b=latent_state_b,
         )
         settled_twin_spec = SettledTwinSpec(
             subtype="who",
