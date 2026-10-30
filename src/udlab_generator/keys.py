@@ -805,6 +805,10 @@ def validate_occlusion(world: World) -> None:
     # visibility for the same container without changing station/room.
     epoch_visibility: dict[tuple[str, str, int], bool] = {}
 
+    # Track where each agent last placed or saw `world.primary_object` in open view so `world.b2_observer`
+    # never encounters an unexplained displacement of `world.primary_object`.
+    last_seen_primary_container_by_agent: dict[str, str] = {}
+
     for ev in world.events:
         if ev.kind == "enter" and ev.actor in world.agents:
             occupants[ev.actor] = ev.room
@@ -830,6 +834,17 @@ def validate_occlusion(world: World) -> None:
                 )
 
         if ev.kind in ("move", "see") and not is_station_transition_event(ev, world):
+            if ev.target_object == world.primary_object and ev.actor == world.b2_observer:
+                prev_cont = last_seen_primary_container_by_agent.get(world.b2_observer)
+                if ev.from_location in all_containers or prev_cont is not None:
+                    if prev_cont is None or ev.from_location != prev_cont:
+                        raise ValueError(
+                            f"Scenario {world.scenario_id} step {ev.step} belief-forcing error: "
+                            f"b2_observer '{world.b2_observer}' {ev.kind}s '{world.primary_object}' "
+                            f"from {ev.from_location!r}, but last placed or saw it at {prev_cont!r} "
+                            f"(unexplained displacement)."
+                        )
+
             referenced_containers = [
                 loc
                 for loc in (ev.target_object, ev.from_location, ev.to_location)
@@ -874,6 +889,22 @@ def validate_occlusion(world: World) -> None:
                                 f"contradictory visibility for {ag} on container '{c_ref}' within station '{ag_station}'."
                             )
                         epoch_visibility[ep_key] = ag_blocked
+
+            if (
+                ev.target_object == world.primary_object
+                and ev.to_location in all_containers
+                and not ev.occluded
+            ):
+                if ev.kind == "see":
+                    if stations.get(ev.actor, CONTAINER_BAY_STATION) == CONTAINER_BAY_STATION:
+                        last_seen_primary_container_by_agent[ev.actor] = str(ev.to_location)
+                elif ev.kind == "move":
+                    for ag in world.agents:
+                        if (
+                            occupants.get(ag) == ev.room
+                            and stations.get(ag, CONTAINER_BAY_STATION) == CONTAINER_BAY_STATION
+                        ):
+                            last_seen_primary_container_by_agent[ag] = str(ev.to_location)
 
         if ev.kind == "leave" and ev.actor in world.agents:
             occupants[ev.actor] = None
@@ -922,6 +953,121 @@ def validate_occlusion(world: World) -> None:
             raise ValueError(
                 f"Scenario {world.scenario_id} occlusion error: B2 key {q_by_type['B2']!r} disagrees with config.b2_true_belief."
             )
+
+    # Verify that B1 and B2 keys follow from the stated belief-persistence rule sentence alone:
+    # - B1: where `b1_agent` last saw `primary_object` in open view or heard a witness state it was placed;
+    # - B2: where `b2_observer` last saw or communicated `b2_actor` perceiving `primary_object`.
+    rule_b1_val: str | None = None
+    rule_b2_val: str | None = None
+    rule_occupants: dict[str, str | None] = dict(world.initial_agent_rooms)
+    rule_stations: dict[str, str] = {ag: CONTAINER_BAY_STATION for ag in world.agents}
+    witnessed_primary_val: dict[str, str] = {}
+
+    for ev in world.events:
+        if ev.kind == "enter" and ev.actor in world.agents:
+            rule_occupants[ev.actor] = ev.room
+            rule_stations[ev.actor] = CONTAINER_BAY_STATION
+        elif is_station_transition_event(ev, world) and ev.actor in world.agents:
+            rule_stations[ev.actor] = str(ev.to_location)
+
+        if (
+            ev.kind in ("move", "see")
+            and not is_station_transition_event(ev, world)
+            and ev.target_object == world.primary_object
+            and ev.to_location in all_containers
+            and not ev.occluded
+        ):
+            for ag in world.agents:
+                ag_saw = (
+                    rule_occupants.get(ag) == ev.room
+                    and rule_stations.get(ag, CONTAINER_BAY_STATION) == CONTAINER_BAY_STATION
+                    and (ev.kind == "move" or ag == ev.actor)
+                )
+                if ag_saw:
+                    witnessed_primary_val[ag] = str(ev.to_location)
+                    if ag == world.b1_agent:
+                        rule_b1_val = str(ev.to_location)
+
+            obs_saw = (
+                rule_occupants.get(world.b2_observer) == ev.room
+                and rule_stations.get(world.b2_observer, CONTAINER_BAY_STATION) == CONTAINER_BAY_STATION
+                and (ev.kind == "move" or world.b2_observer == ev.actor)
+            )
+            act_saw = (
+                rule_occupants.get(world.b2_actor) == ev.room
+                and rule_stations.get(world.b2_actor, CONTAINER_BAY_STATION) == CONTAINER_BAY_STATION
+                and (ev.kind == "move" or world.b2_actor == ev.actor)
+            )
+            if obs_saw and act_saw:
+                rule_b2_val = str(ev.to_location)
+
+        elif (
+            ev.kind == "say"
+            and not ev.is_bluff
+            and ev.fact_variable == world.primary_variable
+            and ev.fact_value is not None
+            and witnessed_primary_val.get(ev.actor) == ev.fact_value
+        ):
+            b1_room = rule_occupants.get(world.b1_agent)
+            b1_heard = b1_room is not None and (
+                b1_room == ev.room
+                or (
+                    are_rooms_adjacent(b1_room, ev.room, world.doorways)
+                    and ev.noise_level >= world.noise_threshold
+                )
+            )
+            if b1_heard:
+                rule_b1_val = str(ev.fact_value)
+
+            obs_room = rule_occupants.get(world.b2_observer)
+            act_room = rule_occupants.get(world.b2_actor)
+            obs_heard = obs_room is not None and (
+                obs_room == ev.room
+                or (
+                    are_rooms_adjacent(obs_room, ev.room, world.doorways)
+                    and ev.noise_level >= world.noise_threshold
+                )
+            )
+            act_heard = act_room is not None and (
+                act_room == ev.room
+                or (
+                    are_rooms_adjacent(act_room, ev.room, world.doorways)
+                    and ev.noise_level >= world.noise_threshold
+                )
+            )
+            if obs_heard and act_heard and ev.actor in (world.b2_observer, world.b2_actor):
+                rule_b2_val = str(ev.fact_value)
+
+        elif (
+            ev.kind == "message"
+            and not ev.is_bluff
+            and ev.fact_variable == world.primary_variable
+            and ev.fact_value is not None
+            and witnessed_primary_val.get(ev.actor) == ev.fact_value
+        ):
+            if world.b1_agent in (ev.actor, ev.recipient):
+                rule_b1_val = str(ev.fact_value)
+            if (ev.actor == world.b2_observer and ev.recipient == world.b2_actor) or (
+                ev.actor == world.b2_actor and ev.recipient == world.b2_observer
+            ):
+                rule_b2_val = str(ev.fact_value)
+
+        if ev.kind == "leave" and ev.actor in world.agents:
+            rule_occupants[ev.actor] = None
+
+    if rule_b1_val is None or q_by_type["B1"] != rule_b1_val:
+        raise ValueError(
+            f"Scenario {world.scenario_id} belief-forcing error: B1 key {q_by_type['B1']!r} != rule-derived {rule_b1_val!r}."
+        )
+    if rule_b2_val is None or q_by_type["B2"] != rule_b2_val:
+        raise ValueError(
+            f"Scenario {world.scenario_id} belief-forcing error: B2 key {q_by_type['B2']!r} != rule-derived {rule_b2_val!r}."
+        )
+
+
+def validate_belief_forcing(world: World) -> None:
+    """Validate that `b2_observer` never meets an unexplained displacement of `primary_object` and B1/B2 follow from the stated rule sentence alone."""
+    validate_occlusion(world)
 
 
 def validate_hearing(world: World) -> None:

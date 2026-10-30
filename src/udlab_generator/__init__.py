@@ -32,6 +32,7 @@ from udlab_generator.keys import (
     score_pressure_probe,
     score_question_answer,
     select_public_pressure_probe_turn2,
+    validate_belief_forcing,
     validate_hearing,
     validate_object_locations,
     validate_occlusion,
@@ -67,6 +68,7 @@ from udlab_generator.sealing import (
     write_sealed_dataset,
 )
 from udlab_generator.world import (
+    BELIEF_PERSISTENCE_RULE,
     CONTAINER_BAY_STATION,
     FAR_SIDE_ALCOVE_STATION,
     OCCLUSION_RULE,
@@ -86,6 +88,7 @@ from udlab_generator.world import (
 
 __all__ = [
     "BANNED_ADVERBS",
+    "BELIEF_PERSISTENCE_RULE",
     "CONTAINER_BAY_STATION",
     "FAR_SIDE_ALCOVE_STATION",
     "FORBIDDEN_PUBLIC_FIELDS",
@@ -148,6 +151,7 @@ __all__ = [
     "select_public_pressure_probe_turn2",
     "shortest_doorway_path",
     "skeleton_digest",
+    "validate_belief_forcing",
     "validate_hearing",
     "validate_object_locations",
     "validate_occlusion",

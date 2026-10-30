@@ -10,6 +10,7 @@ from typing import Callable
 
 from udlab_generator.keys import ScenarioKeys, compute_scenario_keys
 from udlab_generator.world import (
+    BELIEF_PERSISTENCE_RULE,
     CONTAINER_BAY_STATION,
     FAR_SIDE_ALCOVE_STATION,
     OCCLUSION_RULE,
@@ -303,6 +304,7 @@ def render_world_template(world: World, focal_agent: str) -> str:
         f"{'; '.join(room_setup_strs)}. "
         f"Doorways link the rooms as follows: {', '.join(doorway_strs)}, and the doorway hearing threshold is {world.noise_threshold} dB "
         f"(a say at or above {world.noise_threshold} dB carries one doorway; quieter speech stays in its room). "
+        f"{BELIEF_PERSISTENCE_RULE} "
         f"At the start, {', '.join(agent_pos_strs)}. "
         f"Meanwhile, {', '.join(world.absent_parties)} "
         f"{'is' if len(world.absent_parties) == 1 else 'are'} absent off-site. "

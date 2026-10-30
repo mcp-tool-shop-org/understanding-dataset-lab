@@ -17,6 +17,7 @@ from udlab_generator.keys import (
     build_public_pressure_probe_map,
     build_public_pressure_probe_template,
     compute_scenario_keys,
+    validate_belief_forcing,
     validate_hearing,
     validate_object_locations,
     validate_occlusion,
@@ -483,6 +484,7 @@ def write_sealed_dataset(
         if w_obj is not None:
             validate_topology(w_obj)
             validate_occlusion(w_obj)
+            validate_belief_forcing(w_obj)
             validate_hearing(w_obj)
             validate_object_locations(w_obj)
             validate_placing_fairness(w_obj)
@@ -603,6 +605,7 @@ def verify_sealed_part(public_dir: Path, sealed_dir: Path) -> None:
             try:
                 validate_topology(w_obj)
                 validate_occlusion(w_obj)
+                validate_belief_forcing(w_obj)
                 validate_hearing(w_obj)
                 validate_object_locations(w_obj)
                 validate_placing_fairness(w_obj)

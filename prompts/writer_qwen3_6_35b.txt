@@ -23,6 +23,7 @@ HARD CONSTRAINTS (MANDATORY):
    - State in the room setup that each room's `occluder` stands between the `far-side alcove` and the `container bay`, blocking an agent in the `far-side alcove` from seeing events at or the contents of the containers behind it while an agent in the `container bay` sees them in open view.
    - Render station transitions (`container bay` <-> `far-side alcove`) explicitly, and never state both `"in open view"` and `"blocked"` for one agent, one container, and one moment.
    - When a `say` event occurs, state the `noise_level` relative to the room's `noise_threshold` (a say at or above `noise_threshold` dB carries one doorway; quieter speech stays in its room) so a reader can determine whether an agent in an adjacent room could hear it.
+   - Include the exact belief-persistence rule sentence in the setup paragraph: "Each agent assumes an object remains where that agent last saw it in open view or heard a witness state it was placed, and assumes another agent looks where they last saw or communicated that agent perceiving it."
    - When a character utters an in-scenario bluff (`is_bluff=true`), quote the character's spoken claim verbatim without endorsing it as true in the narrator's voice.
 
 3. UNKNOWABLE (`U`) TRACE PRESERVATION:

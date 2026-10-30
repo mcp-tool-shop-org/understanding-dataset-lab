@@ -1600,3 +1600,255 @@ def test_19_article_a_an_every_vocabulary_noun() -> None:
             assert expected_phrase in prose
 
 
+def test_20_belief_persistence_rule_sentence_in_world_text_and_writer_prompt() -> None:
+    """Test 20: Belief-persistence rule sentence appears in render_world_template and writer prompt template."""
+    import udlab_generator as ug
+
+    expected_rule = (
+        "Each agent assumes an object remains where that agent last saw it in open view "
+        "or heard a witness state it was placed, and assumes another agent looks "
+        "where they last saw or communicated that agent perceiving it."
+    )
+    prompt_text = load_writer_prompt_template()
+    assert expected_rule in prompt_text, "Writer prompt must include the exact belief-persistence rule sentence."
+
+    for cfg in make_balanced_configs(12, base_seed=20261030):
+        w = generate_world(cfg)
+        for fa in (w.agents[0], w.agents[1]):
+            prose = render_world_template(w, fa)
+            assert expected_rule in prose, f"{w.scenario_id}: rule sentence missing from rendered prose"
+
+    rule_sentence = getattr(ug, "BELIEF_PERSISTENCE_RULE", None)
+    assert rule_sentence == expected_rule, "BELIEF_PERSISTENCE_RULE must be exported by udlab_generator."
+
+
+def test_21_independent_b2_derivation_and_no_unexplained_displacement(tmp_path: Path) -> None:
+    """Test 21: Independent B2 derivation from the stated rule sentence alone agrees with every sealed B2 key across 300 scenarios, and b2_observer never meets an unexplained displacement."""
+    import udlab_generator as ug
+
+    validate_forcing_fn = getattr(ug, "validate_belief_forcing", None)
+
+    def _derive_b2_from_rule_sentence_alone(w: ug.World) -> str:
+        """Apply only the stated rule sentence to derive B2(b2_observer, b2_actor, primary_object),
+        while asserting that b2_observer never encounters an unexplained displacement of primary_object.
+        """
+        all_conts = {c for pair in w.containers_by_room.values() for c in pair}
+        edges = {(a, b) for a, b in w.doorways} | {(b, a) for a, b in w.doorways}
+        room_of: dict[str, str | None] = {ag: w.initial_agent_rooms[ag] for ag in w.agents}
+        station_of: dict[str, str] = {ag: "container bay" for ag in w.agents}
+        last_seen_by_obs: str | None = None
+        witnessed_by_ag: dict[str, str] = {}
+        b2_from_rule: str | None = None
+
+        for ev in w.events:
+            if ev.kind == "enter" and ev.actor in w.agents:
+                room_of[ev.actor] = ev.room
+                station_of[ev.actor] = "container bay"
+            elif (
+                ev.kind == "move"
+                and ev.from_location in ("container bay", "far-side alcove")
+                and ev.to_location in ("container bay", "far-side alcove")
+            ):
+                station_of[ev.actor] = str(ev.to_location)
+            elif ev.kind in ("move", "see") and ev.target_object == w.primary_object:
+                if ev.actor == w.b2_observer:
+                    if ev.from_location in all_conts or last_seen_by_obs is not None:
+                        assert last_seen_by_obs is not None and ev.from_location == last_seen_by_obs, (
+                            f"{w.scenario_id} step {ev.step}: b2_observer {w.b2_observer} found {w.primary_object} "
+                            f"at {ev.from_location!r}, but last placed/saw it at {last_seen_by_obs!r}"
+                        )
+                if ev.to_location in all_conts and not ev.occluded:
+                    for ag in w.agents:
+                        if (
+                            room_of.get(ag) == ev.room
+                            and station_of.get(ag) == "container bay"
+                            and (ev.kind == "move" or ag == ev.actor)
+                        ):
+                            witnessed_by_ag[ag] = str(ev.to_location)
+                            if ag == w.b2_observer:
+                                last_seen_by_obs = str(ev.to_location)
+                    obs_saw = (
+                        room_of.get(w.b2_observer) == ev.room
+                        and station_of.get(w.b2_observer) == "container bay"
+                        and (ev.kind == "move" or ev.actor == w.b2_observer)
+                    )
+                    act_saw = (
+                        room_of.get(w.b2_actor) == ev.room
+                        and station_of.get(w.b2_actor) == "container bay"
+                        and (ev.kind == "move" or ev.actor == w.b2_actor)
+                    )
+                    if obs_saw and act_saw:
+                        b2_from_rule = str(ev.to_location)
+            elif (
+                ev.kind in ("say", "message")
+                and not ev.is_bluff
+                and ev.fact_variable == w.primary_variable
+                and ev.fact_value is not None
+                and witnessed_by_ag.get(ev.actor) == ev.fact_value
+            ):
+                if ev.kind == "message":
+                    if (ev.actor == w.b2_observer and ev.recipient == w.b2_actor) or (
+                        ev.actor == w.b2_actor and ev.recipient == w.b2_observer
+                    ):
+                        b2_from_rule = str(ev.fact_value)
+                elif ev.kind == "say" and ev.actor in (w.b2_observer, w.b2_actor):
+                    obs_r = room_of.get(w.b2_observer)
+                    act_r = room_of.get(w.b2_actor)
+                    obs_h = obs_r is not None and (
+                        obs_r == ev.room or ((obs_r, ev.room) in edges and ev.noise_level >= w.noise_threshold)
+                    )
+                    act_h = act_r is not None and (
+                        act_r == ev.room or ((act_r, ev.room) in edges and ev.noise_level >= w.noise_threshold)
+                    )
+                    if obs_h and act_h:
+                        b2_from_rule = str(ev.fact_value)
+
+            if ev.kind == "leave" and ev.actor in w.agents:
+                room_of[ev.actor] = None
+
+        assert b2_from_rule is not None
+        return b2_from_rule
+
+    configs = make_balanced_configs(300, base_seed=20261030)
+    worlds = [generate_world(c) for c in configs]
+    derived_b2_by_sid: dict[str, str] = {}
+    for w in worlds:
+        derived_b2_by_sid[w.scenario_id] = _derive_b2_from_rule_sentence_alone(w)
+        ug.validate_occlusion(w)
+        assert callable(validate_forcing_fn), "validate_belief_forcing must be exported by udlab_generator."
+        validate_forcing_fn(w)
+
+    writer = MockWriter()
+    pairs = [writer.render_scenario_pair(w) for w in worlds]
+    receipt = write_sealed_dataset(
+        rendered_pairs=pairs,
+        public_dir=tmp_path / "pub_b2_recount",
+        sealed_dir=tmp_path / "seal_b2_recount",
+        private_seed_hex="aa55" * 16,
+    )
+    sealed_rows = [
+        json.loads(line)
+        for line in receipt.keys_sealed_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    # Every sealed B2 key across all 600 rows (300 scenarios x 2 passes) must agree with the independent rule derivation
+    assert len(sealed_rows) == 600
+    for row in sealed_rows:
+        sid = str(row["scenario_id"])
+        sealed_b2 = next(str(q["key"]) for q in row["questions"] if q["question_type"] == "B2")
+        assert sealed_b2 == derived_b2_by_sid[sid], (
+            f"Sealed B2 key {sealed_b2!r} != rule-derived {derived_b2_by_sid[sid]!r} in {sid}"
+        )
+
+
+def test_22_scen_0111_old_unexplained_displacement_world_refused(tmp_path: Path) -> None:
+    """Test 22: A hand-built world reproducing scen_0111's old pattern (target moves primary_object behind observer's back, and observer later moves it from that displaced container) is refused by validate_occlusion, validate_belief_forcing, and verify_sealed_part."""
+    import udlab_generator as ug
+
+    validate_forcing_fn = getattr(ug, "validate_belief_forcing", None)
+
+    cfg_0111 = next(c for c in make_balanced_configs(300, base_seed=20261030) if c.scenario_id == "scen_0111")
+    w_0111 = generate_world(cfg_0111)
+    a1 = w_0111.b2_actor     # Cleo
+    a2 = w_0111.b2_observer  # Alma
+    pobj = w_0111.primary_object
+    pvar = w_0111.primary_variable
+
+    first_move_idx = next(
+        i for i, ev in enumerate(w_0111.events) if ev.kind == "move" and ev.target_object == pobj and ev.fact_id == "F0a"
+    )
+    # Find the final move index (where a2 moves pobj from cont_init to cont_final)
+    final_move_idx = next(
+        i
+        for i, ev in enumerate(w_0111.events)
+        if i > first_move_idx and ev.kind == "move" and ev.target_object == pobj and ev.actor == a2 and ev.fact_id != "F0"
+    )
+    # Find where a0's doorway transition starts right before final_move_idx
+    a0_walk_idx = final_move_idx - 2
+    r_work = w_0111.events[first_move_idx].room
+    occ_work = w_0111.occluders_by_room[r_work]
+    cont_final = str(w_0111.events[first_move_idx].to_location)
+    cont_init = str(w_0111.events[final_move_idx].from_location)
+
+    # Reconstruct scen_0111's old 646e5b39 pattern:
+    # Step A: a2 places pobj in cont_final (in open view of a1 and a2)
+    # Step B: a2 steps behind occ_work to far-side alcove
+    # Step C: a1 moves pobj from cont_final to cont_init while a2 is behind occ_work
+    # Step D: a1 steps behind occ_work to far-side alcove
+    # Step E: a2 steps around occ_work back to container bay, then later moves pobj from cont_init (displaced!) to cont_final
+    old_block = [
+        w_0111.events[first_move_idx],
+        Event(
+            step=0,
+            kind="move",
+            actor=a2,
+            room=r_work,
+            target_object=occ_work,
+            from_location="container bay",
+            to_location="far-side alcove",
+            occluded=False,
+        ),
+        Event(
+            step=0,
+            kind="move",
+            actor=a1,
+            room=r_work,
+            target_object=pobj,
+            from_location=cont_final,
+            to_location=cont_init,
+            occluded=False,
+            fact_id="F0",
+            fact_variable=pvar,
+            fact_value=cont_init,
+        ),
+        Event(
+            step=0,
+            kind="move",
+            actor=a1,
+            room=r_work,
+            target_object=occ_work,
+            from_location="container bay",
+            to_location="far-side alcove",
+            occluded=False,
+        ),
+        Event(
+            step=0,
+            kind="move",
+            actor=a2,
+            room=r_work,
+            target_object=occ_work,
+            from_location="far-side alcove",
+            to_location="container bay",
+            occluded=False,
+        ),
+    ]
+    raw_old_events = list(w_0111.events[:first_move_idx]) + old_block + list(w_0111.events[a0_walk_idx:])
+    old_events = tuple(replace(ev, step=idx) for idx, ev in enumerate(raw_old_events, start=1))
+    old_world = replace(
+        w_0111,
+        events=old_events,
+        unknowable_spec=replace(w_0111.unknowable_spec, trace_a=old_events, trace_b=old_events),
+    )
+
+    with pytest.raises(ValueError, match="belief-forcing|unexplained displacement|last placed or saw"):
+        ug.validate_occlusion(old_world)
+    assert callable(validate_forcing_fn), "validate_belief_forcing must be exported by udlab_generator."
+    with pytest.raises(ValueError, match="belief-forcing|unexplained displacement|last placed or saw"):
+        validate_forcing_fn(old_world)
+
+    # Also verify verify_sealed_part refuses a sealed store containing old_world
+    writer = MockWriter()
+    pub_dir = tmp_path / "pub_old_0111"
+    seal_dir = tmp_path / "seal_old_0111"
+    valid_configs = make_balanced_configs(8, base_seed=20261030)
+    valid_pairs = [writer.render_scenario_pair(generate_world(c)) for c in valid_configs]
+    receipt = write_sealed_dataset(valid_pairs, pub_dir, seal_dir, private_seed_hex="ef" * 32)
+    meta = json.loads(receipt.sealing_meta_path.read_text(encoding="utf-8"))
+    from dataclasses import asdict
+    meta["scenarios"]["scen_0000"] = asdict(replace(old_world, scenario_id="scen_0000"))
+    receipt.sealing_meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(SealingError, match="belief-forcing|unexplained displacement|validation failed"):
+        verify_sealed_part(pub_dir, seal_dir)
+
+

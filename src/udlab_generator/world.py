@@ -24,6 +24,12 @@ OCCLUSION_RULE: str = (
     "contents of, the room's containers (occluded=True)."
 )
 
+BELIEF_PERSISTENCE_RULE: str = (
+    "Each agent assumes an object remains where that agent last saw it in open view "
+    "or heard a witness state it was placed, and assumes another agent looks "
+    "where they last saw or communicated that agent perceiving it."
+)
+
 FACT_ID_PERMUTATIONS: tuple[tuple[str, str, str, str], ...] = tuple(
     itertools.permutations(("F1", "F2", "F3", "F4"))
 )
@@ -809,11 +815,13 @@ def _build_event_trace(
     # occlusion rule (`container bay` in open view vs `far-side alcove` behind `occ_work`) with exact
     # mention parity (`count(cont_init) == count(cont_final)`) across all 4 `(B1, B2)` cells:
     if not config.b1_true_belief and config.b2_true_belief:
-        # Cell (B1=False, B2=True):
+        # Cell (B1=False, B2=True), exact structural dual of (B1=True, B2=False):
         # 1. Both a1 and a2 at `container bay` see a2 place `primary_object` in `cont_final` (`F0a`).
-        # 2. a2 steps behind `occ_work` to `far-side alcove`.
-        # 3. While a2 is occluded at `far-side alcove`, a1 moves `primary_object` from `cont_final` to `cont_init` (`F0`).
-        # 4. a1 steps behind `occ_work` to `far-side alcove`, and a2 returns to `container bay` before the final move.
+        # 2. a1 steps behind `occ_work` to `far-side alcove`.
+        # 3. While a1 is occluded at `far-side alcove`, a2 moves `primary_object` from `cont_final` to `cont_init` (`F0`).
+        # 4. a2 exits `r_work` into `r_hub`; while a2 is in `r_hub`, a1 steps around `occ_work` to `container bay`,
+        #    observes `primary_object` at `cont_init` in open view (`F0`), and steps back behind `occ_work` to `far-side alcove`;
+        #    then a2 returns from `r_hub` to `r_work` before the final move.
         events.append(
             Event(
                 step=step,
@@ -834,7 +842,7 @@ def _build_event_trace(
             Event(
                 step=step,
                 kind="move",
-                actor=a2,
+                actor=a1,
                 room=r_work,
                 target_object=occ_work,
                 from_location=CONTAINER_BAY_STATION,
@@ -847,10 +855,40 @@ def _build_event_trace(
             Event(
                 step=step,
                 kind="move",
-                actor=a1,
+                actor=a2,
                 room=r_work,
                 target_object=primary_object,
                 from_location=cont_final,
+                to_location=cont_init,
+                occluded=False,
+                fact_id="F0",
+                fact_variable=primary_variable,
+                fact_value=cont_init,
+            )
+        )
+        step += 1
+        step = _append_doorway_walk(events, step, a2, r_work, r_hub, doorways)
+        events.append(
+            Event(
+                step=step,
+                kind="move",
+                actor=a1,
+                room=r_work,
+                target_object=occ_work,
+                from_location=FAR_SIDE_ALCOVE_STATION,
+                to_location=CONTAINER_BAY_STATION,
+                occluded=False,
+            )
+        )
+        step += 1
+        events.append(
+            Event(
+                step=step,
+                kind="see",
+                actor=a1,
+                room=r_work,
+                target_object=primary_object,
+                from_location=cont_init,
                 to_location=cont_init,
                 occluded=False,
                 fact_id="F0",
@@ -872,19 +910,7 @@ def _build_event_trace(
             )
         )
         step += 1
-        events.append(
-            Event(
-                step=step,
-                kind="move",
-                actor=a2,
-                room=r_work,
-                target_object=occ_work,
-                from_location=FAR_SIDE_ALCOVE_STATION,
-                to_location=CONTAINER_BAY_STATION,
-                occluded=False,
-            )
-        )
-        step += 1
+        step = _append_doorway_walk(events, step, a2, r_hub, r_work, doorways)
     else:
         # First inspect `cont_final` at `container bay` in `r_work` before placing `primary_object` in `cont_init`
         # so both `cont_init` and `cont_final` have equal mention counts before and after the final move.
@@ -1039,21 +1065,9 @@ def _build_event_trace(
         )
         step += 1
     elif not config.b1_true_belief and config.b2_true_belief:
-        # `a1` is already at `far-side alcove` behind `occ_work`; looks toward `cont_init` (`occluded=True`).
-        events.append(
-            Event(
-                step=step,
-                kind="see",
-                actor=a1,
-                room=r_work,
-                target_object=cont_init,
-                from_location=FAR_SIDE_ALCOVE_STATION,
-                to_location=FAR_SIDE_ALCOVE_STATION,
-                occluded=True,
-                occluder=occ_work,
-            )
-        )
-        step += 1
+        # `a1` is already at `far-side alcove` behind `occ_work`, and `a1`'s open-view `see` of
+        # `primary_object` at `cont_init` before the final move already equalizes container mentions at (3, 3).
+        pass
     else:
         if config.b1_true_belief and config.b2_true_belief:
             # `a1` steps behind `occ_work` to `far-side alcove` before looking toward `cont_init` and `cont_final`.
@@ -1712,6 +1726,7 @@ def generate_world(config: ScenarioConfig) -> World:
         config=config,
     )
     from udlab_generator.keys import (
+        validate_belief_forcing,
         validate_hearing,
         validate_object_locations,
         validate_occlusion,
@@ -1720,6 +1735,7 @@ def generate_world(config: ScenarioConfig) -> World:
 
     validate_topology(world)
     validate_occlusion(world)
+    validate_belief_forcing(world)
     validate_hearing(world)
     validate_object_locations(world)
     validate_placing_fairness(world)
