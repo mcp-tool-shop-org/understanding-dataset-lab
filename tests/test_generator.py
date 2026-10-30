@@ -98,7 +98,7 @@ def test_1_keys_from_reachability() -> None:
 
     assert naive_mismatches == len(worlds), "Naive non-reachability tracker that accepts bluffs must fail."
 
-    # Also test doorway adjacency hearing below vs above noise_threshold directly:
+    # Also test doorway adjacency hearing at or above vs below noise_threshold directly:
     w0 = worlds[0]
     r_a, r_b = w0.doorways[0]
     assert are_rooms_adjacent(r_a, r_b, w0.doorways)
@@ -115,25 +115,25 @@ def test_1_keys_from_reachability() -> None:
         fact_variable="quiet_var",
         fact_value="heard_val",
     )
-    quiet_say = Event(
+    loud_heard_say = Event(
         step=98,
         kind="say",
         actor=w0.agents[2],
         room=r_a,
-        utterance="Quiet note.",
-        noise_level=w0.noise_threshold - 10,
+        utterance="Loud note.",
+        noise_level=w0.noise_threshold + 10,
         fact_variable="quiet_var",
         fact_value="heard_val",
     )
     grounding_move_2 = replace(grounding_move_1, step=99, to_location="masked_val", fact_value="masked_val")
-    loud_masked_say = replace(quiet_say, step=100, noise_level=w0.noise_threshold + 10, fact_value="masked_val")
+    quiet_masked_say = replace(loud_heard_say, step=100, noise_level=w0.noise_threshold - 10, fact_value="masked_val")
     custom_world = replace(
         w0,
         initial_agent_rooms={w0.agents[0]: r_b, w0.agents[1]: r_b, w0.agents[2]: r_a},
-        events=(grounding_move_1, quiet_say, grounding_move_2, loud_masked_say),
+        events=(grounding_move_1, loud_heard_say, grounding_move_2, quiet_masked_say),
     )
     custom_recs = compute_perceptual_records(custom_world)
-    # Agent in adjacent room r_b hears step 98 (under threshold) but NOT step 100 (over threshold)
+    # Agent in adjacent room r_b hears step 98 (>= threshold) but NOT step 100 (< threshold)
     assert 98 in custom_recs[w0.agents[0]].heard_steps
     assert 100 not in custom_recs[w0.agents[0]].heard_steps
     assert compute_first_order_belief(custom_world, custom_recs, w0.agents[0], "quiet_var") == "heard_val"
@@ -1178,7 +1178,7 @@ def test_15_independent_recount_hearing_and_knowledge_keys() -> None:
                 if p_room is not None and ev.kind == "say":
                     if p_room == ev.room:
                         p_heard = True
-                    elif (p_room, ev.room) in edges and ev.noise_level < w.noise_threshold:
+                    elif (p_room, ev.room) in edges and ev.noise_level >= w.noise_threshold:
                         p_heard = True
 
                 # Direct message check
@@ -1269,4 +1269,334 @@ def test_15_independent_recount_hearing_and_knowledge_keys() -> None:
         q_map = {q.question_type: q.key for q in skeys.questions}
         for qtype in ("P", "K", "B1", "B2", "X", "D"):
             assert q_map[qtype] == recounted[qtype], f"{w.scenario_id} {qtype} mismatch"
+
+
+def test_16_hearing_direction_physics() -> None:
+    """Test 16: Hearing follows physics: an adjacent-room say at 20 dB (< threshold) is NOT heard, and at 60 dB (>= threshold) IS heard."""
+    import udlab_generator as ug
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    r_a, r_b = w0.doorways[0]
+    assert are_rooms_adjacent(r_a, r_b, w0.doorways)
+    assert w0.noise_threshold == 50
+
+    move_20 = Event(
+        step=1,
+        kind="move",
+        actor=w0.agents[2],
+        room=r_a,
+        target_object=w0.secondary_object,
+        from_location=w0.containers_by_room[r_a][0],
+        to_location=w0.containers_by_room[r_a][1],
+        fact_variable=w0.secondary_variable,
+        fact_value=w0.containers_by_room[r_a][1],
+    )
+    say_20 = Event(
+        step=2,
+        kind="say",
+        actor=w0.agents[2],
+        room=r_a,
+        utterance="Quiet 20 dB statement.",
+        noise_level=20,
+        fact_variable=w0.secondary_variable,
+        fact_value=w0.containers_by_room[r_a][1],
+    )
+    move_60 = Event(
+        step=3,
+        kind="move",
+        actor=w0.agents[2],
+        room=r_a,
+        target_object=w0.secondary_object,
+        from_location=w0.containers_by_room[r_a][1],
+        to_location=w0.containers_by_room[r_a][0],
+        fact_variable=w0.secondary_variable,
+        fact_value=w0.containers_by_room[r_a][0],
+    )
+    say_60 = Event(
+        step=4,
+        kind="say",
+        actor=w0.agents[2],
+        room=r_a,
+        utterance="Loud 60 dB statement.",
+        noise_level=60,
+        fact_variable=w0.secondary_variable,
+        fact_value=w0.containers_by_room[r_a][0],
+    )
+    hand_world = replace(
+        w0,
+        initial_agent_rooms={w0.agents[0]: r_b, w0.agents[1]: r_b, w0.agents[2]: r_a},
+        events=(move_20, say_20, move_60, say_60),
+    )
+    recs = compute_perceptual_records(hand_world)
+    # Speaker in r_a hears both 20 dB and 60 dB
+    assert 2 in recs[w0.agents[2]].heard_steps
+    assert 4 in recs[w0.agents[2]].heard_steps
+    # Listener in doorway-adjacent room r_b must NOT hear 20 dB, and MUST hear 60 dB
+    assert 2 not in recs[w0.agents[0]].heard_steps
+    assert 4 in recs[w0.agents[0]].heard_steps
+
+    # Also verify world-text sentence states the physics rule
+    prose = render_world_template(w0, w0.agents[0])
+    assert f"a say at or above {w0.noise_threshold} dB carries one doorway; quieter speech stays in its room" in prose
+
+
+def test_17_object_locations_and_two_rooms_world_raises(tmp_path: Path) -> None:
+    """Test 17: Validate object locations over all 300 scenarios, and verify a hand-built two-rooms world raises in validate_object_locations and verify_sealed_part."""
+    import udlab_generator as ug
+
+    validate_obj_fn = getattr(ug, "validate_object_locations", None)
+    configs = make_balanced_configs(300, base_seed=20261030)
+
+    # Scan all 300 scenarios for any object seen or moved from a room other than where it was last placed/seen
+    two_room_violations = 0
+    for cfg in configs:
+        w = generate_world(cfg)
+        last_room_of_obj: dict[str, str] = {}
+        for ev in w.events:
+            if ev.kind in ("move", "see") and ev.target_object:
+                # Ignore station transitions around room occluders
+                if ev.from_location in ("container bay", "far-side alcove") and ev.to_location in (
+                    "container bay",
+                    "far-side alcove",
+                ):
+                    continue
+                # Ignore container-only glances where target_object is a container
+                all_conts = {c for pair in w.containers_by_room.values() for c in pair}
+                if ev.target_object in all_conts or ev.target_object in w.fixtures_by_room.values():
+                    continue
+                # Distinguish baseline vs reserve unit for aux_object if needed, or check note_item / primary / secondary
+                obj_key = (
+                    f"{ev.fact_variable}"
+                    if ev.fact_variable and ev.fact_variable.startswith(("baseline:", "reserve:"))
+                    else ev.target_object
+                )
+                if obj_key in last_room_of_obj and last_room_of_obj[obj_key] != ev.room:
+                    two_room_violations += 1
+                last_room_of_obj[obj_key] = ev.room
+
+    assert two_room_violations == 0, f"Found {two_room_violations} cross-room object location violations across 300 scenarios."
+    assert callable(validate_obj_fn), "validate_object_locations must be exported by udlab_generator."
+    for cfg in configs:
+        w = generate_world(cfg)
+        validate_obj_fn(w)
+
+    # Hand-built two-rooms world: Dora puts note_item on countertop in room A, then Hana sees it on countertop in room B
+    w0 = generate_world(configs[0])
+    r_a, r_b = w0.doorways[0]
+    note_obj = next(d.note_item for d in ug.world.DOMAINS if d.name == w0.domain_name)
+    two_rooms_events = w0.events + (
+        Event(
+            step=len(w0.events) + 1,
+            kind="move",
+            actor=w0.agents[2],
+            room=r_a,
+            target_object=note_obj,
+            from_location="dispatch folder",
+            to_location=f"countertop in the {r_a}",
+        ),
+        Event(
+            step=len(w0.events) + 2,
+            kind="see",
+            actor=w0.agents[0],
+            room=r_b,
+            target_object=note_obj,
+            from_location=f"countertop in the {r_b}",
+            to_location=f"countertop in the {r_b}",
+        ),
+    )
+    two_rooms_world = replace(
+        w0,
+        initial_agent_rooms=dict(w0.initial_agent_rooms, **{w0.agents[2]: r_a, w0.agents[0]: r_b}),
+        events=two_rooms_events,
+    )
+    with pytest.raises(ValueError, match="object location|room|countertop"):
+        validate_obj_fn(two_rooms_world)
+
+    # Also verify verify_sealed_part raises when a sealed scenario world violates object locations
+    writer = MockWriter()
+    pub_dir = tmp_path / "pub_two_rooms"
+    seal_dir = tmp_path / "seal_two_rooms"
+    valid_pairs = [writer.render_scenario_pair(generate_world(c)) for c in make_balanced_configs(8, base_seed=20261030)]
+    receipt = write_sealed_dataset(valid_pairs, pub_dir, seal_dir, private_seed_hex="cd" * 32)
+    meta = json.loads(receipt.sealing_meta_path.read_text(encoding="utf-8"))
+    for ev_dict in meta["scenarios"]["scen_0000"]["events"]:
+        if ev_dict["kind"] == "see" and ev_dict["target_object"] and "countertop" in str(ev_dict.get("to_location", "")):
+            other_room = next(r for r in meta["scenarios"]["scen_0000"]["rooms"] if r != ev_dict["room"])
+            ev_dict["to_location"] = f"countertop in the {other_room}"
+            break
+    receipt.sealing_meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(SealingError, match="object location|countertop|validation failed"):
+        verify_sealed_part(pub_dir, seal_dir)
+
+
+def test_18_placing_fairness_rule() -> None:
+    """Test 18: A U or S question about who placed/moved an object has a non-unknowable key only if EVERY focal agent saw the placing or heard it stated by someone who saw it."""
+    import udlab_generator as ug
+
+    validate_fairness_fn = getattr(ug, "validate_placing_fairness", None)
+    configs = make_balanced_configs(300, base_seed=20261030)
+
+    unfair_count = 0
+    for cfg in configs:
+        w = generate_world(cfg)
+        recs = compute_perceptual_records(w)
+        skeys = compute_scenario_keys(w)
+        focal_agents = (w.agents[0], w.agents[1])
+        for q in skeys.questions:
+            if q.question_type in ("U", "S") and q.question_text.startswith("Who "):
+                if q.key != UNKNOWABLE_KEY:
+                    # Find the move event(s) placing the queried object
+                    placing_steps = [
+                        ev.step
+                        for ev in w.events
+                        if ev.kind == "move" and ev.target_object and ev.target_object in q.question_text
+                    ]
+                    for fa in focal_agents:
+                        fa_saw = any(st in recs[fa].seen_steps for st in placing_steps)
+                        fa_heard_from_witness = any(
+                            ev.step in recs[fa].heard_steps
+                            and not ev.is_bluff
+                            and ev.target_object
+                            and ev.target_object in q.question_text
+                            and any(pst in recs[ev.actor].seen_steps and pst < ev.step for pst in placing_steps)
+                            for ev in w.events
+                            if ev.kind == "say"
+                        )
+                        if not (fa_saw or fa_heard_from_witness):
+                            unfair_count += 1
+
+    assert unfair_count == 0, f"Found {unfair_count} unfair 'Who placed...' questions across 300 scenarios."
+    assert callable(validate_fairness_fn), "validate_placing_fairness must be exported by udlab_generator."
+    for cfg in configs:
+        w = generate_world(cfg)
+        validate_fairness_fn(w)
+
+    # Hand-built unfair world where settled S 'Who placed...' happens in a room where focal agent a0 is not present and never hears about it
+    w_s_who = next(generate_world(c) for c in configs if not c.u_is_who)
+    r_a, r_b = w_s_who.doorways[0]
+    note_obj = next(d.note_item for d in ug.world.DOMAINS if d.name == w_s_who.domain_name)
+    # Remove any move/say of note_obj and add an unseen move in r_b while a0 is in r_a
+    filtered_evs = [
+        ev for ev in w_s_who.events if ev.target_object != note_obj
+    ]
+    # Find where a2 and a0 are at the end of filtered_evs
+    occ = dict(w_s_who.initial_agent_rooms)
+    for ev in filtered_evs:
+        if ev.kind == "enter":
+            occ[ev.actor] = ev.room
+    a0_room = occ[w_s_who.agents[0]]
+    a2_room = occ[w_s_who.agents[2]]
+    if a0_room == a2_room:
+        # Move a0 to an adjacent room so a0 does not see a2's placement
+        adj_r = next(r for r in w_s_who.rooms if are_rooms_adjacent(a0_room, r, w_s_who.doorways))
+        filtered_evs.extend(
+            [
+                Event(
+                    step=len(filtered_evs) + 1,
+                    kind="leave",
+                    actor=w_s_who.agents[0],
+                    room=a0_room,
+                    from_location=a0_room,
+                    to_location=adj_r,
+                ),
+                Event(
+                    step=len(filtered_evs) + 2,
+                    kind="enter",
+                    actor=w_s_who.agents[0],
+                    room=adj_r,
+                    from_location=a0_room,
+                    to_location=adj_r,
+                ),
+            ]
+        )
+    filtered_evs.append(
+        Event(
+            step=len(filtered_evs) + 1,
+            kind="move",
+            actor=w_s_who.agents[2],
+            room=a2_room,
+            target_object=note_obj,
+            from_location="dispatch folder",
+            to_location=f"countertop in the {a2_room}",
+        )
+    )
+    reindexed = tuple(replace(ev, step=idx) for idx, ev in enumerate(filtered_evs, start=1))
+    unfair_world = replace(
+        w_s_who,
+        events=reindexed,
+        unknowable_spec=replace(w_s_who.unknowable_spec, trace_a=reindexed, trace_b=reindexed),
+    )
+    with pytest.raises(ValueError, match="fairness|unfair|placed|focal"):
+        validate_fairness_fn(unfair_world)
+
+
+def test_19_article_a_an_every_vocabulary_noun() -> None:
+    """Test 19: Indefinite article helper selects a/an by the next word's sound across every object, container, occluder, fixture, and special cases, and rendered prose never contains 'a easel screen'."""
+    import udlab_generator as ug
+    from udlab_generator.world import DOMAINS
+
+    article_fn = getattr(ug, "indefinite_article", None)
+    # Verify rendered prose across all domains never has 'a easel' or any wrong article before occluders
+    for cfg in make_balanced_configs(12, base_seed=20261030):
+        w = generate_world(cfg)
+        prose = render_world_template(w, w.agents[0])
+        assert "a easel" not in prose.lower()
+
+    assert callable(article_fn), "indefinite_article must be exported by udlab_generator."
+
+    # Check phonetic special cases
+    assert article_fn("easel screen") == "an"
+    assert article_fn("oak drawer") == "an"
+    assert article_fn("iron safe") == "an"
+    assert article_fn("unsigned transfer slip") == "an"
+    assert article_fn("overhead louver") == "an"
+    assert article_fn("hour") == "an"
+    assert article_fn("honest mistake") == "an"
+    assert article_fn("heirloom") == "an"
+    assert article_fn("herbarium") == "an"
+    assert article_fn("unit") == "a"
+    assert article_fn("uniform") == "a"
+    assert article_fn("one-way mirror") == "a"
+    assert article_fn("frosted partition") == "a"
+    assert article_fn("humidity dial") == "a"
+
+    # Test every object, container, occluder, fixture, note_item, and side_mechanism across all DOMAINS
+    vowel_First_words = {
+        "agate",
+        "aluminum",
+        "ash",
+        "assay",
+        "azimuth",
+        "easel",
+        "enamel",
+        "exhaust",
+        "index",
+        "iron",
+        "oak",
+        "overhead",
+        "unmarked",
+        "unsigned",
+    }
+    for dom in DOMAINS:
+        all_nouns = (
+            *dom.rooms,
+            *dom.objects,
+            *(c for pair in dom.containers for c in pair),
+            *dom.occluders,
+            *dom.fixtures,
+            dom.note_item,
+            dom.side_mechanism,
+        )
+        for noun in all_nouns:
+            first_word = noun.split()[0].lower()
+            expected = "an" if first_word in vowel_First_words else "a"
+            assert article_fn(noun) == expected, f"Wrong article for {noun!r}: got {article_fn(noun)!r}, expected {expected!r}"
+
+    for cfg in make_balanced_configs(12, base_seed=20261030):
+        w = generate_world(cfg)
+        prose = render_world_template(w, w.agents[0])
+        for occ in w.occluders_by_room.values():
+            expected_phrase = f"with {article_fn(occ)} {occ} standing"
+            assert expected_phrase in prose
+
 

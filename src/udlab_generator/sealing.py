@@ -18,7 +18,9 @@ from udlab_generator.keys import (
     build_public_pressure_probe_template,
     compute_scenario_keys,
     validate_hearing,
+    validate_object_locations,
     validate_occlusion,
+    validate_placing_fairness,
     validate_topology,
 )
 from udlab_generator.render import RenderedScenario
@@ -482,6 +484,8 @@ def write_sealed_dataset(
             validate_topology(w_obj)
             validate_occlusion(w_obj)
             validate_hearing(w_obj)
+            validate_object_locations(w_obj)
+            validate_placing_fairness(w_obj)
             serialized_worlds[w_obj.scenario_id] = _serialize_world(w_obj)
 
     sealing_meta: dict[str, Any] = {
@@ -600,6 +604,8 @@ def verify_sealed_part(public_dir: Path, sealed_dir: Path) -> None:
                 validate_topology(w_obj)
                 validate_occlusion(w_obj)
                 validate_hearing(w_obj)
+                validate_object_locations(w_obj)
+                validate_placing_fairness(w_obj)
             except ValueError as exc:
                 raise SealingError(f"Sealed world validation failed for {scen_id}: {exc}") from exc
             validated_keys_by_scen[scen_id] = compute_scenario_keys(w_obj)

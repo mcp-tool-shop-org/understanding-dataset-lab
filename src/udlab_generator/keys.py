@@ -134,11 +134,12 @@ def can_agent_hear_event(
 ) -> bool:
     """Determine by hearing rules whether `agent` hears a `say` event.
 
-    Hearing rules (design section 4):
+    Hearing rules (physics):
     - Applies to `say` events.
-    - Same room: `room_occupants[agent] == event.room`.
-    - Adjacent room: `are_rooms_adjacent(room_occupants[agent], event.room, doorways)`
-      AND `event.noise_level < noise_threshold`.
+    - Same room: `room_occupants[agent] == event.room` (heard always).
+    - Doorway-adjacent room: `are_rooms_adjacent(room_occupants[agent], event.room, doorways)`
+      AND `event.noise_level >= noise_threshold`.
+    - Never heard two or more doorways away.
     """
     if event.kind != "say":
         return False
@@ -147,7 +148,7 @@ def can_agent_hear_event(
     agent_room = room_occupants[agent]
     if agent_room == event.room:
         return True
-    if are_rooms_adjacent(agent_room, event.room, doorways) and event.noise_level < noise_threshold:
+    if are_rooms_adjacent(agent_room, event.room, doorways) and event.noise_level >= noise_threshold:
         return True
     return False
 
@@ -924,7 +925,7 @@ def validate_occlusion(world: World) -> None:
 
 
 def validate_hearing(world: World) -> None:
-    """Validate that every heard event is in the speaker's room or doorway-adjacent below `world.noise_threshold`."""
+    """Validate that every heard event is in the speaker's room or doorway-adjacent at or above `world.noise_threshold`."""
     records = compute_perceptual_records(world)
     all_parties = list(world.agents) + list(world.absent_parties)
     occupants: dict[str, str | None] = dict(world.initial_agent_rooms)
@@ -943,7 +944,7 @@ def validate_hearing(world: World) -> None:
                     expected_heard = False
                 elif p_room == ev.room:
                     expected_heard = True
-                elif are_rooms_adjacent(p_room, ev.room, world.doorways) and ev.noise_level < world.noise_threshold:
+                elif are_rooms_adjacent(p_room, ev.room, world.doorways) and ev.noise_level >= world.noise_threshold:
                     expected_heard = True
                 else:
                     expected_heard = False
@@ -975,3 +976,168 @@ def validate_hearing(world: World) -> None:
             raise ValueError(
                 f"Scenario {world.scenario_id} hearing error: K key {q_by_type['K']!r} disagrees with config.k_knows ({cfg_k!r})."
             )
+
+
+def validate_object_locations(world: World) -> None:
+    """Validate per-object room tracking: every countertop/shared surface is per-room, and any object seen or moved at a place is in that room at that step."""
+    room_by_container: dict[str, str] = {
+        c: r for r, pair in world.containers_by_room.items() for c in pair
+    }
+    all_containers = set(room_by_container.keys())
+    all_fixtures = set(world.fixtures_by_room.values())
+    all_occluders = set(world.occluders_by_room.values())
+    room_by_fixture: dict[str, str] = {
+        f: r for r, f in world.fixtures_by_room.items()
+    }
+    room_by_occluder: dict[str, str] = {
+        o: r for r, o in world.occluders_by_room.items()
+    }
+    valid_stations = {CONTAINER_BAY_STATION, FAR_SIDE_ALCOVE_STATION}
+
+    # Track each physical object's current `(room, location)` across steps.
+    #Note: `aux_object` has two distinct tracked instances (`baseline:{aux_object}` in `r_hub` and `reserve:{aux_object}` in `r_sec_a`).
+    object_room: dict[str, str] = {}
+    object_place: dict[str, str] = {}
+
+    for ev in world.events:
+        if ev.kind not in ("move", "see") or is_station_transition_event(ev, world):
+            continue
+
+        # Check per-room container, fixture, occluder, and shared-surface ("countertop in the <room>") room consistency:
+        for loc in (ev.target_object, ev.from_location, ev.to_location):
+            if not loc:
+                continue
+            if loc in all_containers and room_by_container[loc] != ev.room:
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} object location error: "
+                    f"container '{loc}' belongs to '{room_by_container[loc]}', not '{ev.room}'."
+                )
+            if loc in all_fixtures and room_by_fixture[loc] != ev.room:
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} object location error: "
+                    f"fixture '{loc}' belongs to '{room_by_fixture[loc]}', not '{ev.room}'."
+                )
+            if loc in all_occluders and room_by_occluder[loc] != ev.room:
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} object location error: "
+                    f"occluder '{loc}' belongs to '{room_by_occluder[loc]}', not '{ev.room}'."
+                )
+            if "countertop" in loc:
+                expected_surface = f"countertop in the {ev.room}"
+                if loc != expected_surface:
+                    raise ValueError(
+                        f"Scenario {world.scenario_id} step {ev.step} object location error: "
+                        f"countertop surface '{loc}' does not match per-room surface '{expected_surface}'."
+                    )
+
+        target = ev.target_object
+        if not target or target in all_containers or target in all_fixtures or target in all_occluders:
+            continue
+        if ev.from_location in ("latch position A", "latch position B") or ev.to_location in (
+            "latch position A",
+            "latch position B",
+        ):
+            continue
+
+        # Identify the tracked object instance (`baseline:` vs `reserve:` for `aux_object`, otherwise `target`).
+        if ev.fact_variable and ev.fact_variable.startswith(("baseline:", "reserve:")):
+            obj_key = ev.fact_variable
+        else:
+            obj_key = target
+
+        if ev.kind == "move":
+            if obj_key in object_room:
+                if object_room[obj_key] != ev.room:
+                    raise ValueError(
+                        f"Scenario {world.scenario_id} step {ev.step} object location error: "
+                        f"'{target}' moved in '{ev.room}' but was last in room '{object_room[obj_key]}'."
+                    )
+                if ev.from_location and object_place.get(obj_key) and ev.from_location != object_place[obj_key]:
+                    raise ValueError(
+                        f"Scenario {world.scenario_id} step {ev.step} object location error: "
+                        f"'{target}' moved from '{ev.from_location}' but was at '{object_place[obj_key]}'."
+                    )
+            object_room[obj_key] = ev.room
+            if ev.to_location:
+                object_place[obj_key] = ev.to_location
+
+        elif ev.kind == "see":
+            if obj_key in object_room:
+                if object_room[obj_key] != ev.room:
+                    raise ValueError(
+                        f"Scenario {world.scenario_id} step {ev.step} object location error: "
+                        f"'{target}' seen in '{ev.room}' at '{ev.to_location}', but was last placed/seen in room '{object_room[obj_key]}' at '{object_place.get(obj_key)}'."
+                    )
+                if (
+                    ev.to_location
+                    and ev.to_location not in valid_stations
+                    and object_place.get(obj_key)
+                    and ev.to_location != object_place[obj_key]
+                ):
+                    raise ValueError(
+                        f"Scenario {world.scenario_id} step {ev.step} object location error: "
+                        f"'{target}' seen at '{ev.to_location}' in '{ev.room}', but was at '{object_place[obj_key]}'."
+                    )
+            else:
+                object_room[obj_key] = ev.room
+                if ev.to_location and ev.to_location not in valid_stations:
+                    object_place[obj_key] = ev.to_location
+
+
+def validate_placing_fairness(world: World) -> None:
+    """Validate 'Who placed it' fairness:
+
+    A `U` or `S` question about who placed or moved an object has a non-unknowable key
+    only if the focal agent (for every focal rendering of the scenario) saw the placing,
+    or heard it stated by someone who saw it. Otherwise the item must be the unknowable
+    case (`UNKNOWABLE_KEY`) by construction.
+    """
+    records = compute_perceptual_records(world)
+    skeys = compute_scenario_keys(world)
+    focal_agents = (world.agents[0], world.agents[1])
+
+    for q in skeys.questions:
+        if q.question_type not in ("U", "S") or not q.question_text.startswith("Who "):
+            continue
+
+        placing_events = [
+            ev
+            for ev in world.events
+            if ev.kind == "move" and ev.target_object and ev.target_object in q.question_text
+        ]
+        placing_steps = {ev.step for ev in placing_events}
+
+        focal_has_access: dict[str, bool] = {}
+        for fa in focal_agents:
+            saw_placing = any(st in records[fa].seen_steps for st in placing_steps)
+            heard_from_witness = any(
+                ev.kind == "say"
+                and not ev.is_bluff
+                and ev.step in records[fa].heard_steps
+                and ev.target_object is not None
+                and ev.target_object in q.question_text
+                and any(pst in records[ev.actor].seen_steps and pst < ev.step for pst in placing_steps)
+                for ev in world.events
+            )
+            focal_has_access[fa] = saw_placing or heard_from_witness
+
+        all_focal_know = bool(placing_steps) and all(focal_has_access.values())
+        any_focal_knows = bool(placing_steps) and any(focal_has_access.values())
+
+        if q.key != UNKNOWABLE_KEY:
+            if not all_focal_know:
+                missing_agents = [fa for fa, ok in focal_has_access.items() if not ok]
+                raise ValueError(
+                    f"Scenario {world.scenario_id} placing fairness error: "
+                    f"{q.question_type} question '{q.question_text}' has non-unknowable key {q.key!r}, "
+                    f"but focal agent(s) {missing_agents} neither saw the placing nor heard it stated by someone who saw it."
+                )
+        else:
+            if any_focal_knows:
+                knowing_agents = [fa for fa, ok in focal_has_access.items() if ok]
+                raise ValueError(
+                    f"Scenario {world.scenario_id} placing fairness error: "
+                    f"{q.question_type} question '{q.question_text}' has key UNKNOWABLE_KEY, "
+                    f"but focal agent(s) {knowing_agents} observed or heard who placed it."
+                )
+

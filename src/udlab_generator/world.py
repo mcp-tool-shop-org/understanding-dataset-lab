@@ -717,7 +717,7 @@ def _build_event_trace(
     fid_primary, fid_shared, fid_secondary, fid_aux = fact_id_map
 
     # Permute the 4 domain rooms per scenario so no room name carries a prior for any key.
-    # In `k_doorway_mode` (50% of scenarios), `a2` speaks below `noise_threshold` (40 dB) and `a0`
+    # In `k_doorway_mode` (50% of scenarios), `a2` speaks at or above `noise_threshold` (60 dB) and `a0`
     # enters `r_hub`, so `K` is decided directly by whether `(r_hub, r_sec_a)` is a doorway in `doorways`.
     perm_rooms = list(rooms)
     rng.shuffle(perm_rooms)
@@ -1108,21 +1108,21 @@ def _build_event_trace(
     # Symmetric 1-hop doorway transition for `a0` before `a2` moves and speaks about `secondary_object` (`k_knows`):
     if not k_doorway_mode and config.k_knows and are_rooms_adjacent(r_p_dest, r_sec_a, doorways):
         r_k_dest = r_sec_a
-        k_say_noise = noise_threshold + 10
+        k_say_noise = noise_threshold - 10
     else:
         r_k_dest = r_hub
         if config.k_knows:
-            k_say_noise = noise_threshold - 10
+            k_say_noise = noise_threshold + 10
         else:
             k_say_noise = (
-                noise_threshold - 10
+                noise_threshold + 10
                 if not are_rooms_adjacent(r_hub, r_sec_a, doorways)
-                else noise_threshold + 10
+                else noise_threshold - 10
             )
 
     a1_hears_secondary = (
         a1_current_room == r_sec_a
-        or (are_rooms_adjacent(a1_current_room, r_sec_a, doorways) and k_say_noise < noise_threshold)
+        or (are_rooms_adjacent(a1_current_room, r_sec_a, doorways) and k_say_noise >= noise_threshold)
     )
 
     step = _append_doorway_walk(events, step, a0, r_p_dest, r_k_dest, doorways)
@@ -1254,9 +1254,10 @@ def _build_event_trace(
         step += 1
 
     # Side events for `U` (unknowable) and `S` (settled twin) projected from `latent_state`:
+    note_surface = f"countertop in the {r_k_dest}"
     if config.u_is_who:
-        # `latent_state["note_item_placer"]` placed `note_item` on the countertop prior to step 1 (unlogged),
-        # so only `a0` seeing it already on the countertop is projected to the observable event log.
+        # `latent_state["note_item_placer"]` placed `note_item` on the countertop in `r_k_dest` prior to step 1 (unlogged),
+        # so only `a0` seeing it already on the countertop in `r_k_dest` is projected to the observable event log.
         events.append(
             Event(
                 step=step,
@@ -1264,8 +1265,8 @@ def _build_event_trace(
                 actor=a0,
                 room=r_k_dest,
                 target_object=domain.note_item,
-                from_location="countertop",
-                to_location="countertop",
+                from_location=note_surface,
+                to_location=note_surface,
                 occluded=False,
             )
         )
@@ -1300,20 +1301,26 @@ def _build_event_trace(
         step += 1
     else:
         settled_who = latent_state["note_item_placer"]
+        if current_agent_rooms[settled_who] != r_k_dest:
+            step = _append_doorway_walk(
+                events, step, settled_who, current_agent_rooms[settled_who], r_k_dest, doorways
+            )
+            current_agent_rooms[settled_who] = r_k_dest
         events.append(
             Event(
                 step=step,
                 kind="move",
                 actor=settled_who,
-                room=r_sec_a,
+                room=r_k_dest,
                 target_object=domain.note_item,
                 from_location="dispatch folder",
-                to_location="countertop",
+                to_location=note_surface,
                 occluded=False,
             )
         )
         step += 1
-        # Equalize `a0`'s step count across `u_is_who` so `len(agent_sent_indices)` does not leak into P/K.
+        # Equalize `a0`'s step count across `u_is_who` so `len(agent_sent_indices)` does not leak into P/K,
+        # and confirm `a0` sees `note_item` on the countertop in the same room `r_k_dest`.
         events.append(
             Event(
                 step=step,
@@ -1321,9 +1328,30 @@ def _build_event_trace(
                 actor=a0,
                 room=r_k_dest,
                 target_object=domain.note_item,
-                from_location="countertop",
-                to_location="countertop",
+                from_location=note_surface,
+                to_location=note_surface,
                 occluded=False,
+            )
+        )
+        step += 1
+        # `settled_who` states the placement in `r_hub` at >= `noise_threshold` so both focal agents (`a0` in `r_k_dest`
+        # and `a1` in `r_work`, adjacent to `r_hub`) hear who placed `note_item` from the witness who saw/performed it.
+        if current_agent_rooms[settled_who] != r_hub:
+            step = _append_doorway_walk(
+                events, step, settled_who, current_agent_rooms[settled_who], r_hub, doorways
+            )
+            current_agent_rooms[settled_who] = r_hub
+        events.append(
+            Event(
+                step=step,
+                kind="say",
+                actor=settled_who,
+                room=r_hub,
+                target_object=domain.note_item,
+                to_location=note_surface,
+                utterance=f"I placed the {domain.note_item} on the {note_surface}.",
+                occluded=False,
+                noise_level=noise_threshold + 10,
             )
         )
         step += 1
@@ -1683,9 +1711,16 @@ def generate_world(config: ScenarioConfig) -> World:
         primary_absent=primary_absent,
         config=config,
     )
-    from udlab_generator.keys import validate_hearing, validate_occlusion
+    from udlab_generator.keys import (
+        validate_hearing,
+        validate_object_locations,
+        validate_occlusion,
+        validate_placing_fairness,
+    )
 
     validate_topology(world)
     validate_occlusion(world)
     validate_hearing(world)
+    validate_object_locations(world)
+    validate_placing_fairness(world)
     return world

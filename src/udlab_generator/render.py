@@ -139,6 +139,46 @@ def format_writer_prompt(world: World, focal_agent: str, template: str | None = 
     )
 
 
+_WORD_TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
+_SILENT_H_PREFIXES: tuple[str, ...] = ("hour", "honest", "honor", "honour", "heir", "herbarium")
+_CONSONANT_SOUND_VOWEL_PREFIXES: tuple[str, ...] = (
+    "uni",
+    "use",
+    "usu",
+    "ute",
+    "uti",
+    "uto",
+    "eul",
+    "eup",
+    "eur",
+    "ew",
+    "one",
+    "once",
+)
+_VOWEL_SOUND_ACRONYMS: frozenset[str] = frozenset({"f", "h", "l", "m", "n", "r", "s", "x"})
+
+
+def indefinite_article(phrase: str) -> str:
+    """Return `'a'` or `'an'` based on the phonetic sound of the first word in `phrase`."""
+    match = _WORD_TOKEN_RE.search(phrase.strip())
+    if not match:
+        return "a"
+    raw_word = match.group(0)
+    word = raw_word.lower()
+
+    if any(word.startswith(pref) for pref in _SILENT_H_PREFIXES):
+        return "an"
+    if any(word.startswith(pref) for pref in _CONSONANT_SOUND_VOWEL_PREFIXES):
+        return "a"
+    if len(word) == 1 and word in _VOWEL_SOUND_ACRONYMS:
+        return "an"
+    if len(raw_word) >= 2 and raw_word.isupper() and word[0] in _VOWEL_SOUND_ACRONYMS:
+        return "an"
+    if word[0] in ("a", "e", "i", "o", "u"):
+        return "an"
+    return "a"
+
+
 def check_rendered_prose(prose: str) -> tuple[str, ...]:
     """Validate that `prose` contains no banned mental/emotional adverbs.
 
@@ -212,9 +252,9 @@ def _render_event_sentence(event: Event, focal_agent: str, noise_threshold: int)
 
     if event.kind == "say":
         noise_desc = (
-            f"at {event.noise_level} dB (above the {noise_threshold} dB doorway threshold, so adjacent rooms could not hear)"
+            f"at {event.noise_level} dB (at or above the {noise_threshold} dB doorway threshold, audible in the room and doorway-adjacent rooms)"
             if event.noise_level >= noise_threshold
-            else f"at {event.noise_level} dB (below the {noise_threshold} dB doorway threshold, audible in the room and doorway-adjacent rooms)"
+            else f"at {event.noise_level} dB (below the {noise_threshold} dB doorway threshold, so quieter speech stayed in the {event.room} and adjacent rooms could not hear)"
         )
         return (
             f"{prefix}, in the {event.room} {noise_desc}, {event.actor} said: \"{event.utterance}\""
@@ -241,9 +281,10 @@ def render_world_template(world: World, focal_agent: str) -> str:
     for r in world.rooms:
         c_pair = world.containers_by_room[r]
         occ = world.occluders_by_room[r]
+        occ_art = indefinite_article(occ)
         room_setup_strs.append(
             f"the {r} contains the {c_pair[0]} and the {c_pair[1]} in the {CONTAINER_BAY_STATION} "
-            f"(with a {occ} standing between the {FAR_SIDE_ALCOVE_STATION} and the {CONTAINER_BAY_STATION} "
+            f"(with {occ_art} {occ} standing between the {FAR_SIDE_ALCOVE_STATION} and the {CONTAINER_BAY_STATION} "
             f"that blocks an agent in the {FAR_SIDE_ALCOVE_STATION} from seeing events at or the contents of "
             f"the containers behind it, while an agent in the {CONTAINER_BAY_STATION} sees them in open view)"
         )
@@ -260,7 +301,8 @@ def render_world_template(world: World, focal_agent: str) -> str:
     setup_para = (
         f"Following {focal_agent} through the {world.domain_name.replace('_', ' ')}: "
         f"{'; '.join(room_setup_strs)}. "
-        f"Doorways link the rooms as follows: {', '.join(doorway_strs)}, and the doorway hearing threshold is {world.noise_threshold} dB. "
+        f"Doorways link the rooms as follows: {', '.join(doorway_strs)}, and the doorway hearing threshold is {world.noise_threshold} dB "
+        f"(a say at or above {world.noise_threshold} dB carries one doorway; quieter speech stays in its room). "
         f"At the start, {', '.join(agent_pos_strs)}. "
         f"Meanwhile, {', '.join(world.absent_parties)} "
         f"{'is' if len(world.absent_parties) == 1 else 'are'} absent off-site. "
