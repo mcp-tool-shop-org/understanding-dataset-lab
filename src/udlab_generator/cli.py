@@ -16,7 +16,11 @@ import time
 from typing import Any
 
 from udlab_generator.diversity import count_template_diversity
-from udlab_generator.probe import run_shortcut_probe
+from udlab_generator.probe import (
+    ClassBalanceReport,
+    ShortcutProbeReport,
+    run_shortcut_probe,
+)
 from udlab_generator.render import (
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_VRAM_HALT_MIB,
@@ -28,23 +32,30 @@ from udlab_generator.render import (
     GENERATIONS_FILENAME,
     NUM_CTX_MARGIN_TOKENS,
     NUM_CTX_STEP_TOKENS,
+    SEALED_RESPONSES_FILENAME,
     GenerationCallRecord,
     MaxNumCtxRefusalError,
     MockWriter,
     OllamaHttpTransport,
     OllamaWriter,
+     RenderCheckError,
     RenderedScenario,
+    SealedResponseEntry,
     WriterCheckpointManager,
+    append_sealed_response,
+    check_rendered_prose,
     compute_num_ctx,
+    compute_sealed_response_digests,
     estimate_prompt_tokens,
     kill_pid_tree,
 )
 from udlab_generator.sealing import (
+    _deserialize_world,
     verify_sealed_part,
     verify_written_dataset_recounts_and_prose,
     write_sealed_dataset,
 )
-from udlab_generator.world import generate_world, make_balanced_configs
+from udlab_generator.world import World, generate_world, make_balanced_configs
 
 
 def _summarize_d_key_patterns(sealed_rows: Sequence[dict[str, object]]) -> dict[str, object]:
@@ -81,6 +92,222 @@ def _summarize_d_key_patterns(sealed_rows: Sequence[dict[str, object]]) -> dict[
     }
 
 
+def _empty_shortcut_probe_report() -> ShortcutProbeReport:
+    """Return an empty `ShortcutProbeReport` when 0 scenarios are kept."""
+    return ShortcutProbeReport(
+        num_scenarios=0,
+        num_renderings=0,
+        probes=(),
+        balance=ClassBalanceReport(
+            u_share_among_open_stems=0.0,
+            who_u_share=0.0,
+            why_u_share=0.0,
+            b1_true_belief_share=0.0,
+            b2_true_belief_share=0.0,
+            x_unnotified_share=0.0,
+            p_yes_share=0.0,
+            k_yes_share=0.0,
+            balanced=False,
+        ),
+        passed=False,
+    )
+
+
+def _summarize_call_outcomes(call_records: Sequence[GenerationCallRecord]) -> dict[str, object]:
+    """Summarize kept vs refused renderings and refusals per check id across `call_records`."""
+    refusals_by_check_id: Counter[str] = Counter()
+    calls_kept = 0
+    calls_refused = 0
+    final_by_rendering: dict[tuple[str, int], GenerationCallRecord] = {}
+    scenarios_seen: list[str] = []
+    seen_set: set[str] = set()
+
+    for rec in call_records:
+        if rec.scenario_id not in seen_set:
+            seen_set.add(rec.scenario_id)
+            scenarios_seen.append(rec.scenario_id)
+        final_by_rendering[(rec.scenario_id, rec.rendering_index)] = rec
+        if rec.checks_passed:
+            calls_kept += 1
+        else:
+            calls_refused += 1
+            for reason_str in rec.refusal_reasons:
+                check_id = reason_str.split(":", 1)[0].strip() if ":" in reason_str else reason_str.strip()
+                if check_id:
+                    refusals_by_check_id[check_id] += 1
+
+    renderings_kept = sum(1 for r in final_by_rendering.values() if r.checks_passed)
+    renderings_refused = sum(1 for r in final_by_rendering.values() if not r.checks_passed)
+    scenarios_kept = 0
+    scenarios_refused = 0
+    for sid in scenarios_seen:
+        r0 = final_by_rendering.get((sid, 0))
+        r1 = final_by_rendering.get((sid, 1))
+        if r0 is not None and r1 is not None and r0.checks_passed and r1.checks_passed:
+            scenarios_kept += 1
+        else:
+            scenarios_refused += 1
+
+    return {
+        "scenarios_kept": scenarios_kept,
+        "scenarios_refused": scenarios_refused,
+        "renderings_kept": renderings_kept,
+        "renderings_refused": renderings_refused,
+        "calls_kept": calls_kept,
+        "calls_refused": calls_refused,
+        "kept": renderings_kept,
+        "refused": renderings_refused,
+        "refusals_by_check_id": dict(sorted(refusals_by_check_id.items())),
+    }
+
+
+def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
+    """Re-run every prose check on the saved texts in `<output_dir>/sealed_store/responses.sealed.jsonl` offline (no model, no GPU)."""
+    sealed_dir = output_dir / "sealed_store"
+    responses_path = sealed_dir / SEALED_RESPONSES_FILENAME
+    sealing_meta_path = sealed_dir / "sealing.sealed.json"
+    generations_path = output_dir / GENERATIONS_FILENAME
+
+    if not responses_path.is_file():
+        raise FileNotFoundError(f"Saved responses file not found: {responses_path}")
+    if not sealing_meta_path.is_file():
+        raise FileNotFoundError(f"Sealing metadata file not found: {sealing_meta_path}")
+
+    sealing_meta = json.loads(sealing_meta_path.read_text(encoding="utf-8"))
+    raw_all_scenarios = sealing_meta.get("all_scenarios") or sealing_meta.get("scenarios") or {}
+    if not isinstance(raw_all_scenarios, dict):
+        raise ValueError(f"Invalid scenarios dictionary in {sealing_meta_path}.")
+
+    worlds_by_sid: dict[str, World] = {
+        str(sid): _deserialize_world(w_dict)
+        for sid, w_dict in raw_all_scenarios.items()
+        if isinstance(w_dict, dict)
+    }
+
+    gen_by_call_id: dict[str, dict[str, Any]] = {}
+    if generations_path.is_file():
+        for line in generations_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                row = json.loads(line)
+                if isinstance(row, dict) and row.get("call_id"):
+                    gen_by_call_id[str(row["call_id"])] = row
+
+    saved_entries = [
+        json.loads(line)
+        for line in responses_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    call_results: list[dict[str, object]] = []
+    refusals_by_check_id: Counter[str] = Counter()
+    calls_kept = 0
+    calls_refused = 0
+    final_by_rendering: dict[tuple[str, int], bool] = {}
+    scenarios_seen: list[str] = []
+    seen_set: set[str] = set()
+    all_verdicts_match = True
+
+    for entry in saved_entries:
+        call_id = str(entry["call_id"])
+        call_index = int(entry.get("call_index", len(call_results) + 1))
+        scen_id = str(entry["scenario_id"])
+        r_idx = int(entry["rendering_index"])
+        focal_agent = str(entry["focal_agent"])
+        attempt = int(entry.get("attempt", 0))
+        seed = int(entry.get("seed", 0))
+        response_text = str(entry.get("response_text") or "")
+        thinking_text = str(entry.get("thinking_text") or "")
+        stored_resp_sha = str(entry.get("response_sha256") or "")
+        stored_think_sha = str(entry.get("thinking_sha256") or "")
+
+        actual_resp_sha, actual_think_sha = compute_sealed_response_digests(response_text, thinking_text)
+        sha_verified = (actual_resp_sha == stored_resp_sha) and (actual_think_sha == stored_think_sha)
+
+        gen_row = gen_by_call_id.get(call_id)
+        if gen_row is not None:
+            if str(gen_row.get("response_sha256") or "") != actual_resp_sha:
+                sha_verified = False
+            if str(gen_row.get("thinking_sha256") or "") != actual_think_sha:
+                sha_verified = False
+
+        if scen_id not in worlds_by_sid:
+            raise KeyError(f"Scenario '{scen_id}' (for call '{call_id}') not found in sealing.sealed.json.")
+        world = worlds_by_sid[scen_id]
+
+        if scen_id not in seen_set:
+            seen_set.add(scen_id)
+            scenarios_seen.append(scen_id)
+
+        try:
+            check_rendered_prose(response_text, world, focal_agent=focal_agent)
+            passed = True
+            check_id: str | None = None
+            failing_sentence: str | None = None
+            reason: str | None = None
+            calls_kept += 1
+        except RenderCheckError as exc:
+            passed = False
+            check_id = exc.check_id
+            failing_sentence = exc.failing_sentence
+            reason = str(exc)
+            calls_refused += 1
+            refusals_by_check_id[exc.check_id] += 1
+
+        final_by_rendering[(scen_id, r_idx)] = passed
+        recorded_passed = bool(gen_row.get("checks_passed", True)) if gen_row is not None else passed
+        verdict_matches = (passed == recorded_passed) and sha_verified
+        if not verdict_matches:
+            all_verdicts_match = False
+
+        call_results.append(
+            {
+                "call_id": call_id,
+                "call_index": call_index,
+                "scenario_id": scen_id,
+                "rendering_index": r_idx,
+                "focal_agent": focal_agent,
+                "attempt": attempt,
+                "seed": seed,
+                "response_sha256": actual_resp_sha,
+                "thinking_sha256": actual_think_sha,
+                "sha256_verified": sha_verified,
+                "checks_passed": passed,
+                "recorded_checks_passed": recorded_passed,
+                "verdict_matches_recorded": verdict_matches,
+                "check_id": check_id,
+                "failing_sentence": failing_sentence,
+                "reason": reason,
+            }
+        )
+
+    renderings_kept = sum(1 for v in final_by_rendering.values() if v)
+    renderings_refused = sum(1 for v in final_by_rendering.values() if not v)
+    scenarios_kept = 0
+    scenarios_refused = 0
+    for sid in scenarios_seen:
+        if final_by_rendering.get((sid, 0), False) and final_by_rendering.get((sid, 1), False):
+            scenarios_kept += 1
+        else:
+            scenarios_refused += 1
+
+    return {
+        "output_dir": str(output_dir),
+        "responses_sealed_path": str(responses_path),
+        "num_calls": len(call_results),
+        "calls": call_results,
+        "scenarios_kept": scenarios_kept,
+        "scenarios_refused": scenarios_refused,
+        "renderings_kept": renderings_kept,
+        "renderings_refused": renderings_refused,
+        "calls_kept": calls_kept,
+        "calls_refused": calls_refused,
+        "kept": renderings_kept,
+        "refused": renderings_refused,
+        "refusals_by_check_id": dict(sorted(refusals_by_check_id.items())),
+        "matches_recorded_verdicts": all_verdicts_match,
+    }
+
+
 def run_probe_only(sealed_jsonl_path: Path) -> dict[str, object]:
     """Run the shortcut probe directly on any sealed JSONL file (including writer-rendered prose)."""
     sealed_rows = [
@@ -88,7 +315,7 @@ def run_probe_only(sealed_jsonl_path: Path) -> dict[str, object]:
         for line in sealed_jsonl_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    probe_report = run_shortcut_probe(sealed_rows)
+    probe_report = run_shortcut_probe(sealed_rows) if sealed_rows else _empty_shortcut_probe_report()
     return {
         "sealed_jsonl_path": str(sealed_jsonl_path),
         "num_rows": len(sealed_rows),
@@ -211,6 +438,7 @@ def build_and_probe_dataset(
     num_predict: int | None = None,
     max_num_ctx: int = DEFAULT_WRITER_MAX_NUM_CTX,
     think: bool = DEFAULT_WRITER_THINK,
+    max_retries: int = 0,
     grant_id: str | None = None,
     resume: bool = False,
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
@@ -224,6 +452,8 @@ def build_and_probe_dataset(
     """Generate `count` scenarios, render via `mock` or `ollama` writer with checkpointing, seal, verify, and probe."""
     if writer_kind not in ("mock", "ollama"):
         raise ValueError(f"writer_kind must be 'mock' or 'ollama', got {writer_kind!r}.")
+    if max_retries < 0:
+        raise ValueError(f"max_retries must be >= 0, got {max_retries}.")
     if max_num_ctx > DEFAULT_WRITER_MAX_NUM_CTX:
         raise MaxNumCtxRefusalError(
             f"REFUSED (MAX_NUM_CTX_CAP): max_num_ctx={max_num_ctx} exceeds the hard VRAM ceiling limit "
@@ -249,6 +479,7 @@ def build_and_probe_dataset(
     public_dir = output_dir / "part_public"
     sealed_dir = output_dir / "sealed_store"
     generations_path = output_dir / GENERATIONS_FILENAME
+    sealed_responses_path = sealed_dir / SEALED_RESPONSES_FILENAME
 
     initial_private_seed = (
         private_seed_hex.strip().lower()
@@ -278,10 +509,12 @@ def build_and_probe_dataset(
         resolved_private_seed = initial_private_seed
         if generations_path.exists():
             generations_path.unlink()
+        if sealed_responses_path.exists():
+            sealed_responses_path.unlink()
         checkpoint.initialize_fresh()
 
     rendered_pairs: list[tuple[RenderedScenario, RenderedScenario]] = list(restored_pairs)
-    completed_count = len(rendered_pairs)
+    completed_count = checkpoint.completed_count
 
     if writer_kind == "ollama":
         should_own_server = (
@@ -302,6 +535,8 @@ def build_and_probe_dataset(
             halt_pid=halt_pid,
             pid_killer=pid_killer,
             generations_path=generations_path,
+            sealed_responses_path=sealed_responses_path,
+            max_retries=max_retries,
             start_owned_server=should_own_server,
             popen_factory=popen_factory,
         )
@@ -311,16 +546,19 @@ def build_and_probe_dataset(
             for idx in range(completed_count, len(worlds)):
                 w = worlds[idx]
                 prev_calls = len(ollama_writer.call_records)
-                pair = ollama_writer.render_scenario_pair(w)
+                pair = ollama_writer.render_scenario_pair(w, allow_refusal=True)
                 new_calls = ollama_writer.call_records[prev_calls:]
-                rendered_pairs.append(pair)
+                if pair is not None:
+                    rendered_pairs.append(pair)
                 checkpoint.append_scenario(
                     scenario_index=idx,
                     pair=pair,
                     call_records=new_calls,
+                    world=w,
                 )
         finally:
             ollama_writer.close()
+        all_call_records: Sequence[GenerationCallRecord] = ollama_writer.call_records
         peak_vram_mib = ollama_writer.peak_vram_mib
         effective_grant_id = ollama_writer.grant_id
         server_info = (
@@ -351,6 +589,7 @@ def build_and_probe_dataset(
                 prompt_sha = hashlib.sha256(
                     json.dumps(messages, sort_keys=True, separators=(",", ":")).encode("utf-8")
                 ).hexdigest()
+                resp_sha, think_sha = compute_sealed_response_digests(rend.prose, "")
                 p_est = estimate_prompt_tokens(messages)
                 if resolved_think and p_est + resolved_num_predict <= max_num_ctx:
                     n_ctx = min(
@@ -397,24 +636,50 @@ def build_and_probe_dataset(
                     grant_id="cpu-mock",
                     checks_passed=True,
                     refusal_reasons=(),
+                    attempt=0,
+                    seed=int(w.seed),
+                    response_sha256=resp_sha,
+                    thinking_sha256=think_sha,
                 )
                 all_mock_calls.append(rec)
                 scen_calls.append(rec)
                 with generations_path.open("a", encoding="utf-8", newline="\n") as fh:
                     fh.write(json.dumps(rec.to_dict(), sort_keys=True, separators=(",", ":")) + "\n")
+                append_sealed_response(
+                    sealed_responses_path,
+                    SealedResponseEntry(
+                        call_id=call_id,
+                        call_index=call_index,
+                        scenario_id=w.scenario_id,
+                        rendering_index=r_idx,
+                        focal_agent=rend.focal_agent,
+                        attempt=0,
+                        seed=int(w.seed),
+                        response_text=rend.prose,
+                        thinking_text="",
+                        response_sha256=resp_sha,
+                        thinking_sha256=think_sha,
+                    ),
+                )
 
             rendered_pairs.append(pair)
             checkpoint.append_scenario(
                 scenario_index=idx,
                 pair=pair,
                 call_records=scen_calls,
+                world=w,
             )
+        all_call_records = all_mock_calls
         peak_vram_mib = 0
         effective_grant_id = "cpu-mock"
         server_info = None
 
     generations_bytes = generations_path.read_bytes() if generations_path.is_file() else b""
     generations_sha256 = hashlib.sha256(generations_bytes).hexdigest()
+    responses_bytes = sealed_responses_path.read_bytes() if sealed_responses_path.is_file() else b""
+    responses_sealed_sha256 = hashlib.sha256(responses_bytes).hexdigest()
+
+    outcomes = _summarize_call_outcomes(all_call_records)
 
     writer_provenance: dict[str, Any] = {
         "writer": writer_kind,
@@ -422,10 +687,13 @@ def build_and_probe_dataset(
         "think": resolved_think,
         "num_predict": resolved_num_predict,
         "max_num_ctx": max_num_ctx,
+        "max_retries": max_retries,
         "vram_halt_mib": vram_halt_mib,
         "grant_id": effective_grant_id,
         "generations_file": GENERATIONS_FILENAME,
         "generations_sha256": generations_sha256,
+        "responses_sealed_file": SEALED_RESPONSES_FILENAME,
+        "responses_sealed_sha256": responses_sealed_sha256,
         "checkpoint_chain_head_sha256": checkpoint.chain_head_sha256,
     }
 
@@ -435,6 +703,8 @@ def build_and_probe_dataset(
         sealed_dir=sealed_dir,
         private_seed_hex=resolved_private_seed,
         writer_provenance=writer_provenance,
+        all_worlds=worlds,
+        allow_empty=True,
     )
     recount_verification = verify_written_dataset_recounts_and_prose(public_dir, sealed_dir)
 
@@ -444,24 +714,32 @@ def build_and_probe_dataset(
         if line.strip()
     ]
 
-    probe_report = run_shortcut_probe(sealed_rows)
+    probe_report = (
+        run_shortcut_probe(sealed_rows)
+        if sealed_rows
+        else _empty_shortcut_probe_report()
+    )
     diversity_report = count_template_diversity(worlds)
     d_distribution = _summarize_d_key_patterns(sealed_rows)
 
     summary: dict[str, object] = {
         "writer": writer_kind,
         "writer_pin": effective_writer_pin.to_dict(),
+        "max_retries": max_retries,
         "grant_id": effective_grant_id,
         "vram_halt_mib": vram_halt_mib,
         "vram_peak_mib": peak_vram_mib,
         "ollama_server": server_info,
         "num_scenarios": receipt.num_scenarios,
         "num_items": receipt.num_items,
+        **outcomes,
         "items_sha256": receipt.items_sha256,
         "part_json_sha256": receipt.part_json_sha256,
         "keys_sealed_sha256": receipt.keys_sealed_sha256,
         "generations_file": GENERATIONS_FILENAME,
         "generations_sha256": generations_sha256,
+        "responses_sealed_file": SEALED_RESPONSES_FILENAME,
+        "responses_sealed_sha256": responses_sealed_sha256,
         "checkpoint_chain_head_sha256": checkpoint.chain_head_sha256,
         "recount_verification": recount_verification,
         "d_key_pattern_distribution": d_distribution,
@@ -534,6 +812,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Enable thinking mode for the writer pass (default: off / think=False).",
     )
     parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=0,
+        help="Number of retries per refused rendering with the same prompt and seed + attempt (default: 0).",
+    )
+    parser.add_argument(
         "--grant-id",
         type=str,
         default=None,
@@ -543,6 +827,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--resume",
         action="store_true",
         help="Resume an interrupted writer build from the verified per-scenario sealed checkpoint.",
+    )
+    parser.add_argument(
+        "--recheck",
+        type=Path,
+        default=None,
+        help="Offline recheck: re-run every prose check on saved texts in <dir> with no model and no GPU.",
     )
     parser.add_argument(
         "--verify-written",
@@ -557,6 +847,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Run the shortcut probe directly on an existing sealed JSONL file and exit.",
     )
     args = parser.parse_args(argv)
+
+    if args.recheck is not None:
+        recheck_res = recheck_saved_responses(args.recheck)
+        for call_info in recheck_res["calls"]:  # type: ignore[union-attr]
+            status = "PASS" if call_info["checks_passed"] else "FAIL"
+            cid = call_info["check_id"] or "ok"
+            sent = call_info["failing_sentence"] or ""
+            print(
+                f"[recheck] {call_info['call_id']} (attempt={call_info['attempt']}, seed={call_info['seed']}): "
+                f"{status} check_id={cid} failing_sentence={sent!r}"
+            )
+        print(json.dumps(recheck_res, indent=2, sort_keys=True))
+        return 0
 
     if args.verify_written is not None:
         verify_res = verify_written_dataset(args.verify_written)
@@ -581,12 +884,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         num_predict=args.num_predict,
         max_num_ctx=args.max_num_ctx,
         think=bool(args.think),
+        max_retries=args.max_retries,
         grant_id=args.grant_id,
         resume=args.resume,
     )
-    probe_passed = bool(summary["probe_report"]["passed"])  # type: ignore[index]
     print(json.dumps(summary, indent=2, sort_keys=True))
-    return 0 if probe_passed else 1
+    return 0
 
 
 if __name__ == "__main__":

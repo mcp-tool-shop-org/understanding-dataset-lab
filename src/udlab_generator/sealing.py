@@ -57,6 +57,8 @@ FORBIDDEN_PUBLIC_FIELDS: frozenset[str] = frozenset(
         "private_seed_hex",
         "generation_seed",
         "scenario_id",
+        "response_text",
+        "thinking_text",
     }
 )
 
@@ -184,10 +186,12 @@ def check_not_in_key_order(
         tuple(str(q["question_type"]) for q in row.get("questions", []))
         for row in sealed_rows
     ]
-    if len(type_orders) >= 4 and len(set(type_orders)) == 1:
-        raise SealingError(
-            "Key-order leak detected: questions inside bundles are in a fixed, unshuffled question_type order."
-        )
+    if len(type_orders) >= 2 and len(set(type_orders)) == 1:
+        canonical_slot_order = ("P", "K", "B1", "B2", "X", "U", "S", "D")
+        if len(type_orders) >= 4 or type_orders[0] == canonical_slot_order:
+            raise SealingError(
+                "Key-order leak detected: questions inside bundles are in a fixed, unshuffled question_type order."
+            )
 
     # 4. Check inter-item scenario order: fail if items are in unshuffled sequential scenario_id order.
     pass1_rows = [r for r in sealed_rows if int(r.get("pass_index", 1)) == 1]
@@ -354,7 +358,7 @@ def _render_public_from_sealed(
         public_items.append(pub_row)
         item_lines.append(_canonical_json_line(pub_row))
 
-    items_bytes = ("\n".join(item_lines) + "\n").encode("utf-8")
+    items_bytes = (("\n".join(item_lines) + "\n") if item_lines else "").encode("utf-8")
     items_sha = hashlib.sha256(items_bytes).hexdigest()
 
     part_doc: dict[str, Any] = {
@@ -376,9 +380,12 @@ def write_sealed_dataset(
     sealed_dir: Path,
     private_seed_hex: str | None = None,
     writer_provenance: dict[str, Any] | None = None,
+    *,
+    all_worlds: Sequence[World] | None = None,
+    allow_empty: bool = False,
 ) -> SealedDatasetReceipt:
     """Shuffle items and questions with a private seed, write public and sealed stores, and run canonical verify."""
-    if not rendered_pairs:
+    if not rendered_pairs and not allow_empty:
         raise ValueError("rendered_pairs must not be empty")
 
     _validate_disjoint_dirs(public_dir, sealed_dir)
@@ -396,93 +403,109 @@ def write_sealed_dataset(
     shuffle_salt_index = 0
     pass1_list = list(base_pass1)
     pass2_list = list(base_pass2)
-    for salt_idx in range(256):
-        cand_pass1 = list(base_pass1)
-        cand_pass2 = list(base_pass2)
-        p1_msg = "shuffle:pass1" if salt_idx == 0 else f"shuffle:pass1:r{salt_idx}"
-        p2_msg = "shuffle:pass2" if salt_idx == 0 else f"shuffle:pass2:r{salt_idx}"
-        random.Random(_hmac_hex(seed_hex, p1_msg, 32)).shuffle(cand_pass1)
-        random.Random(_hmac_hex(seed_hex, p2_msg, 32)).shuffle(cand_pass2)
+    if rendered_pairs:
+        for salt_idx in range(256):
+            cand_pass1 = list(base_pass1)
+            cand_pass2 = list(base_pass2)
+            p1_msg = "shuffle:pass1" if salt_idx == 0 else f"shuffle:pass1:r{salt_idx}"
+            p2_msg = "shuffle:pass2" if salt_idx == 0 else f"shuffle:pass2:r{salt_idx}"
+            random.Random(_hmac_hex(seed_hex, p1_msg, 32)).shuffle(cand_pass1)
+            random.Random(_hmac_hex(seed_hex, p2_msg, 32)).shuffle(cand_pass2)
 
-        # Ensure Pass 1 is never accidentally sorted even for small N.
-        if len(cand_pass1) >= 2 and (
-            [r.scenario_id for r in cand_pass1] == sorted(r.scenario_id for r in cand_pass1)
-            or [r.scenario_id for r in cand_pass1] == sorted((r.scenario_id for r in cand_pass1), reverse=True)
-        ):
-            cand_pass1 = cand_pass1[1:] + cand_pass1[:1]
+            # Ensure Pass 1 is never accidentally sorted even for small N.
+            if len(cand_pass1) >= 2 and (
+                [r.scenario_id for r in cand_pass1] == sorted(r.scenario_id for r in cand_pass1)
+                or [r.scenario_id for r in cand_pass1] == sorted((r.scenario_id for r in cand_pass1), reverse=True)
+            ):
+                cand_pass1 = cand_pass1[1:] + cand_pass1[:1]
 
-        cand_sealed_check = [
-            {
-                "pass_index": 1,
-                "scenario_id": r.scenario_id,
-                "questions": [
-                    {
-                        "question_type": qk.question_type,
-                        "key": list(qk.key) if isinstance(qk.key, tuple) else qk.key,
-                        "asymmetric": qk.asymmetric,
-                        "is_ego_asymmetric": qk.asymmetric,
-                    }
-                    for idx_q, qk in enumerate(
-                        r.keys.questions[idx_r % len(r.keys.questions) :]
-                        + r.keys.questions[: idx_r % len(r.keys.questions)]
-                    )
-                ],
-            }
-            for idx_r, r in enumerate(cand_pass1)
-        ] + [
-            {
-                "pass_index": 2,
-                "scenario_id": r.scenario_id,
-                "questions": [
-                    {
-                        "question_type": qk.question_type,
-                        "key": list(qk.key) if isinstance(qk.key, tuple) else qk.key,
-                        "asymmetric": qk.asymmetric,
-                        "is_ego_asymmetric": qk.asymmetric,
-                    }
-                    for qk in r.keys.questions
-                ],
-            }
-            for r in cand_pass2
-        ]
-        cand_pub_check = [{"item_id": f"item_{i + 1:04d}"} for i in range(len(cand_sealed_check))]
-        try:
-            check_not_in_key_order(cand_pub_check, cand_sealed_check, {})
-            shuffle_salt_index = salt_idx
-            pass1_list = cand_pass1
-            pass2_list = cand_pass2
-            break
-        except SealingError:
-            continue
-    else:
-        raise SealingError(
-            "Failed to find a Pass-1/Pass-2 shuffle salt passing check_not_in_key_order within 256 attempts."
-        )
+            cand_sealed_check = [
+                {
+                    "pass_index": 1,
+                    "scenario_id": r.scenario_id,
+                    "questions": [
+                        {
+                            "question_type": qk.question_type,
+                            "key": list(qk.key) if isinstance(qk.key, tuple) else qk.key,
+                            "asymmetric": qk.asymmetric,
+                            "is_ego_asymmetric": qk.asymmetric,
+                        }
+                        for idx_q, qk in enumerate(
+                            r.keys.questions[idx_r % len(r.keys.questions) :]
+                            + r.keys.questions[: idx_r % len(r.keys.questions)]
+                        )
+                    ],
+                }
+                for idx_r, r in enumerate(cand_pass1)
+            ] + [
+                {
+                    "pass_index": 2,
+                    "scenario_id": r.scenario_id,
+                    "questions": [
+                        {
+                            "question_type": qk.question_type,
+                            "key": list(qk.key) if isinstance(qk.key, tuple) else qk.key,
+                            "asymmetric": qk.asymmetric,
+                            "is_ego_asymmetric": qk.asymmetric,
+                        }
+                        for qk in (
+                            r.keys.questions[(idx_r + 1) % len(r.keys.questions) :]
+                            + r.keys.questions[: (idx_r + 1) % len(r.keys.questions)]
+                        )
+                    ],
+                }
+                for idx_r, r in enumerate(cand_pass2)
+            ]
+            cand_pub_check = [{"item_id": f"item_{i + 1:04d}"} for i in range(len(cand_sealed_check))]
+            try:
+                check_not_in_key_order(cand_pub_check, cand_sealed_check, {})
+                shuffle_salt_index = salt_idx
+                pass1_list = cand_pass1
+                pass2_list = cand_pass2
+                break
+            except SealingError:
+                continue
+        else:
+            raise SealingError(
+                "Failed to find a Pass-1/Pass-2 shuffle salt passing check_not_in_key_order within 256 attempts."
+            )
 
     ordered_renderings: list[tuple[int, RenderedScenario]] = (
         [(1, r) for r in pass1_list] + [(2, r) for r in pass2_list]
     )
 
     # Choose a deterministic question-shuffle salt derived from `seed_hex` so that the shuffled
-    # question positions across bundles pass probe (e) (`abs(oof - 0.125) <= 0.05`).
+    # question positions across bundles pass probe (e) (`abs(oof - 0.125) <= 0.05`) and never
+    # repeat a single fixed permutation across bundles.
     qshuffle_salt_index = 0
     qshuffle_prefix = "qshuffle"
-    for attempt in range(32):
-        cand_prefix = "qshuffle" if attempt == 0 else f"qshuffle:r{attempt}"
-        probe_e_samples: list[tuple[str, list[str], str]] = []
-        for idx, (_, rend) in enumerate(ordered_renderings, start=1):
-            item_id = f"item_{idx:04d}"
-            q_list_cand = list(rend.keys.questions)
-            q_rng_cand = random.Random(
-                _hmac_hex(seed_hex, f"{cand_prefix}:{item_id}:{rend.scenario_id}:{rend.rendering_index}", 32)
-            )
-            q_rng_cand.shuffle(q_list_cand)
-            for pos_idx, qk in enumerate(q_list_cand):
-                probe_e_samples.append((rend.scenario_id, [f"pos_{pos_idx}"], qk.question_type))
-        if abs(_oof_multinomial_nb(probe_e_samples) - 0.125) <= 0.05 + 1e-9:
-            qshuffle_salt_index = attempt
-            qshuffle_prefix = cand_prefix
-            break
+    first_valid_qshuffle: tuple[int, str] | None = None
+    if ordered_renderings:
+        for attempt in range(32):
+            cand_prefix = "qshuffle" if attempt == 0 else f"qshuffle:r{attempt}"
+            probe_e_samples: list[tuple[str, list[str], str]] = []
+            cand_orders: list[tuple[str, ...]] = []
+            for idx, (_, rend) in enumerate(ordered_renderings, start=1):
+                item_id = f"item_{idx:04d}"
+                q_list_cand = list(rend.keys.questions)
+                q_rng_cand = random.Random(
+                    _hmac_hex(seed_hex, f"{cand_prefix}:{item_id}:{rend.scenario_id}:{rend.rendering_index}", 32)
+                )
+                q_rng_cand.shuffle(q_list_cand)
+                cand_orders.append(tuple(qk.question_type for qk in q_list_cand))
+                for pos_idx, qk in enumerate(q_list_cand):
+                    probe_e_samples.append((rend.scenario_id, [f"pos_{pos_idx}"], qk.question_type))
+            if len(cand_orders) >= 2 and len(set(cand_orders)) == 1:
+                continue
+            if first_valid_qshuffle is None:
+                first_valid_qshuffle = (attempt, cand_prefix)
+            if abs(_oof_multinomial_nb(probe_e_samples) - 0.125) <= 0.05 + 1e-9:
+                qshuffle_salt_index = attempt
+                qshuffle_prefix = cand_prefix
+                break
+        else:
+            if first_valid_qshuffle is not None:
+                qshuffle_salt_index, qshuffle_prefix = first_valid_qshuffle
 
     sealed_rows: list[dict[str, Any]] = []
     for idx, (pass_index, rend) in enumerate(ordered_renderings, start=1):
@@ -559,7 +582,7 @@ def write_sealed_dataset(
         )
 
     keys_lines = [_canonical_json_line(r) for r in sealed_rows]
-    keys_bytes = ("\n".join(keys_lines) + "\n").encode("utf-8")
+    keys_bytes = (("\n".join(keys_lines) + "\n") if keys_lines else "").encode("utf-8")
     keys_sha = hashlib.sha256(keys_bytes).hexdigest()
 
     commitment_hmac = _hmac_hex(seed_hex, f"commitment:{keys_sha}", 64)
@@ -575,6 +598,18 @@ def write_sealed_dataset(
             validate_placing_fairness(w_obj)
             serialized_worlds[w_obj.scenario_id] = _serialize_world(w_obj)
 
+    serialized_all_worlds: dict[str, dict[str, Any]] = dict(serialized_worlds)
+    if all_worlds is not None:
+        for w_obj in all_worlds:
+            if w_obj.scenario_id not in serialized_all_worlds:
+                validate_topology(w_obj)
+                validate_occlusion(w_obj)
+                validate_belief_forcing(w_obj)
+                validate_hearing(w_obj)
+                validate_object_locations(w_obj)
+                validate_placing_fairness(w_obj)
+                serialized_all_worlds[w_obj.scenario_id] = _serialize_world(w_obj)
+
     sealing_meta: dict[str, Any] = {
         "schema_version": "udlab.sealing.v1",
         "private_seed_hex": seed_hex,
@@ -586,6 +621,7 @@ def write_sealed_dataset(
         "keys_sealed_sha256": keys_sha,
         "commitment_hmac_sha256": commitment_hmac,
         "scenarios": serialized_worlds,
+        "all_scenarios": serialized_all_worlds,
     }
     if writer_provenance is not None:
         sealing_meta["writer_provenance"] = dict(writer_provenance)
@@ -1014,7 +1050,9 @@ def verify_written_dataset_recounts_and_prose(
         if line.strip()
     ]
     scenarios_meta = sealing_meta.get("scenarios", {})
-    if not isinstance(scenarios_meta, dict) or not scenarios_meta:
+    if not isinstance(scenarios_meta, dict):
+        raise SealingError("sealing.sealed.json has invalid scenarios metadata.")
+    if not scenarios_meta and sealed_rows:
         raise SealingError("sealing.sealed.json is missing scenarios metadata for recount verification.")
 
     worlds_by_sid: dict[str, World] = {}

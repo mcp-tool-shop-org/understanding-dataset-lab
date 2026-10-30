@@ -103,6 +103,7 @@ NUM_CTX_STEP_TOKENS: int = 1024
 PROMPT_TOKEN_ESTIMATE_RULE: str = "ceil(utf8_bytes / 3)"
 CHECKPOINT_FILENAME: str = "checkpoint.json"
 SEALED_CHECKPOINT_FILENAME: str = "checkpoint.sealed.json"
+SEALED_RESPONSES_FILENAME: str = "responses.sealed.jsonl"
 CHECKPOINT_GENESIS_HASH: str = "0" * 64
 GENERATIONS_FILENAME: str = "generations.jsonl"
 
@@ -147,6 +148,7 @@ class ProseRefusalRecord:
     focal_agent: str
     check_id: str
     reason: str
+    failing_sentence: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -155,16 +157,24 @@ class ProseRefusalRecord:
             "focal_agent": self.focal_agent,
             "check_id": self.check_id,
             "reason": self.reason,
+            "failing_sentence": self.failing_sentence,
         }
 
 
 class RenderCheckError(ValueError):
     """Raised when rendered scenario prose fails any check (a)-(d) or writer constraint."""
 
-    def __init__(self, message: str, *, check_id: str = "render_check") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        check_id: str = "render_check",
+        failing_sentence: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.check_id = check_id
         self.reason = message
+        self.failing_sentence = failing_sentence
 
 
 class ForbiddenModelCallError(RuntimeError):
@@ -460,11 +470,16 @@ def verify_prompt_and_checker_requirements_aligned(
     return parsed_prompt_reqs
 
 
-def _raise_prose_check_error(check_id: str, message: str) -> NoReturn:
+def _raise_prose_check_error(
+    check_id: str,
+    message: str,
+    *,
+    failing_sentence: str | None = None,
+) -> NoReturn:
     """Raise `RenderCheckError` after verifying `check_id` is registered in `WRITER_PROSE_REQUIREMENTS`."""
     if check_id not in WRITER_PROSE_REQUIREMENTS_BY_ID:
         raise RuntimeError(f"Unregistered prose check_id {check_id!r} not in WRITER_PROSE_REQUIREMENTS.")
-    raise RenderCheckError(message, check_id=check_id)
+    raise RenderCheckError(message, check_id=check_id, failing_sentence=failing_sentence)
 
 
 def load_writer_prompt_template(path: Path | None = None) -> str:
@@ -954,25 +969,41 @@ def _sentence_matches_event(
     return False
 
 
+def _find_sentence_with_substring(prose: str, substring: str) -> str:
+    """Return the first sentence in `prose` containing `substring` (case-insensitive), or `'no candidate sentence'`."""
+    sub_low = substring.lower()
+    for para in prose.split("\n\n"):
+        for sent in _split_prose_sentences(para.strip()):
+            if sub_low in sent.lower():
+                return sent
+    return "no candidate sentence"
+
+
 def check_prose_no_markers(prose: str) -> None:
     """Prose check (a): refuse if any bracket marker `[...]`, fact ID `F0`..`F9`, or `step N` survives."""
     bracket_match = _BRACKET_MARKER_RE.search(prose)
     if bracket_match is not None:
+        cand = _find_sentence_with_substring(prose, bracket_match.group(0))
         _raise_prose_check_error(
             "a_no_markers_bracket",
-            f"Render check (a) failed: surviving bracket marker {bracket_match.group(0)!r} in prose.",
+            f"Render check (a) failed: surviving bracket marker {bracket_match.group(0)!r} in prose (candidate sentence: {cand!r}).",
+            failing_sentence=cand,
         )
     fact_match = _FACT_ID_RE.search(prose)
     if fact_match is not None:
+        cand = _find_sentence_with_substring(prose, fact_match.group(0))
         _raise_prose_check_error(
             "a_no_markers_fact_id",
-            f"Render check (a) failed: surviving fact ID {fact_match.group(0)!r} in prose.",
+            f"Render check (a) failed: surviving fact ID {fact_match.group(0)!r} in prose (candidate sentence: {cand!r}).",
+            failing_sentence=cand,
         )
     step_match = _STEP_NUMBER_RE.search(prose)
     if step_match is not None:
+        cand = _find_sentence_with_substring(prose, step_match.group(0))
         _raise_prose_check_error(
             "a_no_markers_step_number",
-            f"Render check (a) failed: surviving step number {step_match.group(0)!r} in prose.",
+            f"Render check (a) failed: surviving step number {step_match.group(0)!r} in prose (candidate sentence: {cand!r}).",
+            failing_sentence=cand,
         )
 
 
@@ -980,9 +1011,11 @@ def check_prose_banned_adverbs(prose: str) -> tuple[str, ...]:
     """Prose check (b): refuse if any banned mental/emotional adverb from `BANNED_ADVERBS` appears."""
     hits = tuple(dict.fromkeys(m.group(1).lower() for m in _BANNED_PATTERN.finditer(prose)))
     if hits:
+        cand = _find_sentence_with_substring(prose, hits[0])
         _raise_prose_check_error(
             "b_banned_adverbs",
-            f"Render check (b) failed: prose contains banned unlogged mental/emotional adverb(s): {hits}",
+            f"Render check (b) failed: prose contains banned unlogged mental/emotional adverb(s): {hits} (candidate sentence: {cand!r}).",
+            failing_sentence=cand,
         )
     return ()
 
@@ -993,15 +1026,19 @@ def check_prose_rule_and_hearing_threshold(prose: str, world: World) -> None:
     setup_text = paragraphs[0] if paragraphs else prose
     rule_count = setup_text.count(BELIEF_PERSISTENCE_RULE)
     if rule_count != 1:
+        cand = _find_sentence_with_substring(setup_text, "assumes")
         _raise_prose_check_error(
             "d_rule_sentence",
-            f"Render check (d) failed: setup prose must contain BELIEF_PERSISTENCE_RULE byte-identically once (found {rule_count}).",
+            f"Render check (d) failed: setup prose must contain BELIEF_PERSISTENCE_RULE byte-identically once (found {rule_count}; candidate sentence: {cand!r}).",
+            failing_sentence=cand,
         )
     threshold_str = f"{world.noise_threshold} dB"
     if threshold_str.lower() not in setup_text.lower() or "doorway" not in setup_text.lower():
+        cand = _find_sentence_with_substring(setup_text, "doorway")
         _raise_prose_check_error(
             "d_hearing_threshold",
-            f"Render check (d) failed: setup prose is missing the doorway hearing threshold '{threshold_str}'.",
+            f"Render check (d) failed: setup prose is missing the doorway hearing threshold '{threshold_str}' (candidate sentence: {cand!r}).",
+            failing_sentence=cand,
         )
 
 
@@ -1026,46 +1063,59 @@ def check_prose_render_fidelity(
     paragraphs = [p.strip() for p in prose.split("\n\n") if p.strip()]
     setup_text = paragraphs[0] if paragraphs else prose
     setup_low = setup_text.lower()
-    setup_sents_low = [s.lower() for s in _split_prose_sentences(setup_text)]
+    setup_sents = _split_prose_sentences(setup_text)
+    setup_sents_low = [s.lower() for s in setup_sents]
 
     if focal_agent is not None and focal_agent.lower() not in setup_low:
+        cand = setup_sents[0] if setup_sents else "no candidate sentence"
         _raise_prose_check_error(
             "c_fidelity_focal_agent",
-            f"Render check (c) failed: focal_agent '{focal_agent}' is missing from setup prose.",
+            f"Render check (c) failed: focal_agent '{focal_agent}' is missing from setup prose (candidate sentence: {cand!r}).",
+            failing_sentence=cand,
         )
 
     # 1. Verify per-room containers and occluders in setup
     for room in world.rooms:
         if room.lower() not in setup_low:
+            cand = setup_sents[0] if setup_sents else "no candidate sentence"
             _raise_prose_check_error(
                 "c_fidelity_room_setup",
-                f"Render check (c) failed: room '{room}' is missing from setup prose.",
+                f"Render check (c) failed: room '{room}' is missing from setup prose (candidate sentence: {cand!r}).",
+                failing_sentence=cand,
             )
         c0, c1 = world.containers_by_room[room]
         if c0.lower() not in setup_low or c1.lower() not in setup_low:
+            cand = _find_sentence_with_substring(setup_text, room)
             _raise_prose_check_error(
                 "c_fidelity_containers",
-                f"Render check (c) failed: containers ({c0!r}, {c1!r}) for room '{room}' missing from setup prose.",
+                f"Render check (c) failed: containers ({c0!r}, {c1!r}) for room '{room}' missing from setup prose (candidate sentence: {cand!r}).",
+                failing_sentence=cand,
             )
         occ = world.occluders_by_room[room]
         if occ.lower() not in setup_low:
+            cand = _find_sentence_with_substring(setup_text, room)
             _raise_prose_check_error(
                 "c_fidelity_occluder",
-                f"Render check (c) failed: occluder '{occ}' for room '{room}' missing from setup prose.",
+                f"Render check (c) failed: occluder '{occ}' for room '{room}' missing from setup prose (candidate sentence: {cand!r}).",
+                failing_sentence=cand,
             )
 
     if CONTAINER_BAY_STATION.lower() not in setup_low or FAR_SIDE_ALCOVE_STATION.lower() not in setup_low:
+        cand = setup_sents[0] if setup_sents else "no candidate sentence"
         _raise_prose_check_error(
             "c_fidelity_stations",
-            "Render check (c) failed: station names ('container bay', 'far-side alcove') missing from setup prose.",
+            f"Render check (c) failed: station names ('container bay', 'far-side alcove') missing from setup prose (candidate sentence: {cand!r}).",
+            failing_sentence=cand,
         )
 
     # Verify doorways: both room names of each edge must appear in one setup sentence
     for r_a, r_b in world.doorways:
         if not any(r_a.lower() in s_low and r_b.lower() in s_low for s_low in setup_sents_low):
+            cand = _find_sentence_with_substring(setup_text, "doorway")
             _raise_prose_check_error(
                 "c_fidelity_doorways",
-                f"Render check (c) failed: doorway ({r_a!r}, {r_b!r}) missing from setup prose.",
+                f"Render check (c) failed: doorway ({r_a!r}, {r_b!r}) missing from setup prose (candidate sentence: {cand!r}).",
+                failing_sentence=cand,
             )
 
     # Verify initial agent rooms (agent name and starting room in the same setup sentence), absent parties, goals, and stakes
@@ -1075,38 +1125,48 @@ def check_prose_render_fidelity(
             re.search(rf"\b{re.escape(ag.lower())}\b", s_low) and init_r.lower() in s_low
             for s_low in setup_sents_low
         ):
+            cand = _find_sentence_with_substring(setup_text, ag)
             _raise_prose_check_error(
                 "c_fidelity_initial_room",
-                f"Render check (c) failed: initial room '{init_r}' for agent '{ag}' missing from setup prose.",
+                f"Render check (c) failed: initial room '{init_r}' for agent '{ag}' missing from setup prose (candidate sentence: {cand!r}).",
+                failing_sentence=cand,
             )
         goal_txt = world.goals[ag].goal_text.lower()
         if goal_txt not in setup_low:
+            cand = _find_sentence_with_substring(setup_text, ag)
             _raise_prose_check_error(
                 "c_fidelity_goal",
-                f"Render check (c) failed: goal '{world.goals[ag].goal_text}' for agent '{ag}' missing from setup prose.",
+                f"Render check (c) failed: goal '{world.goals[ag].goal_text}' for agent '{ag}' missing from setup prose (candidate sentence: {cand!r}).",
+                failing_sentence=cand,
             )
 
     for abs_p in world.absent_parties:
         if not re.search(rf"\b{re.escape(abs_p.lower())}\b", setup_low):
+            cand = _find_sentence_with_substring(setup_text, "off-site")
             _raise_prose_check_error(
                 "c_fidelity_absent_party",
-                f"Render check (c) failed: absent party '{abs_p}' missing from setup prose.",
+                f"Render check (c) failed: absent party '{abs_p}' missing from setup prose (candidate sentence: {cand!r}).",
+                failing_sentence=cand,
             )
 
     for stake in world.stake_edges:
         if stake.description.lower() not in setup_low:
+            cand = _find_sentence_with_substring(setup_text, stake.agent)
             _raise_prose_check_error(
                 "c_fidelity_stake_edge",
-                f"Render check (c) failed: stake edge '{stake.description}' missing from setup prose.",
+                f"Render check (c) failed: stake edge '{stake.description}' missing from setup prose (candidate sentence: {cand!r}).",
+                failing_sentence=cand,
             )
 
     # 2. Verify no unlogged party names or foreign domain entities appear anywhere in the prose
     allowed_parties = set(world.agents) | set(world.absent_parties)
     for party_name in ALL_KNOWN_PARTY_NAMES - allowed_parties:
         if re.search(rf"\b{re.escape(party_name)}\b", prose):
+            cand = _find_sentence_with_substring(prose, party_name)
             _raise_prose_check_error(
                 "c_fidelity_unlogged_party",
-                f"Render check (c) failed: unlogged party name '{party_name}' asserted in prose.",
+                f"Render check (c) failed: unlogged party name '{party_name}' asserted in prose (candidate sentence: {cand!r}).",
+                failing_sentence=cand,
             )
 
     current_domain = next((d for d in DOMAINS if d.name == world.domain_name), None)
@@ -1125,9 +1185,11 @@ def check_prose_render_fidelity(
         )
         for phrase in foreign_phrases:
             if phrase.lower() in prose_low:
+                cand = _find_sentence_with_substring(prose, phrase)
                 _raise_prose_check_error(
                     "c_fidelity_unlogged_entity",
-                    f"Render check (c) failed: unlogged entity/phrase '{phrase}' from domain '{dom.name}' asserted in prose.",
+                    f"Render check (c) failed: unlogged entity/phrase '{phrase}' from domain '{dom.name}' asserted in prose (candidate sentence: {cand!r}).",
+                    failing_sentence=cand,
                 )
 
     # Check that unlogged side_reasons or unlogged note placement are never asserted when unknowable
@@ -1135,9 +1197,11 @@ def check_prose_render_fidelity(
         logged_reasons = {ev.stated_reason.lower() for ev in world.events if ev.stated_reason}
         for reason_str in current_domain.side_reasons:
             if reason_str.lower() not in logged_reasons and reason_str.lower() in prose_low:
+                cand = _find_sentence_with_substring(prose, reason_str)
                 _raise_prose_check_error(
                     "c_fidelity_unlogged_motive",
-                    f"Render check (c) failed: unlogged motive '{reason_str}' asserted in prose.",
+                    f"Render check (c) failed: unlogged motive '{reason_str}' asserted in prose (candidate sentence: {cand!r}).",
+                    failing_sentence=cand,
                 )
         note_moves = [
             ev
@@ -1150,17 +1214,21 @@ def check_prose_render_fidelity(
                     f"{ag.lower()} placed the {current_domain.note_item.lower()}" in prose_low
                     or f"{ag.lower()} moved the {current_domain.note_item.lower()}" in prose_low
                 ):
+                    cand = _find_sentence_with_substring(prose, current_domain.note_item)
                     _raise_prose_check_error(
                         "c_fidelity_unlogged_placer",
-                        f"Render check (c) failed: unlogged placement of '{current_domain.note_item}' by '{ag}' asserted in prose.",
+                        f"Render check (c) failed: unlogged placement of '{current_domain.note_item}' by '{ag}' asserted in prose (candidate sentence: {cand!r}).",
+                        failing_sentence=cand,
                     )
 
     # 3. Verify every event in `world.events` is stated in exact relative order and no extra event sentences exist
     # Paragraph 1 (`paragraphs[0]`) is structurally the setup paragraph; `paragraphs[1:]` are event paragraphs.
     if len(paragraphs) < 2:
+        cand = setup_sents[-1] if setup_sents else "no candidate sentence"
         _raise_prose_check_error(
             "c_fidelity_paragraph_split",
-            "Render check (c) failed: prose must separate the setup paragraph from the event paragraph(s) with a blank line ('\\n\\n').",
+            f"Render check (c) failed: prose must separate the setup paragraph from the event paragraph(s) with a blank line ('\\n\\n') (candidate sentence: {cand!r}).",
+            failing_sentence=cand,
         )
     event_sentences: list[str] = []
     for ev_para in paragraphs[1:]:
@@ -1172,6 +1240,7 @@ def check_prose_render_fidelity(
             _raise_prose_check_error(
                 "c_fidelity_contradictory_occlusion",
                 f"Render check (c) failed: contradictory visibility ('in open view' and 'blocked') in sentence: {sent!r}",
+                failing_sentence=sent,
             )
 
     matched_sentence_indices: list[int] = []
@@ -1194,13 +1263,21 @@ def check_prose_render_fidelity(
                 None,
             )
             if earlier_idx is not None:
+                cand_sent = event_sentences[earlier_idx]
                 _raise_prose_check_error(
                     "c_fidelity_event_order",
-                    f"Render check (c) failed: event #{ev_idx + 1} ({ev.kind} by {ev.actor} in {ev.room}) is out of relative chronological order.",
+                    f"Render check (c) failed: event #{ev_idx + 1} ({ev.kind} by {ev.actor} in {ev.room}) is out of relative chronological order (candidate sentence: {cand_sent!r}).",
+                    failing_sentence=cand_sent,
                 )
+            cand_sent = (
+                event_sentences[search_start]
+                if search_start < len(event_sentences)
+                else "no candidate sentence"
+            )
             _raise_prose_check_error(
                 "c_fidelity_missing_event",
-                f"Render check (c) failed: missing or altered event #{ev_idx + 1} (step={ev.step}, kind={ev.kind}, actor={ev.actor}, room={ev.room}, target={ev.target_object!r}, from={ev.from_location!r}, to={ev.to_location!r}).",
+                f"Render check (c) failed: missing or altered event #{ev_idx + 1} (step={ev.step}, kind={ev.kind}, actor={ev.actor}, room={ev.room}, target={ev.target_object!r}, from={ev.from_location!r}, to={ev.to_location!r}; candidate sentence: {cand_sent!r}).",
+                failing_sentence=cand_sent,
             )
         matched_sentence_indices.append(found_idx)
         search_start = found_idx + 1
@@ -1211,9 +1288,11 @@ def check_prose_render_fidelity(
             for i in range(len(event_sentences))
             if i not in set(matched_sentence_indices)
         ]
+        cand_sent = unmatched[0] if unmatched else "no candidate sentence"
         _raise_prose_check_error(
             "c_fidelity_unlogged_event",
-            f"Render check (c) failed: prose asserts {len(unmatched)} unlogged event sentence(s) not in world.events: {unmatched[:2]}",
+            f"Render check (c) failed: prose asserts {len(unmatched)} unlogged event sentence(s) not in world.events: {unmatched[:2]} (candidate sentence: {cand_sent!r}).",
+            failing_sentence=cand_sent,
         )
 
 
@@ -1891,6 +1970,58 @@ def start_owned_ollama_server(
 
 
 @dataclass(frozen=True)
+class SealedResponseEntry:
+    """Single writer response entry saved in `sealed_store/responses.sealed.jsonl`, keyed by `call_id`."""
+
+    call_id: str
+    call_index: int
+    scenario_id: str
+    rendering_index: int
+    focal_agent: str
+    attempt: int
+    seed: int
+    response_text: str
+    thinking_text: str
+    response_sha256: str
+    thinking_sha256: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "call_id": self.call_id,
+            "call_index": self.call_index,
+            "scenario_id": self.scenario_id,
+            "rendering_index": self.rendering_index,
+            "focal_agent": self.focal_agent,
+            "attempt": self.attempt,
+            "seed": self.seed,
+            "response_text": self.response_text,
+            "thinking_text": self.thinking_text,
+            "response_sha256": self.response_sha256,
+            "thinking_sha256": self.thinking_sha256,
+        }
+
+
+def compute_sealed_response_digests(
+    response_text: str,
+    thinking_text: str = "",
+) -> tuple[str, str]:
+    """Return `(response_sha256, thinking_sha256)` for a writer response and optional thinking text."""
+    resp_sha = _sha256_bytes(response_text.encode("utf-8"))
+    think_sha = _sha256_bytes(thinking_text.encode("utf-8")) if thinking_text else ""
+    return resp_sha, think_sha
+
+
+def append_sealed_response(
+    sealed_responses_path: Path,
+    entry: SealedResponseEntry,
+) -> None:
+    """Append a `SealedResponseEntry` row to `sealed_store/responses.sealed.jsonl`."""
+    sealed_responses_path.parent.mkdir(parents=True, exist_ok=True)
+    with sealed_responses_path.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(_canonical_json_line(entry.to_dict()) + "\n")
+
+
+@dataclass(frozen=True)
 class GenerationCallRecord:
     """Single line record in `generations.jsonl` per design §6.8."""
 
@@ -1922,6 +2053,10 @@ class GenerationCallRecord:
     top5_logprobs: tuple[dict[str, object], ...] = ()
     checks_passed: bool = True
     refusal_reasons: tuple[str, ...] = ()
+    attempt: int = 0
+    seed: int = 0
+    response_sha256: str = ""
+    thinking_sha256: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -1930,6 +2065,8 @@ class GenerationCallRecord:
             "scenario_id": self.scenario_id,
             "rendering_index": self.rendering_index,
             "focal_agent": self.focal_agent,
+            "attempt": self.attempt,
+            "seed": self.seed,
             "operation": self.operation,
             "model": self.model,
             "manifest_digest": self.manifest_digest,
@@ -1942,6 +2079,8 @@ class GenerationCallRecord:
                 "licence_id": self.licence_id,
             },
             "prompt_sha256": self.prompt_sha256,
+            "response_sha256": self.response_sha256,
+            "thinking_sha256": self.thinking_sha256,
             "tokens": {
                 "prompt_tokens_estimate": self.prompt_tokens_estimate,
                 "prompt_eval_count": self.prompt_eval_count,
@@ -2195,32 +2334,53 @@ class WriterCheckpointManager:
         self,
         *,
         scenario_index: int,
-        pair: tuple[RenderedScenario, RenderedScenario],
+        pair: tuple[RenderedScenario, RenderedScenario] | None,
         call_records: Sequence[GenerationCallRecord],
+        world: World | None = None,
     ) -> None:
-        """Append a finished scenario pair and its generation call records to the checkpoint atomically."""
-        r0, r1 = pair
-        world = r0.world or r1.world
-        if world is not None:
-            check_rendered_prose(r0.prose, world, focal_agent=r0.focal_agent)
-            check_rendered_prose(r1.prose, world, focal_agent=r1.focal_agent)
-
-        prev_hash = self._chain_head
-        sealed_payload: dict[str, Any] = {
-            "scenario_index": scenario_index,
-            "scenario_id": r0.scenario_id,
-            "rendering_0": {
+        """Append a finished scenario (kept pair or refused scenario) and its generation call records to the checkpoint atomically."""
+        if pair is not None:
+            r0, r1 = pair
+            w_obj = world or r0.world or r1.world
+            if w_obj is not None:
+                check_rendered_prose(r0.prose, w_obj, focal_agent=r0.focal_agent)
+                check_rendered_prose(r1.prose, w_obj, focal_agent=r1.focal_agent)
+            scen_id = r0.scenario_id
+            focal_agents = [r0.focal_agent, r1.focal_agent]
+            prose_sha256 = [
+                _sha256_bytes(r0.prose.encode("utf-8")),
+                _sha256_bytes(r1.prose.encode("utf-8")),
+            ]
+            rendering_0_dict: dict[str, Any] | None = {
                 "rendering_index": r0.rendering_index,
                 "focal_agent": r0.focal_agent,
                 "prose": r0.prose,
                 "writer_prompt": r0.writer_prompt,
-            },
-            "rendering_1": {
+            }
+            rendering_1_dict: dict[str, Any] | None = {
                 "rendering_index": r1.rendering_index,
                 "focal_agent": r1.focal_agent,
                 "prose": r1.prose,
                 "writer_prompt": r1.writer_prompt,
-            },
+            }
+            kept = True
+        else:
+            if world is None:
+                raise ValueError("world is required when appending a refused scenario to checkpoint.")
+            scen_id = world.scenario_id
+            focal_agents = [world.agents[0], world.agents[1]]
+            prose_sha256 = []
+            rendering_0_dict = None
+            rendering_1_dict = None
+            kept = False
+
+        prev_hash = self._chain_head
+        sealed_payload: dict[str, Any] = {
+            "scenario_index": scenario_index,
+            "scenario_id": scen_id,
+            "kept": kept,
+            "rendering_0": rendering_0_dict,
+            "rendering_1": rendering_1_dict,
             "call_records": [rec.to_dict() for rec in call_records],
             "prev_hash": prev_hash,
         }
@@ -2228,16 +2388,17 @@ class WriterCheckpointManager:
 
         pub_payload: dict[str, Any] = {
             "scenario_index": scenario_index,
-            "focal_agents": [r0.focal_agent, r1.focal_agent],
-            "prose_sha256": [
-                _sha256_bytes(r0.prose.encode("utf-8")),
-                _sha256_bytes(r1.prose.encode("utf-8")),
-            ],
+            "kept": kept,
+            "focal_agents": focal_agents,
+            "prose_sha256": prose_sha256,
             "call_records": [
                 {
                     "call_id": rec.call_id,
                     "call_index": rec.call_index,
                     "rendering_index": rec.rendering_index,
+                    "attempt": rec.attempt,
+                    "seed": rec.seed,
+                    "checks_passed": rec.checks_passed,
                     "eval_count": rec.eval_count,
                     "prompt_eval_count": rec.prompt_eval_count,
                     "seconds": round(rec.seconds, 6),
@@ -2357,41 +2518,44 @@ class WriterCheckpointManager:
                     f"Cannot --resume: checkpoint scenario_id {sealed_rec.get('scenario_id')!r} != {world.scenario_id!r}."
                 )
 
-            r0_dict = sealed_rec["rendering_0"]
-            r1_dict = sealed_rec["rendering_1"]
-            prose_0 = str(r0_dict["prose"])
-            prose_1 = str(r1_dict["prose"])
-            focal_0 = str(r0_dict["focal_agent"])
-            focal_1 = str(r1_dict["focal_agent"])
-            prompt_0 = str(r0_dict["writer_prompt"])
-            prompt_1 = str(r1_dict["writer_prompt"])
+            r0_dict = sealed_rec.get("rendering_0")
+            r1_dict = sealed_rec.get("rendering_1")
+            is_kept = bool(sealed_rec.get("kept", True)) and r0_dict is not None and r1_dict is not None
+            if is_kept:
+                assert isinstance(r0_dict, dict) and isinstance(r1_dict, dict)
+                prose_0 = str(r0_dict["prose"])
+                prose_1 = str(r1_dict["prose"])
+                focal_0 = str(r0_dict["focal_agent"])
+                focal_1 = str(r1_dict["focal_agent"])
+                prompt_0 = str(r0_dict["writer_prompt"])
+                prompt_1 = str(r1_dict["writer_prompt"])
 
-            check_rendered_prose(prose_0, world, focal_agent=focal_0)
-            check_rendered_prose(prose_1, world, focal_agent=focal_1)
-            keys = compute_scenario_keys(world)
+                check_rendered_prose(prose_0, world, focal_agent=focal_0)
+                check_rendered_prose(prose_1, world, focal_agent=focal_1)
+                keys = compute_scenario_keys(world)
 
-            restored_pairs.append(
-                (
-                    RenderedScenario(
-                        scenario_id=world.scenario_id,
-                        rendering_index=0,
-                        focal_agent=focal_0,
-                        prose=prose_0,
-                        writer_prompt=prompt_0,
-                        keys=keys,
-                        world=world,
-                    ),
-                    RenderedScenario(
-                        scenario_id=world.scenario_id,
-                        rendering_index=1,
-                        focal_agent=focal_1,
-                        prose=prose_1,
-                        writer_prompt=prompt_1,
-                        keys=keys,
-                        world=world,
-                    ),
+                restored_pairs.append(
+                    (
+                        RenderedScenario(
+                            scenario_id=world.scenario_id,
+                            rendering_index=0,
+                            focal_agent=focal_0,
+                            prose=prose_0,
+                            writer_prompt=prompt_0,
+                            keys=keys,
+                            world=world,
+                        ),
+                        RenderedScenario(
+                            scenario_id=world.scenario_id,
+                            rendering_index=1,
+                            focal_agent=focal_1,
+                            prose=prose_1,
+                            writer_prompt=prompt_1,
+                            keys=keys,
+                            world=world,
+                        ),
+                    )
                 )
-            )
 
             for c_dict in sealed_rec.get("call_records", ()):
                 restored_calls.append(
@@ -2424,6 +2588,10 @@ class WriterCheckpointManager:
                         top5_logprobs=tuple(c_dict.get("top5_logprobs") or ()),
                         checks_passed=bool(c_dict.get("checks_passed", True)),
                         refusal_reasons=tuple(str(x) for x in (c_dict.get("refusal_reasons") or ())),
+                        attempt=int(c_dict.get("attempt", 0)),
+                        seed=int(c_dict.get("seed", 0)),
+                        response_sha256=str(c_dict.get("response_sha256") or ""),
+                        thinking_sha256=str(c_dict.get("thinking_sha256") or ""),
                     )
                 )
 
@@ -2468,11 +2636,15 @@ class OllamaWriter:
         halt_pid: int | None = None,
         pid_killer: Callable[[int], None] = kill_pid_tree,
         generations_path: Path | None = None,
+        sealed_responses_path: Path | None = None,
+        max_retries: int = 0,
         start_owned_server: bool | None = None,
         popen_factory: Callable[..., Any] | None = None,
         server_port: int | None = None,
         ollama_models_dir: Path | str | None = None,
     ) -> None:
+        if max_retries < 0:
+            raise ValueError(f"max_retries must be >= 0, got {max_retries}")
         resolved_think = bool(model_pin.think if think is None else think)
         resolved_num_predict = (
             int(num_predict)
@@ -2545,8 +2717,11 @@ class OllamaWriter:
             )
             self._transport: OllamaHttpTransport = self._gpu_guard.wrap_transport(raw_transport)
             self._generations_path = generations_path
+            self._sealed_responses_path = sealed_responses_path
+            self._max_retries = int(max_retries)
             self._verified_local_digest = False
             self._call_records: list[GenerationCallRecord] = []
+            self._sealed_responses: list[SealedResponseEntry] = []
             self._unload_records: list[OllamaUnloadRecord] = []
             self._refusals: list[ProseRefusalRecord] = []
         except Exception:
@@ -2603,6 +2778,14 @@ class OllamaWriter:
         return tuple(self._call_records)
 
     @property
+    def sealed_responses(self) -> tuple[SealedResponseEntry, ...]:
+        return tuple(self._sealed_responses)
+
+    @property
+    def max_retries(self) -> int:
+        return self._max_retries
+
+    @property
     def unload_records(self) -> tuple[OllamaUnloadRecord, ...]:
         return tuple(self._unload_records)
 
@@ -2618,12 +2801,35 @@ class OllamaWriter:
             lines = "".join(_canonical_json_line(r.to_dict()) + "\n" for r in self._call_records)
             _atomic_write_bytes(self._generations_path, lines.encode("utf-8"))
 
-    def _append_generation_record(self, rec: GenerationCallRecord) -> None:
+    def _append_generation_record(
+        self,
+        rec: GenerationCallRecord,
+        *,
+        response_text: str | None = None,
+        thinking_text: str = "",
+    ) -> None:
         self._call_records.append(rec)
         if self._generations_path is not None:
             self._generations_path.parent.mkdir(parents=True, exist_ok=True)
             with self._generations_path.open("a", encoding="utf-8", newline="\n") as fh:
                 fh.write(_canonical_json_line(rec.to_dict()) + "\n")
+        if response_text is not None:
+            sealed_entry = SealedResponseEntry(
+                call_id=rec.call_id,
+                call_index=rec.call_index,
+                scenario_id=rec.scenario_id,
+                rendering_index=rec.rendering_index,
+                focal_agent=rec.focal_agent,
+                attempt=rec.attempt,
+                seed=rec.seed,
+                response_text=response_text,
+                thinking_text=thinking_text,
+                response_sha256=rec.response_sha256,
+                thinking_sha256=rec.thinking_sha256,
+            )
+            self._sealed_responses.append(sealed_entry)
+            if self._sealed_responses_path is not None:
+                append_sealed_response(self._sealed_responses_path, sealed_entry)
 
     def _ensure_verified(self) -> None:
         if not self._verified_local_digest:
@@ -2643,7 +2849,8 @@ class OllamaWriter:
         rendering_index: int,
         focal_agent: str,
         prompt_text: str,
-    ) -> str:
+        allow_refusal: bool = False,
+    ) -> str | None:
         self._ensure_verified()
         messages = [
             {
@@ -2670,10 +2877,12 @@ class OllamaWriter:
                 margin=NUM_CTX_MARGIN_TOKENS,
                 step=NUM_CTX_STEP_TOKENS,
             )
-        call_index = len(self._call_records) + 1
-        call_id = f"{scenario_id}:r{rendering_index}:call_{call_index:04d}"
+
+        base_seed = int(world.seed)
 
         if num_ctx > self._max_num_ctx or (prompt_tokens_estimate + self._num_predict > self._max_num_ctx):
+            call_index = len(self._call_records) + 1
+            call_id = f"{scenario_id}:r{rendering_index}:call_{call_index:04d}"
             reason_msg = (
                 f"Writer call '{call_id}' requires num_ctx={num_ctx} "
                 f"(prompt_tokens_estimate={prompt_tokens_estimate} + num_predict={self._num_predict} + "
@@ -2707,6 +2916,8 @@ class OllamaWriter:
                 grant_id=self._grant_id,
                 checks_passed=False,
                 refusal_reasons=(f"max_num_ctx_exceeded: {reason_msg}",),
+                attempt=0,
+                seed=base_seed,
             )
             self._append_generation_record(rec)
             self._refusals.append(
@@ -2721,53 +2932,162 @@ class OllamaWriter:
             raise MaxNumCtxRefusalError(reason_msg)
 
         chat_url = f"{self._base_url}/api/chat"
-        payload: dict[str, Any] = {
-            "model": self.ollama_tag,
-            "messages": messages,
-            "think": self._think,
-            "stream": False,
-            "options": {
-                "temperature": 0,
-                "num_predict": self._num_predict,
-                "num_ctx": num_ctx,
-            },
-        }
-        t0 = time.perf_counter()
-        resp = self._transport("POST", chat_url, payload)
-        wall_s = max(0.0, time.perf_counter() - t0)
+        last_exc: RenderCheckError | None = None
 
-        msg = resp.get("message")
-        if not isinstance(msg, dict):
-            msg = {}
-        content = str(msg.get("content") or "").strip()
-        thinking_text = str(msg.get("thinking") or "")
-        done_reason = str(resp.get("done_reason") or "stop").strip()
+        for attempt in range(self._max_retries + 1):
+            call_index = len(self._call_records) + 1
+            call_id = f"{scenario_id}:r{rendering_index}:call_{call_index:04d}"
+            call_seed = base_seed + attempt
+            payload: dict[str, Any] = {
+                "model": self.ollama_tag,
+                "messages": messages,
+                "think": self._think,
+                "stream": False,
+                "options": {
+                    "temperature": 0,
+                    "seed": call_seed,
+                    "num_predict": self._num_predict,
+                    "num_ctx": num_ctx,
+                },
+            }
+            t0 = time.perf_counter()
+            resp = self._transport("POST", chat_url, payload)
+            wall_s = max(0.0, time.perf_counter() - t0)
 
-        raw_eval = resp.get("eval_count")
-        eval_count = (
-            raw_eval
-            if isinstance(raw_eval, int) and not isinstance(raw_eval, bool) and raw_eval >= 0
-            else len(content.split())
-        )
-        raw_prompt_eval = resp.get("prompt_eval_count")
-        prompt_eval_count = (
-            raw_prompt_eval
-            if isinstance(raw_prompt_eval, int) and not isinstance(raw_prompt_eval, bool) and raw_prompt_eval >= 0
-            else 0
-        )
-        thinking_words = len(thinking_text.split()) if thinking_text.strip() else 0
-        raw_logprobs = resp.get("logprobs")
-        top5_logprobs: tuple[dict[str, object], ...] = (
-            tuple(x for x in raw_logprobs[:5] if isinstance(x, dict))
-            if isinstance(raw_logprobs, list)
-            else ()
-        )
+            msg = resp.get("message")
+            if not isinstance(msg, dict):
+                msg = {}
+            content = str(msg.get("content") or "").strip()
+            thinking_text = str(msg.get("thinking") or "")
+            done_reason = str(resp.get("done_reason") or "stop").strip()
+            resp_sha, think_sha = compute_sealed_response_digests(content, thinking_text)
 
-        if done_reason == "length":
-            reason_msg = (
-                f"Writer call '{call_id}' stopped with done_reason='length' "
-                f"(num_predict={self._num_predict}, eval_count={eval_count})."
+            raw_eval = resp.get("eval_count")
+            eval_count = (
+                raw_eval
+                if isinstance(raw_eval, int) and not isinstance(raw_eval, bool) and raw_eval >= 0
+                else len(content.split())
             )
+            raw_prompt_eval = resp.get("prompt_eval_count")
+            prompt_eval_count = (
+                raw_prompt_eval
+                if isinstance(raw_prompt_eval, int) and not isinstance(raw_prompt_eval, bool) and raw_prompt_eval >= 0
+                else 0
+            )
+            thinking_words = len(thinking_text.split()) if thinking_text.strip() else 0
+            raw_logprobs = resp.get("logprobs")
+            top5_logprobs: tuple[dict[str, object], ...] = (
+                tuple(x for x in raw_logprobs[:5] if isinstance(x, dict))
+                if isinstance(raw_logprobs, list)
+                else ()
+            )
+
+            if done_reason == "length":
+                reason_msg = (
+                    f"Writer call '{call_id}' stopped with done_reason='length' "
+                    f"(num_predict={self._num_predict}, eval_count={eval_count})."
+                )
+                rec = GenerationCallRecord(
+                    call_id=call_id,
+                    call_index=call_index,
+                    scenario_id=scenario_id,
+                    rendering_index=rendering_index,
+                    focal_agent=focal_agent,
+                    operation="render_scenario",
+                    model=self.ollama_tag,
+                    manifest_digest=self.manifest_digest,
+                    model_layer_digest=self._model_pin.model_layer_digest,
+                    licence_id=self._model_pin.licence_id,
+                    prompt_sha256=prompt_sha,
+                    prompt_tokens_estimate=prompt_tokens_estimate,
+                    prompt_eval_count=prompt_eval_count,
+                    eval_count=eval_count,
+                    thinking_words=thinking_words,
+                    num_predict=self._num_predict,
+                    num_ctx=num_ctx,
+                    max_num_ctx=self._max_num_ctx,
+                    think=self._think,
+                    temperature=0.0,
+                    done_reason=done_reason,
+                    seconds=wall_s,
+                    vram_peak_mib=self._gpu_guard.peak_vram_mib,
+                    vram_halt_mib=self._gpu_guard.vram_halt_mib,
+                    grant_id=self._grant_id,
+                    top5_logprobs=top5_logprobs,
+                    checks_passed=False,
+                    refusal_reasons=(f"length_stop: {reason_msg}",),
+                    attempt=attempt,
+                    seed=call_seed,
+                    response_sha256=resp_sha,
+                    thinking_sha256=think_sha,
+                )
+                self._append_generation_record(rec, response_text=content, thinking_text=thinking_text)
+                self._refusals.append(
+                    ProseRefusalRecord(
+                        scenario_id=scenario_id,
+                        rendering_index=rendering_index,
+                        focal_agent=focal_agent,
+                        check_id="length_stop",
+                        reason=reason_msg,
+                    )
+                )
+                raise LengthStopRefusalError(reason_msg)
+
+            try:
+                check_rendered_prose(content, world, focal_agent=focal_agent)
+            except RenderCheckError as exc:
+                last_exc = exc
+                rec = GenerationCallRecord(
+                    call_id=call_id,
+                    call_index=call_index,
+                    scenario_id=scenario_id,
+                    rendering_index=rendering_index,
+                    focal_agent=focal_agent,
+                    operation="render_scenario",
+                    model=self.ollama_tag,
+                    manifest_digest=self.manifest_digest,
+                    model_layer_digest=self._model_pin.model_layer_digest,
+                    licence_id=self._model_pin.licence_id,
+                    prompt_sha256=prompt_sha,
+                    prompt_tokens_estimate=prompt_tokens_estimate,
+                    prompt_eval_count=prompt_eval_count,
+                    eval_count=eval_count,
+                    thinking_words=thinking_words,
+                    num_predict=self._num_predict,
+                    num_ctx=num_ctx,
+                    max_num_ctx=self._max_num_ctx,
+                    think=self._think,
+                    temperature=0.0,
+                    done_reason=done_reason,
+                    seconds=wall_s,
+                    vram_peak_mib=self._gpu_guard.peak_vram_mib,
+                    vram_halt_mib=self._gpu_guard.vram_halt_mib,
+                    grant_id=self._grant_id,
+                    top5_logprobs=top5_logprobs,
+                    checks_passed=False,
+                    refusal_reasons=(f"{exc.check_id}: {exc}",),
+                    attempt=attempt,
+                    seed=call_seed,
+                    response_sha256=resp_sha,
+                    thinking_sha256=think_sha,
+                )
+                self._append_generation_record(rec, response_text=content, thinking_text=thinking_text)
+                self._refusals.append(
+                    ProseRefusalRecord(
+                        scenario_id=scenario_id,
+                        rendering_index=rendering_index,
+                        focal_agent=focal_agent,
+                        check_id=exc.check_id,
+                        reason=str(exc),
+                        failing_sentence=exc.failing_sentence,
+                    )
+                )
+                if attempt < self._max_retries:
+                    continue
+                if allow_refusal:
+                    return None
+                raise
+
             rec = GenerationCallRecord(
                 call_id=call_id,
                 call_index=call_index,
@@ -2795,100 +3115,27 @@ class OllamaWriter:
                 vram_halt_mib=self._gpu_guard.vram_halt_mib,
                 grant_id=self._grant_id,
                 top5_logprobs=top5_logprobs,
-                checks_passed=False,
-                refusal_reasons=(f"length_stop: {reason_msg}",),
+                checks_passed=True,
+                refusal_reasons=(),
+                attempt=attempt,
+                seed=call_seed,
+                response_sha256=resp_sha,
+                thinking_sha256=think_sha,
             )
-            self._append_generation_record(rec)
-            self._refusals.append(
-                ProseRefusalRecord(
-                    scenario_id=scenario_id,
-                    rendering_index=rendering_index,
-                    focal_agent=focal_agent,
-                    check_id="length_stop",
-                    reason=reason_msg,
-                )
-            )
-            raise LengthStopRefusalError(reason_msg)
+            self._append_generation_record(rec, response_text=content, thinking_text=thinking_text)
+            return content
 
-        try:
-            check_rendered_prose(content, world, focal_agent=focal_agent)
-        except RenderCheckError as exc:
-            rec = GenerationCallRecord(
-                call_id=call_id,
-                call_index=call_index,
-                scenario_id=scenario_id,
-                rendering_index=rendering_index,
-                focal_agent=focal_agent,
-                operation="render_scenario",
-                model=self.ollama_tag,
-                manifest_digest=self.manifest_digest,
-                model_layer_digest=self._model_pin.model_layer_digest,
-                licence_id=self._model_pin.licence_id,
-                prompt_sha256=prompt_sha,
-                prompt_tokens_estimate=prompt_tokens_estimate,
-                prompt_eval_count=prompt_eval_count,
-                eval_count=eval_count,
-                thinking_words=thinking_words,
-                num_predict=self._num_predict,
-                num_ctx=num_ctx,
-                max_num_ctx=self._max_num_ctx,
-                think=self._think,
-                temperature=0.0,
-                done_reason=done_reason,
-                seconds=wall_s,
-                vram_peak_mib=self._gpu_guard.peak_vram_mib,
-                vram_halt_mib=self._gpu_guard.vram_halt_mib,
-                grant_id=self._grant_id,
-                top5_logprobs=top5_logprobs,
-                checks_passed=False,
-                refusal_reasons=(f"{exc.check_id}: {exc}",),
-            )
-            self._append_generation_record(rec)
-            self._refusals.append(
-                ProseRefusalRecord(
-                    scenario_id=scenario_id,
-                    rendering_index=rendering_index,
-                    focal_agent=focal_agent,
-                    check_id=exc.check_id,
-                    reason=str(exc),
-                )
-            )
-            raise
+        if allow_refusal:
+            return None
+        assert last_exc is not None
+        raise last_exc
 
-        rec = GenerationCallRecord(
-            call_id=call_id,
-            call_index=call_index,
-            scenario_id=scenario_id,
-            rendering_index=rendering_index,
-            focal_agent=focal_agent,
-            operation="render_scenario",
-            model=self.ollama_tag,
-            manifest_digest=self.manifest_digest,
-            model_layer_digest=self._model_pin.model_layer_digest,
-            licence_id=self._model_pin.licence_id,
-            prompt_sha256=prompt_sha,
-            prompt_tokens_estimate=prompt_tokens_estimate,
-            prompt_eval_count=prompt_eval_count,
-            eval_count=eval_count,
-            thinking_words=thinking_words,
-            num_predict=self._num_predict,
-            num_ctx=num_ctx,
-            max_num_ctx=self._max_num_ctx,
-            think=self._think,
-            temperature=0.0,
-            done_reason=done_reason,
-            seconds=wall_s,
-            vram_peak_mib=self._gpu_guard.peak_vram_mib,
-            vram_halt_mib=self._gpu_guard.vram_halt_mib,
-            grant_id=self._grant_id,
-            top5_logprobs=top5_logprobs,
-            checks_passed=True,
-            refusal_reasons=(),
-        )
-        self._append_generation_record(rec)
-        return content
-
-    def render_scenario_pair(self, world: World) -> tuple[RenderedScenario, RenderedScenario]:
+    def render_scenario_pair(
+        self,
+        world: World,
+        *,
+        allow_refusal: bool = False,
+    ) -> tuple[RenderedScenario, RenderedScenario] | None:
         """Render `world` twice via `qwen3.6:35b`, run all prose checks (a)-(d), and verify key invariance."""
         focal_0 = world.agents[0]
         focal_1 = world.agents[1]
@@ -2902,6 +3149,7 @@ class OllamaWriter:
             rendering_index=0,
             focal_agent=focal_0,
             prompt_text=prompt_0,
+            allow_refusal=allow_refusal,
         )
         prose_1 = self._chat_render(
             world=world,
@@ -2909,7 +3157,10 @@ class OllamaWriter:
             rendering_index=1,
             focal_agent=focal_1,
             prompt_text=prompt_1,
+            allow_refusal=allow_refusal,
         )
+        if prose_0 is None or prose_1 is None:
+            return None
 
         keys_0 = compute_scenario_keys(_reconstruct_world_from_writer_prompt(world, prompt_0))
         keys_1 = compute_scenario_keys(_reconstruct_world_from_writer_prompt(world, prompt_1))

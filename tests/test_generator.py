@@ -3218,6 +3218,570 @@ def test_42_writer_in_the_loop_scen_0000_passes_and_fault_per_event_check_id_ref
     assert len(tested_ids) == 12 == len(set(tested_ids))
 
 
+def test_43_fake_transport_keep_and_continue_and_max_retries(tmp_path: Path) -> None:
+    """Test 43 (Card sn Req 1, 2, 4, 5):
+    - A fake transport returning one passing and one failing response: the build completes with rc 0,
+      keeps 1, refuses 1, and both texts (plus thinking text) are saved in `sealed_store/responses.sealed.jsonl`,
+      keyed by call_id, with `generations.jsonl` pointing to them by sha256;
+    - A 2-scenario run where scenario 0 passes both renderings and scenario 1 fails rendering 0:
+      `scenarios_kept == 1`, `scenarios_refused == 1`, `rc == 0`;
+    - `--max-retries N` retries a refused rendering with the same prompt and `seed + attempt`, recording every attempt.
+    """
+    import hashlib
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+    )
+    sealed_responses_filename = "responses.sealed.jsonl"
+
+    configs_1 = make_balanced_configs(1, base_seed=20261030)
+    w0 = generate_world(configs_1[0])
+    passing_r0 = render_world_template(w0, w0.agents[0])
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    # Failing rendering 1: omit 'linen bin' on event #1 so it fails with c_fidelity_missing_event
+    failing_r1_sent_0 = "In the bindery room, Eva observed the index reel in open view."
+    failing_r1 = f"{sj_setup.replace('Following Eva', f'Following {w0.agents[1]}')}\n\n{' '.join([failing_r1_sent_0, *sj_sents[1:]])}"
+
+    chat_Idx = 0
+    seen_seeds_1: list[int] = []
+
+    def _one_pass_one_fail_transport(
+        method: str,
+        url: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        nonlocal chat_Idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            assert payload is not None
+            opts = payload.get("options") or {}
+            seen_seeds_1.append(int(opts.get("seed", -1)))
+            call_num = chat_Idx
+            chat_Idx += 1
+            if call_num == 0:
+                return {
+                    "message": {"role": "assistant", "content": passing_r0, "thinking": "thought_pass_0"},
+                    "done": True,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 3000,
+                    "eval_count": 780,
+                }
+            return {
+                "message": {"role": "assistant", "content": failing_r1, "thinking": "thought_fail_1"},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3000,
+                "eval_count": 823,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_1 = tmp_path / "one_pass_one_fail"
+    summary_1 = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_1,
+        writer_kind="ollama",
+        grant_id="test-grant-sn-1",
+        http_transport=_one_pass_one_fail_transport,
+        start_owned_server=False,
+    )
+    assert summary_1["kept"] == 1
+    assert summary_1["refused"] == 1
+    assert summary_1["renderings_kept"] == 1
+    assert summary_1["renderings_refused"] == 1
+    assert summary_1["calls_kept"] == 1
+    assert summary_1["calls_refused"] == 1
+    assert summary_1["scenarios_kept"] == 0
+    assert summary_1["scenarios_refused"] == 1
+    assert summary_1["refusals_by_check_id"] == {"c_fidelity_missing_event": 1}
+    assert seen_seeds_1 == [int(w0.seed), int(w0.seed)]
+
+    # Verify CLI entrypoint also returns rc == 0 on the same one-passing/one-failing fake transport:
+    import udlab_generator.cli as ug_cli
+    orig_build_fn = ug_cli.build_and_probe_dataset
+    chat_Idx = 0
+    out_cli_1 = tmp_path / "one_pass_one_fail_cli"
+    ug_cli.build_and_probe_dataset = lambda **kw: orig_build_fn(
+        **{**kw, "http_transport": _one_pass_one_fail_transport, "start_owned_server": False}
+    )
+    try:
+        rc_cli_1 = cli_main(
+            [
+                "--write",
+                "--writer",
+                "ollama",
+                "--count",
+                "1",
+                "--seed",
+                "20261030",
+                "--out-dir",
+                str(out_cli_1),
+                "--grant-id",
+                "test-grant-sn-1",
+            ]
+        )
+    finally:
+        ug_cli.build_and_probe_dataset = orig_build_fn
+    assert rc_cli_1 == 0
+
+    # Verify 2-scenario run where scenario 0 passes both renderings and scenario 1 fails rendering 0 ->
+    # scenarios_kept == 1, scenarios_refused == 1:
+    configs_2 = make_balanced_configs(2, base_seed=20261030)
+    w_s0, w_s1 = generate_world(configs_2[0]), generate_world(configs_2[1])
+    s0_r0 = render_world_template(w_s0, w_s0.agents[0])
+    s0_r1 = render_world_template(w_s0, w_s0.agents[1])
+    s1_r0_fail = f"{render_world_template(w_s1, w_s1.agents[0])} [bad_bracket]"
+    s1_r1_pass = render_world_template(w_s1, w_s1.agents[1])
+    two_scen_resps = [s0_r0, s0_r1, s1_r0_fail, s1_r1_pass]
+    two_scen_idx = 0
+
+    def _two_scen_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal two_scen_idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            txt = two_scen_resps[two_scen_idx]
+            two_scen_idx += 1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3000,
+                "eval_count": 780,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_2 = tmp_path / "two_scen_one_kept_one_refused"
+    summary_2 = build_and_probe_dataset(
+        count=2,
+        base_seed=20261030,
+        output_dir=out_2,
+        writer_kind="ollama",
+        grant_id="test-grant-sn-2",
+        http_transport=_two_scen_transport,
+        start_owned_server=False,
+    )
+    assert summary_2["scenarios_kept"] == 1
+    assert summary_2["scenarios_refused"] == 1
+    assert summary_2["renderings_kept"] == 3
+    assert summary_2["renderings_refused"] == 1
+    assert summary_2["num_scenarios"] == 1
+    assert summary_2["num_items"] == 2
+    assert summary_2["refusals_by_check_id"] == {"a_no_markers_bracket": 1}
+
+    # Both texts (and thinking texts) are saved in sealed_store/responses.sealed.jsonl, keyed by call_id,
+    # with generations.jsonl pointing to them by sha256:
+    resp_path_1 = out_1 / "sealed_store" / sealed_responses_filename
+    gen_path_1 = out_1 / "generations.jsonl"
+    assert resp_path_1.is_file()
+    assert gen_path_1.is_file()
+    saved_rows_1 = [json.loads(line) for line in resp_path_1.read_text(encoding="utf-8").splitlines() if line.strip()]
+    gen_rows_1 = [json.loads(line) for line in gen_path_1.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(saved_rows_1) == 2
+    assert len(gen_rows_1) == 2
+
+    assert saved_rows_1[0]["call_id"] == gen_rows_1[0]["call_id"] == "scen_0000:r0:call_0001"
+    assert saved_rows_1[0]["response_text"] == passing_r0
+    assert saved_rows_1[0]["thinking_text"] == "thought_pass_0"
+    exp_r0_sha = hashlib.sha256(passing_r0.encode("utf-8")).hexdigest()
+    exp_t0_sha = hashlib.sha256(b"thought_pass_0").hexdigest()
+    assert saved_rows_1[0]["response_sha256"] == gen_rows_1[0]["response_sha256"] == exp_r0_sha
+    assert saved_rows_1[0]["thinking_sha256"] == gen_rows_1[0]["thinking_sha256"] == exp_t0_sha
+    assert gen_rows_1[0]["checks_passed"] is True
+
+    assert saved_rows_1[1]["call_id"] == gen_rows_1[1]["call_id"] == "scen_0000:r1:call_0002"
+    assert saved_rows_1[1]["response_text"] == failing_r1
+    assert saved_rows_1[1]["thinking_text"] == "thought_fail_1"
+    exp_r1_sha = hashlib.sha256(failing_r1.encode("utf-8")).hexdigest()
+    exp_t1_sha = hashlib.sha256(b"thought_fail_1").hexdigest()
+    assert saved_rows_1[1]["response_sha256"] == gen_rows_1[1]["response_sha256"] == exp_r1_sha
+    assert saved_rows_1[1]["thinking_sha256"] == gen_rows_1[1]["thinking_sha256"] == exp_t1_sha
+    assert gen_rows_1[1]["checks_passed"] is False
+    assert any(
+        "c_fidelity_missing_event" in r and failing_r1_sent_0 in r
+        for r in gen_rows_1[1]["refusal_reasons"]
+    )
+
+    # Also test --max-retries 1 on the same failing rendering: attempt 0 fails, attempt 1 (with seed + 1) passes!
+    passing_r1 = render_world_template(w0, w0.agents[1])
+    retry_calls: list[tuple[int, str]] = []
+
+    def _retry_transport(
+        method: str,
+        url: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            assert payload is not None
+            seed_val = int((payload.get("options") or {}).get("seed", -1))
+            prompt_str = str(payload["messages"][0]["content"])
+            idx_call = len(retry_calls)
+            retry_calls.append((seed_val, prompt_str))
+            if idx_call == 0:
+                txt = passing_r0
+            elif idx_call == 1:
+                txt = failing_r1  # r1 attempt 0 fails
+            else:
+                txt = passing_r1  # r1 attempt 1 succeeds
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3000,
+                "eval_count": 780,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_retry = tmp_path / "retry_run"
+    summary_retry = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_retry,
+        writer_kind="ollama",
+        max_retries=1,
+        grant_id="test-grant-sn-retry",
+        http_transport=_retry_transport,
+        start_owned_server=False,
+    )
+    assert len(retry_calls) == 3
+    # Attempt 0 and attempt 1 for r1 use the exact same prompt and seed + attempt (w0.seed + 0, w0.seed + 1)
+    assert retry_calls[1][1] == retry_calls[2][1]
+    assert retry_calls[1][0] == int(w0.seed) + 0
+    assert retry_calls[2][0] == int(w0.seed) + 1
+    assert summary_retry["scenarios_kept"] == 1
+    assert summary_retry["scenarios_refused"] == 0
+    assert summary_retry["renderings_kept"] == 2
+    assert summary_retry["renderings_refused"] == 0
+    assert summary_retry["calls_kept"] == 2
+    assert summary_retry["calls_refused"] == 1
+    assert summary_retry["refusals_by_check_id"] == {"c_fidelity_missing_event": 1}
+    gen_retry = [
+        json.loads(line)
+        for line in (out_retry / "generations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [(r["attempt"], r["seed"], r["checks_passed"]) for r in gen_retry] == [
+        (0, int(w0.seed), True),
+        (0, int(w0.seed), False),
+        (1, int(w0.seed) + 1, True),
+    ]
+
+
+def test_44_recheck_reproduces_verdicts_and_names_failing_sentence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Test 44 (Card sn Req 3, 4, 5):
+    - `--recheck <dir>` re-runs every prose check on the saved texts with no model and no GPU,
+      printing per-call results with check ids and the failing sentence, and reproduces the same verdicts.
+    - Checker failure messages name the candidate sentence for the failing event (or 'no candidate sentence').
+    """
+    from typing import Any
+    import udlab_generator as ug
+    import udlab_generator.render as ug_render
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+    )
+
+    configs_1 = make_balanced_configs(1, base_seed=20261030)
+    w0 = generate_world(configs_1[0])
+    passing_r0 = render_world_template(w0, w0.agents[0])
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    failing_sent_ev1 = "In the bindery room, Eva observed the index reel in open view."
+    failing_r1 = f"{sj_setup.replace('Following Eva', f'Following {w0.agents[1]}')}\n\n{' '.join([failing_sent_ev1, *sj_sents[1:]])}"
+
+    # Verify checker failure message directly names the candidate sentence or 'no candidate sentence':
+    with pytest.raises(RenderCheckError) as exc_cand:
+        check_rendered_prose(failing_r1, w0, focal_agent=w0.agents[1])
+    assert exc_cand.value.check_id == "c_fidelity_missing_event"
+    assert getattr(exc_cand.value, "failing_sentence", None) == failing_sent_ev1
+    assert f"candidate sentence: {failing_sent_ev1!r}" in str(exc_cand.value)
+
+    # Also check when there are no event sentences after the last event -> 'no candidate sentence'
+    with pytest.raises(RenderCheckError) as exc_none:
+        check_rendered_prose(f"{sj_setup}\n\n{' '.join(sj_sents[:-1])}", w0, focal_agent=w0.agents[0])
+    assert exc_none.value.check_id == "c_fidelity_missing_event"
+    assert getattr(exc_none.value, "failing_sentence", None) == "no candidate sentence"
+    assert "candidate sentence: 'no candidate sentence'" in str(exc_none.value)
+
+    responses = [passing_r0, failing_r1]
+    call_idx = 0
+
+    def _transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal call_idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            txt = responses[call_idx]
+            call_idx += 1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3000,
+                "eval_count": 800,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_dir = tmp_path / "recheck_dir"
+    build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        grant_id="test-grant-recheck",
+        http_transport=_transport,
+        start_owned_server=False,
+    )
+
+    # Forbid any HTTP transport or GPU query during --recheck to prove it uses no model and no GPU:
+    def _forbidden_transport(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("--recheck must not make any HTTP/model calls")
+
+    def _forbidden_gpu(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("--recheck must not query GPU")
+
+    monkeypatch.setattr(ug_render, "default_ollama_http_transport", _forbidden_transport)
+    monkeypatch.setattr(ug_render, "query_gpu_vram_peak_mib", _forbidden_gpu)
+
+    capsys.readouterr()
+    rc = cli_main(["--recheck", str(out_dir)])
+    captured = capsys.readouterr().out
+    assert rc == 0
+    assert "[recheck] scen_0000:r0:call_0001" in captured
+    assert "PASS check_id=ok" in captured
+    assert "[recheck] scen_0000:r1:call_0002" in captured
+    assert "FAIL check_id=c_fidelity_missing_event" in captured
+    assert failing_sent_ev1 in captured
+
+    recheck_fn = getattr(ug, "recheck_saved_responses")
+    recheck_report = recheck_fn(out_dir)
+    assert recheck_report["matches_recorded_verdicts"] is True
+    assert recheck_report["kept"] == 1
+    assert recheck_report["refused"] == 1
+    assert recheck_report["scenarios_kept"] == 0
+    assert recheck_report["scenarios_refused"] == 1
+    assert recheck_report["refusals_by_check_id"] == {"c_fidelity_missing_event": 1}
+    calls_list = recheck_report["calls"]
+    assert isinstance(calls_list, list) and len(calls_list) == 2
+    assert calls_list[0]["checks_passed"] is True
+    assert calls_list[0]["check_id"] is None
+    assert calls_list[0]["failing_sentence"] is None
+    assert calls_list[1]["checks_passed"] is False
+    assert calls_list[1]["check_id"] == "c_fidelity_missing_event"
+    assert calls_list[1]["failing_sentence"] == failing_sent_ev1
+
+
+def test_45_one_scenario_run_end_to_end(tmp_path: Path) -> None:
+    """Test 45 (Card sn Req 2, 7): `--count 1` works end to end: build (exit code 0), write 2 renderings, save, recheck."""
+    import udlab_generator as ug
+
+    out_1 = tmp_path / "one_scenario_e2e"
+    rc_build = cli_main(
+        [
+            "--write",
+            "--writer",
+            "mock",
+            "--count",
+            "1",
+            "--seed",
+            "20261030",
+            "--out-dir",
+            str(out_1),
+        ]
+    )
+    assert rc_build == 0
+
+    summary = json.loads((out_1 / "build_summary.json").read_text(encoding="utf-8"))
+    assert summary["num_scenarios"] == 1
+    assert summary["num_items"] == 2
+    assert summary["scenarios_kept"] == 1
+    assert summary["scenarios_refused"] == 0
+    assert summary["renderings_kept"] == 2
+    assert summary["renderings_refused"] == 0
+    assert summary["kept"] == 2
+    assert summary["refused"] == 0
+    assert summary["refusals_by_check_id"] == {}
+
+    items_lines = [
+        json.loads(line)
+        for line in (out_1 / "part_public" / "items.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(items_lines) == 2
+
+    saved_lines = [
+        json.loads(line)
+        for line in (out_1 / "sealed_store" / "responses.sealed.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(saved_lines) == 2
+
+    rc_recheck = cli_main(["--recheck", str(out_1)])
+    assert rc_recheck == 0
+    recheck_res = getattr(ug, "recheck_saved_responses")(out_1)
+    assert recheck_res["matches_recorded_verdicts"] is True
+    assert recheck_res["scenarios_kept"] == 1
+    assert recheck_res["renderings_kept"] == 2
+    assert recheck_res["renderings_refused"] == 0
+
+
+def test_46_sealed_response_store_private_never_in_part_public(tmp_path: Path) -> None:
+    """Test 46 (Card sn Req 1, 8):
+    - Saved response store (`responses.sealed.jsonl`) lives in `sealed_store`, never in `part_public`,
+      and `.gitignore` covers it;
+    - Fails if any saved response text from a refused scenario (or thinking text, or `response_text` field)
+      appears anywhere under `part_public`.
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+    )
+    sealed_responses_filename = "responses.sealed.jsonl"
+
+    gitignore_text = (Path(__file__).resolve().parents[1] / ".gitignore").read_text(encoding="utf-8")
+    assert "**/sealed_store/" in gitignore_text
+    assert "**/*.sealed.jsonl" in gitignore_text
+
+    configs_1 = make_balanced_configs(1, base_seed=20261030)
+    w0 = generate_world(configs_1[0])
+    passing_r0 = render_world_template(w0, w0.agents[0])
+    secret_refused_marker = "PRIVATE_REFUSED_WRITER_PROSE_DO_NOT_PUBLISH_987654"
+    secret_thinking_marker = "PRIVATE_WRITER_THINKING_TRACE_DO_NOT_PUBLISH_123456"
+    failing_r1 = f"{passing_r0}\n\n{secret_refused_marker} [unlogged_bracket]"
+
+    call_idx = 0
+
+    def _transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal call_idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            txt = passing_r0 if call_idx == 0 else failing_r1
+            call_idx += 1
+            return {
+                "message": {"role": "assistant", "content": txt, "thinking": secret_thinking_marker},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3000,
+                "eval_count": 800,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_dir = tmp_path / "privacy_check"
+    build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        grant_id="test-grant-privacy",
+        http_transport=_transport,
+        start_owned_server=False,
+    )
+
+    pub_dir = out_dir / "part_public"
+    sealed_dir = out_dir / "sealed_store"
+    assert (sealed_dir / sealed_responses_filename).is_file()
+    assert not (pub_dir / sealed_responses_filename).exists()
+
+    saved_entries = [
+        json.loads(line)
+        for line in (sealed_dir / sealed_responses_filename).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(saved_entries) == 2
+
+    # Check every file under part_public: no saved response text (neither r0 nor r1, nor thinking text)
+    # may appear under part_public when the scenario was refused, and no sealed file or response_text field
+    # may ever appear under part_public:
+    for pub_file in pub_dir.rglob("*"):
+        if pub_file.is_file():
+            assert not pub_file.name.endswith((".sealed.json", ".sealed.jsonl"))
+            content = pub_file.read_text(encoding="utf-8")
+            assert secret_refused_marker not in content
+            assert secret_thinking_marker not in content
+            for entry in saved_entries:
+                assert str(entry["response_text"]) not in content, (
+                    f"Saved response text for {entry['call_id']} leaked into {pub_file}"
+                )
+                if entry.get("thinking_text"):
+                    assert str(entry["thinking_text"]) not in content, (
+                        f"Saved thinking text for {entry['call_id']} leaked into {pub_file}"
+                    )
+
+    # Also verify that check_not_in_key_order actively rejects `response_text` or `thinking_text` in public items:
+    with pytest.raises(SealingError, match="Forbidden key/seed fields"):
+        check_not_in_key_order([{"item_id": "item_0001", "response_text": "leaked"}], [{"pass_index": 1}], {})
+
+
+
 
 
 
