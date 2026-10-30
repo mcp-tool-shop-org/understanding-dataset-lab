@@ -3546,12 +3546,14 @@ def test_44_recheck_reproduces_verdicts_and_names_failing_sentence(
     failing_sent_ev1 = "In the bindery room, Eva observed the index reel in open view."
     failing_r1 = f"{sj_setup.replace('Following Eva', f'Following {w0.agents[1]}')}\n\n{' '.join([failing_sent_ev1, *sj_sents[1:]])}"
 
-    # Verify checker failure message directly names the candidate sentence or 'no candidate sentence':
+    # Verify checker failure exception carries the candidate sentence as an attribute (for sealed-store writer)
+    # while str(exc) never includes the failing sentence:
     with pytest.raises(RenderCheckError) as exc_cand:
         check_rendered_prose(failing_r1, w0, focal_agent=w0.agents[1])
     assert exc_cand.value.check_id == "c_fidelity_missing_event"
     assert getattr(exc_cand.value, "failing_sentence", None) == failing_sent_ev1
-    assert f"candidate sentence: {failing_sent_ev1!r}" in str(exc_cand.value)
+    assert failing_sent_ev1 not in str(exc_cand.value)
+    assert "failing_sentence_sha256=" in str(exc_cand.value)
 
     # Also check when there are no event sentences after the last event -> 'no candidate sentence'
     with pytest.raises(RenderCheckError) as exc_none:
@@ -6978,5 +6980,148 @@ def test_75_card_td_req6_crlf_normalization_in_writer_and_reader(tmp_path: Path)
     vw_res = verify_written_dataset(out_dir)
     assert "CRLF_FAIL_TD_75" not in (out_dir / "verify_written_report.json").read_text(encoding="utf-8")
     assert vw_res["recount_verification"]["prose_checks_passed"] is True
+
+
+def test_76_card_ti_toplevel_stderr_catch_on_failing_kept_and_resume_paths(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Test 76 (Card ti Req 1 & 2):
+    - Through `main([...])`, run a failing kept path (a tampered kept rendering with `--verify-written`,
+      and a `--resume` path) containing a marker.
+    - Capture stdout and stderr.
+    - Assert the exit code is non-zero, that `failing_sentence_sha256=` appears on stderr, and that
+      the marker appears in neither stream (and no traceback is printed).
+    - Also verify `RenderCheckError.__str__` and `MockWriter.render_scenario_pair` never include the
+      failing sentence in `str(exc)` while keeping `exc.failing_sentence` available as an attribute.
+    """
+    import hashlib
+    from udlab_generator.sealing import _hmac_hex, _render_public_from_sealed
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    marker = "MARKER_TI_STDERR_CATCH_76001"
+    secret_sent = f"In the bindery room, Eva observed the index reel in open view ({marker})."
+    bad_prose = f"{sj_setup}\n\n{' '.join([secret_sent, *sj_sents[1:]])}"
+    exp_sha = hashlib.sha256(secret_sent.encode("utf-8")).hexdigest()
+    exp_off = bad_prose.index(secret_sent)
+    exp_len = len(secret_sent)
+
+    # 1. Build a 1-scenario kept dataset via CLI:
+    out_dir = tmp_path / "ti_kept_tampered"
+    capsys.readouterr()
+    rc_init = cli_main(["--write", "--writer", "mock", "--count", "1", "--seed", "20261030", "--out-dir", str(out_dir)])
+    capsys.readouterr()
+    assert rc_init == 0
+
+    # Tamper with the kept rendering in sealed_store/keys.sealed.jsonl and part_public/items.jsonl
+    # (updating SHA-256 and HMAC so verify_sealed_part passes and verify_written_dataset_recounts_and_prose
+    # hits the prose check on the kept rendering and raises SealingError):
+    sealed_dir = out_dir / "sealed_store"
+    public_dir = out_dir / "part_public"
+    sealing_meta_path = sealed_dir / "sealing.sealed.json"
+    keys_sealed_path = sealed_dir / "keys.sealed.jsonl"
+    sealing_meta = json.loads(sealing_meta_path.read_text(encoding="utf-8"))
+    sealed_rows = [
+        json.loads(line)
+        for line in keys_sealed_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    sealed_rows[0]["prose"] = bad_prose
+    keys_bytes = (
+        "\n".join(json.dumps(r, sort_keys=True, ensure_ascii=False, separators=(",", ":")) for r in sealed_rows) + "\n"
+    ).encode("utf-8")
+    keys_sha = hashlib.sha256(keys_bytes).hexdigest()
+    sealing_meta["keys_sealed_sha256"] = keys_sha
+    sealing_meta["commitment_hmac_sha256"] = _hmac_hex(
+        sealing_meta["private_seed_hex"], f"commitment:{keys_sha}", 64
+    )
+    items_bytes, part_bytes, _, _ = _render_public_from_sealed(sealed_rows, sealing_meta)
+    keys_sealed_path.write_bytes(keys_bytes)
+    sealing_meta_path.write_text(json.dumps(sealing_meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (public_dir / "items.jsonl").write_bytes(items_bytes)
+    (public_dir / "part.json").write_bytes(part_bytes)
+
+    # Run `main(["--verify-written", ...])` and capture stdout and stderr:
+    capsys.readouterr()
+    rc_vw = cli_main(["--verify-written", str(out_dir)])
+    vw_stdio = capsys.readouterr()
+    assert rc_vw != 0
+    assert f"failing_sentence_sha256={exp_sha}" in vw_stdio.err
+    assert f"failing_sentence_offset={exp_off}" in vw_stdio.err
+    assert f"failing_sentence_length={exp_len}" in vw_stdio.err
+    assert "c_fidelity_missing_event" in vw_stdio.err
+    assert "Traceback" not in vw_stdio.err
+    assert marker not in vw_stdio.out
+    assert marker not in vw_stdio.err
+    assert secret_sent not in vw_stdio.out
+    assert secret_sent not in vw_stdio.err
+
+    # 2. Tamper with the kept rendering in the checkpoint files (`checkpoint.sealed.json` and `checkpoint.json`)
+    # and run `main(["--write", "--writer", "mock", "--count", "1", "--seed", "20261030", "--out-dir", ..., "--resume"])`:
+    sealed_ckpt_path = sealed_dir / "checkpoint.sealed.json"
+    pub_ckpt_path = out_dir / "checkpoint.json"
+    sealed_ckpt = json.loads(sealed_ckpt_path.read_text(encoding="utf-8"))
+    pub_ckpt = json.loads(pub_ckpt_path.read_text(encoding="utf-8"))
+    sealed_ckpt["scenarios"][0]["rendering_0"]["prose"] = bad_prose
+    s_rec = sealed_ckpt["scenarios"][0]
+    s_payload = {k: v for k, v in s_rec.items() if k not in ("sealed_entry_sha256", "chain_hash")}
+    s_sha = hashlib.sha256(
+        json.dumps(s_payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    p_rec = pub_ckpt["scenarios"][0]
+    p_payload = {k: v for k, v in p_rec.items() if k != "chain_hash"}
+    c_hash = hashlib.sha256(
+        f"{s_rec['prev_hash']}:{json.dumps(p_payload, sort_keys=True, ensure_ascii=False, separators=(',', ':'))}:{s_sha}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    s_rec["sealed_entry_sha256"] = s_sha
+    s_rec["chain_hash"] = c_hash
+    p_rec["chain_hash"] = c_hash
+    sealed_ckpt["chain_head_sha256"] = c_hash
+    pub_ckpt["chain_head_sha256"] = c_hash
+    sealed_ckpt_path.write_text(json.dumps(sealed_ckpt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    pub_ckpt_path.write_text(json.dumps(pub_ckpt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    capsys.readouterr()
+    rc_resume = cli_main(
+        [
+            "--write",
+            "--writer",
+            "mock",
+            "--count",
+            "1",
+            "--seed",
+            "20261030",
+            "--out-dir",
+            str(out_dir),
+            "--resume",
+        ]
+    )
+    resume_stdio = capsys.readouterr()
+    assert rc_resume != 0
+    assert f"failing_sentence_sha256={exp_sha}" in resume_stdio.err
+    assert f"failing_sentence_offset={exp_off}" in resume_stdio.err
+    assert f"failing_sentence_length={exp_len}" in resume_stdio.err
+    assert "c_fidelity_missing_event" in resume_stdio.err
+    assert "Traceback" not in resume_stdio.err
+    assert marker not in resume_stdio.out
+    assert marker not in resume_stdio.err
+    assert secret_sent not in resume_stdio.out
+    assert secret_sent not in resume_stdio.err
+
+    # 3. Verify RenderCheckError.__str__ and MockWriter.render_scenario_pair never include the failing sentence
+    # in str(exc), while keeping failing_sentence as an attribute:
+    bad_mock = MockWriter(custom_renderer=lambda _w, _fa: bad_prose)
+    with pytest.raises(RenderCheckError) as exc_mock:
+        bad_mock.render_scenario_pair(w0)
+    assert exc_mock.value.failing_sentence == secret_sent
+    assert marker not in str(exc_mock.value)
+    assert secret_sent not in str(exc_mock.value)
+    assert f"failing_sentence_sha256={exp_sha}" in str(exc_mock.value)
+    assert f"failing_sentence_offset={exp_off}" in str(exc_mock.value)
+    assert f"failing_sentence_length={exp_len}" in str(exc_mock.value)
+
 
 

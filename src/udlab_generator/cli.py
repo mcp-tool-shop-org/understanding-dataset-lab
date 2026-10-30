@@ -54,6 +54,7 @@ from udlab_generator.render import (
     resolve_sealed_failing_sentence,
 )
 from udlab_generator.sealing import (
+    SealingError,
     _deserialize_world,
     verify_sealed_part,
     verify_written_dataset_recounts_and_prose,
@@ -1019,50 +1020,67 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.recheck is not None:
-        recheck_res = recheck_saved_responses(args.recheck)
-        for call_info in recheck_res["calls"]:  # type: ignore[union-attr]
-            status = "PASS" if call_info["checks_passed"] else "FAIL"
-            cid = call_info["check_id"] or "ok"
-            sent = call_info["failing_sentence"] or ""
-            print(
-                f"[recheck] {call_info['call_id']} (attempt={call_info['attempt']}, seed={call_info['seed']}): "
-                f"{status} check_id={cid} failing_sentence={sent!r}"
-            )
-        print(json.dumps(recheck_res, indent=2, sort_keys=True))
+    try:
+        if args.recheck is not None:
+            recheck_res = recheck_saved_responses(args.recheck)
+            for call_info in recheck_res["calls"]:  # type: ignore[union-attr]
+                status = "PASS" if call_info["checks_passed"] else "FAIL"
+                cid = call_info["check_id"] or "ok"
+                sent = call_info["failing_sentence"] or ""
+                print(
+                    f"[recheck] {call_info['call_id']} (attempt={call_info['attempt']}, seed={call_info['seed']}): "
+                    f"{status} check_id={cid} failing_sentence={sent!r}"
+                )
+            print(json.dumps(recheck_res, indent=2, sort_keys=True))
+            return 0
+
+        if args.verify_written is not None:
+            verify_res = verify_written_dataset(args.verify_written)
+            for console_line in format_verify_written_console_refusals(args.verify_written):
+                print(console_line)
+            passed = bool(verify_res["passed"])
+            print(json.dumps(verify_res, indent=2, sort_keys=True))
+            return 0 if passed else 1
+
+        if args.probe_only is not None:
+            result = run_probe_only(args.probe_only)
+            probe_passed = bool(result["probe_report"]["passed"])  # type: ignore[index]
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if probe_passed else 1
+
+        resolved_private_seed = args.private_seed or os.environ.get("UDLAB_PRIVATE_SEED") or None
+        summary = build_and_probe_dataset(
+            count=args.count,
+            base_seed=args.seed,
+            private_seed_hex=resolved_private_seed,
+            output_dir=args.out_dir,
+            writer_kind=args.writer,
+            vram_halt_mib=args.vram_halt_mib,
+            num_predict=args.num_predict,
+            max_num_ctx=args.max_num_ctx,
+            think=bool(args.think),
+            max_retries=args.max_retries,
+            grant_id=args.grant_id,
+            resume=args.resume,
+        )
+        print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
-
-    if args.verify_written is not None:
-        verify_res = verify_written_dataset(args.verify_written)
-        for console_line in format_verify_written_console_refusals(args.verify_written):
-            print(console_line)
-        passed = bool(verify_res["passed"])
-        print(json.dumps(verify_res, indent=2, sort_keys=True))
-        return 0 if passed else 1
-
-    if args.probe_only is not None:
-        result = run_probe_only(args.probe_only)
-        probe_passed = bool(result["probe_report"]["passed"])  # type: ignore[index]
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0 if probe_passed else 1
-
-    resolved_private_seed = args.private_seed or os.environ.get("UDLAB_PRIVATE_SEED") or None
-    summary = build_and_probe_dataset(
-        count=args.count,
-        base_seed=args.seed,
-        private_seed_hex=resolved_private_seed,
-        output_dir=args.out_dir,
-        writer_kind=args.writer,
-        vram_halt_mib=args.vram_halt_mib,
-        num_predict=args.num_predict,
-        max_num_ctx=args.max_num_ctx,
-        think=bool(args.think),
-        max_retries=args.max_retries,
-        grant_id=args.grant_id,
-        resume=args.resume,
-    )
-    print(json.dumps(summary, indent=2, sort_keys=True))
-    return 0
+    except RenderCheckError as exc:
+        print(
+            format_non_sealed_refusal_reason(
+                check_id=exc.check_id,
+                event_index=exc.event_index,
+                event_kind=exc.event_kind,
+                failing_sentence_sha256=exc.failing_sentence_sha256,
+                failing_sentence_offset=exc.failing_sentence_offset,
+                failing_sentence_length=exc.failing_sentence_length,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    except SealingError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

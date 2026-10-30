@@ -183,13 +183,45 @@ class RenderCheckError(ValueError):
         failing_sentence: str | None = None,
         event_index: int | None = None,
         event_kind: str | None = None,
+        failing_sentence_sha256: str = "",
+        failing_sentence_offset: int | None = None,
+        failing_sentence_length: int | None = None,
     ) -> None:
-        super().__init__(message)
+        if not failing_sentence_sha256 and failing_sentence and failing_sentence != "no candidate sentence":
+            norm_fail = normalize_prose_line_endings(failing_sentence)
+            failing_sentence_sha256 = _sha256_bytes(norm_fail.encode("utf-8"))
         self.check_id = check_id
         self.reason = message
         self.failing_sentence = failing_sentence
         self.event_index = event_index
         self.event_kind = event_kind
+        self.failing_sentence_sha256 = failing_sentence_sha256
+        self.failing_sentence_offset = failing_sentence_offset
+        self.failing_sentence_length = failing_sentence_length
+        sanitized = self._format_safe_str()
+        super().__init__(sanitized)
+
+    def _format_safe_str(self) -> str:
+        base_summary = format_non_sealed_refusal_reason(
+            check_id=self.check_id,
+            event_index=self.event_index,
+            event_kind=self.event_kind,
+            failing_sentence_sha256=self.failing_sentence_sha256,
+            failing_sentence_offset=self.failing_sentence_offset,
+            failing_sentence_length=self.failing_sentence_length,
+        )
+        detail = self.reason
+        if self.failing_sentence and self.failing_sentence != "no candidate sentence":
+            for s_variant in (self.failing_sentence, normalize_prose_line_endings(self.failing_sentence)):
+                if s_variant:
+                    detail = detail.replace(repr(s_variant), "<sealed_sentence>")
+                    detail = detail.replace(s_variant, "<sealed_sentence>")
+        if not detail or detail == base_summary or detail.startswith(f"{self.check_id}:"):
+            return base_summary
+        return f"{base_summary} ({detail})"
+
+    def __str__(self) -> str:
+        return self._format_safe_str()
 
 
 class ForbiddenModelCallError(RuntimeError):
@@ -2153,7 +2185,7 @@ def check_prose_render_fidelity(
         cand_sent = unmatched[0]
         _raise_prose_check_error(
             "c_fidelity_unlogged_event",
-            f"Render check (c) failed: prose asserts {len(unmatched)} unlogged event sentence(s) not in world.events: {unmatched[:2]} (candidate sentence: {cand_sent!r}).",
+            f"Render check (c) failed: prose asserts {len(unmatched)} unlogged event sentence(s) not in world.events (candidate sentence: {cand_sent!r}).",
             failing_sentence=cand_sent,
         )
 
@@ -2398,19 +2430,26 @@ class MockWriter:
                 check_rendered_prose(prose_text, world, focal_agent=focal_ag)
                 rendered_texts.append(prose_text)
             except RenderCheckError as exc:
+                fail_sha, fail_off, fail_len = locate_failing_sentence_in_response(
+                    prose_text, exc.failing_sentence
+                )
+                sanitized_exc = sanitize_render_check_error_for_stderr(exc, prose_text)
                 self._refusals.append(
                     ProseRefusalRecord(
                         scenario_id=world.scenario_id,
                         rendering_index=r_idx,
                         focal_agent=focal_ag,
                         check_id=exc.check_id,
-                        reason=str(exc),
+                        reason=str(sanitized_exc),
                         failing_sentence=exc.failing_sentence,
                         event_index=exc.event_index,
                         event_kind=exc.event_kind,
+                        failing_sentence_sha256=fail_sha,
+                        failing_sentence_offset=fail_off,
+                        failing_sentence_length=fail_len,
                     )
                 )
-                raise
+                raise sanitized_exc from None
 
         prose_0, prose_1 = rendered_texts[0], rendered_texts[1]
 
@@ -2955,20 +2994,15 @@ def sanitize_render_check_error_for_stderr(
     fail_sha, fail_off, fail_len = locate_failing_sentence_in_response(
         prose, exc.failing_sentence
     )
-    sanitized_msg = format_non_sealed_refusal_reason(
+    return RenderCheckError(
+        exc.reason,
         check_id=exc.check_id,
+        failing_sentence=exc.failing_sentence,
         event_index=exc.event_index,
         event_kind=exc.event_kind,
         failing_sentence_sha256=fail_sha,
         failing_sentence_offset=fail_off,
         failing_sentence_length=fail_len,
-    )
-    return RenderCheckError(
-        sanitized_msg,
-        check_id=exc.check_id,
-        failing_sentence=None,
-        event_index=exc.event_index,
-        event_kind=exc.event_kind,
     )
 
 
@@ -4349,7 +4383,7 @@ class OllamaWriter:
                     failing_sentence_offset=fail_off,
                     failing_sentence_length=fail_len,
                 )
-                full_sealed_reason = f"{exc.check_id}: {exc}"
+                full_sealed_reason = f"{exc.check_id}: {exc.reason}"
                 rec = GenerationCallRecord(
                     call_id=call_id,
                     call_index=call_index,

@@ -31,6 +31,7 @@ from udlab_generator.render import (
     RenderCheckError,
     RenderedScenario,
     check_rendered_prose,
+    format_non_sealed_refusal_reason,
     sanitize_render_check_error_for_stderr,
 )
 from udlab_generator.world import (
@@ -1087,13 +1088,21 @@ def verify_written_dataset_recounts_and_prose(
             check_rendered_prose(prose, w_obj, focal_agent=focal_ag)
         except RenderCheckError as exc:
             sanitized_exc = sanitize_render_check_error_for_stderr(exc, prose)
+            sanitized_summary = format_non_sealed_refusal_reason(
+                check_id=sanitized_exc.check_id,
+                event_index=sanitized_exc.event_index,
+                event_kind=sanitized_exc.event_kind,
+                failing_sentence_sha256=sanitized_exc.failing_sentence_sha256,
+                failing_sentence_offset=sanitized_exc.failing_sentence_offset,
+                failing_sentence_length=sanitized_exc.failing_sentence_length,
+            )
             raise SealingError(
-                f"Prose check failed in {scen_id} (focal={focal_ag}): {sanitized_exc}"
+                f"Prose check failed in {scen_id} (focal={focal_ag}): {sanitized_summary}"
             ) from None
         except Exception as exc:
             raise SealingError(
-                f"Prose check failed in {scen_id} (focal={focal_ag}): {exc}"
-            ) from exc
+                f"Prose check failed in {scen_id} (focal={focal_ag}): {type(exc).__name__}"
+            ) from None
         prose_checked += 1
 
         recounted = recounts_by_sid[scen_id]
