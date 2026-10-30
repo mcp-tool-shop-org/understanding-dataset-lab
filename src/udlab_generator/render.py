@@ -192,108 +192,156 @@ class ProseRequirementSpec:
     rule_text: str
 
 
+HARD_CONSTRAINTS_PLACEHOLDER: str = "{hard_constraints_block}"
+
+_ACTION_VERBS_BY_KIND: dict[str, tuple[str, ...]] = {
+    "enter": ("walked", "entered", "stepped", "came", "arrived", "went", "moved", "returned", "proceeded", "crossed"),
+    "leave": ("exited", "left", "departed", "walked", "headed", "went", "stepped", "proceeded", "crossed"),
+    "move": (
+        "moved",
+        "stepped",
+        "placed",
+        "put",
+        "shifted",
+        "transferred",
+        "adjusted",
+        "turned",
+        "pulled",
+        "set",
+        "relocated",
+        "carried",
+        "took",
+    ),
+    "see": (
+        "observed",
+        "looked",
+        "saw",
+        "spotted",
+        "noticed",
+        "inspected",
+        "checked",
+        "viewed",
+        "watched",
+        "glanced",
+        "examined",
+    ),
+    "say": ("said", "stated", "spoke", "announced", "uttered", "claimed", "reported", "told"),
+    "message": ("sent", "messaged", "texted", "transmitted", "notified", "wrote"),
+}
+
+
+def format_action_verbs_by_kind_summary() -> str:
+    """Format `_ACTION_VERBS_BY_KIND` into a deterministic prompt string listing allowed verbs per event `kind`."""
+    return "; ".join(f"{kind}: {', '.join(verbs)}" for kind, verbs in _ACTION_VERBS_BY_KIND.items())
+
+
 WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ProseRequirementSpec(
         "c_fidelity_paragraph_split",
-        r'Output two paragraphs separated by a blank line ("\n\n"): Paragraph 1 is the setup paragraph; Paragraph 2 is the event paragraph.',
+        r'Output two paragraphs separated by "\n\n": Paragraph 1 is setup; Paragraph 2 is events.',
     ),
     ProseRequirementSpec(
         "c_fidelity_focal_agent",
-        "Name the designated focal_agent in the setup paragraph, framing transitions relative to focal_agent without omitting any event.",
+        "Name focal_agent in setup, framing transitions around focal_agent without omitting any event.",
     ),
     ProseRequirementSpec(
         "c_fidelity_room_setup",
-        "Name every room from rooms in the setup paragraph.",
+        "Name every room from rooms in setup.",
     ),
     ProseRequirementSpec(
         "c_fidelity_containers",
-        "Name both containers of every room from containers_by_room in the setup paragraph.",
+        "Name both containers of every room from containers_by_room in setup.",
     ),
     ProseRequirementSpec(
         "c_fidelity_occluder",
-        "Name each room's occluder from occluders_by_room in the setup paragraph, stating it stands between 'far-side alcove' and 'container bay' and blocks sight from 'far-side alcove' while 'container bay' sees containers in open view.",
+        "Name each room's occluder from occluders_by_room in setup, between 'far-side alcove' and 'container bay' blocking sight from 'far-side alcove' while 'container bay' sees containers in open view.",
     ),
     ProseRequirementSpec(
         "c_fidelity_stations",
-        "Name both room stations ('container bay' and 'far-side alcove') in the setup paragraph.",
+        "Name both stations ('container bay' and 'far-side alcove') in setup.",
     ),
     ProseRequirementSpec(
         "c_fidelity_doorways",
-        "For each doorway edge [room_a, room_b] in doorways, name both rooms in the same setup sentence (natural phrasing, never an exact phrase).",
+        "For each doorway [room_a, room_b], name both rooms in one setup sentence (natural phrasing, never an exact phrase).",
     ),
     ProseRequirementSpec(
         "c_fidelity_initial_room",
-        "For each agent in agents, name the agent and starting room (initial_agent_rooms[agent]) in the same setup sentence (grouped agents pass).",
+        "For each agent in agents, name the agent and starting room (initial_agent_rooms[agent]) in one setup sentence (grouped agents pass).",
     ),
     ProseRequirementSpec(
         "c_fidelity_goal",
-        "Copy each agent's goal_text (goals[agent].goal_text) verbatim into the setup paragraph.",
+        "Copy each agent's goal_text (goals[agent].goal_text) verbatim into setup.",
     ),
     ProseRequirementSpec(
         "c_fidelity_absent_party",
-        "Name every absent party from absent_parties in the setup paragraph.",
+        "Name every absent party from absent_parties in setup.",
     ),
     ProseRequirementSpec(
         "c_fidelity_stake_edge",
-        "Copy each stake description (stake_edges[].description) verbatim into the setup paragraph.",
+        "Copy each stake description (stake_edges[].description) verbatim into setup.",
     ),
     ProseRequirementSpec(
         "d_rule_sentence",
-        f'Include the belief-persistence rule sentence byte-identically once in the setup paragraph: "{BELIEF_PERSISTENCE_RULE}"',
+        f'Include the belief-persistence rule byte-identically once in setup: "{BELIEF_PERSISTENCE_RULE}"',
     ),
     ProseRequirementSpec(
         "d_hearing_threshold",
-        "State the doorway hearing threshold in dB and 'doorway' in the setup paragraph (say >= threshold dB carries one doorway; quieter stays in room).",
+        "State doorway hearing threshold in dB and 'doorway' in setup (say >= threshold dB carries one doorway; quieter stays in room).",
     ),
     ProseRequirementSpec(
         "c_fidelity_event_order",
-        "In the event paragraph, write one sentence per logged event in exact chronological order: name the actor explicitly (no pronouns) before the action verb with no other party name between actor and verb; name the event room in each sentence ('in/from/inside/at/of [the] <room>' and no other room on intra-room events); state from_location before to_location on enter/leave/move (or 'entered/arrived in <to> ... from <from>' on enter); state 'in open view' (never 'blocked') on unoccluded (occluded=false) object move/see, and name the room occluder plus 'blocked' (and 'far-side alcove' on occluded see) on occluded (occluded=true) move/see; on say, state '<noise_level> dB' and quote utterance verbatim (without narrator endorsement if is_bluff=true); on message, state 'to/for/messaged/texted/notified <recipient>' and quote utterance verbatim; end say/message sentences with the quoted speech.",
+        "Write one sentence per event in order: name actor (no pronouns) before action verb ("
+        f"{format_action_verbs_by_kind_summary()}"
+        ") with no party between actor and verb; name event room ('in/from/inside/at/of [the] <room>', no other room on intra-room events); "
+        "state from_location before to_location on enter/leave/move (or 'entered/arrived in <to> ... from <from>' on enter), where from-locations on enter/move use 'from'/'out of' and to-locations on enter/leave/move use 'to'/'into'/'toward'/'at'/'in'/'onto'; "
+        "on see, name target_object, and when occluded=false and to_location is a container also name to_location ('container bay' is never required as to_location); "
+        "state 'in open view' (never 'blocked') on unoccluded object move/see, and room occluder + 'blocked' (+ 'far-side alcove' on occluded see) when occluded=true; "
+        "on say, state '<noise_level> dB' and quote utterance verbatim; "
+        "on message, state 'to/for/messaged/texted/notified <recipient>' and quote utterance verbatim; end say/message sentences with quoted speech.",
     ),
     ProseRequirementSpec(
         "c_fidelity_missing_event",
-        "Include every logged event in the event paragraph as its own sentence without omitting or merging events.",
+        "Include every logged event as its own sentence without omitting or merging.",
     ),
     ProseRequirementSpec(
         "c_fidelity_unlogged_event",
-        "Include no extra unlogged sentences in the event paragraph beyond one sentence per logged event.",
+        "Include no extra unlogged sentences in the event paragraph.",
     ),
     ProseRequirementSpec(
         "c_fidelity_contradictory_occlusion",
-        "Never state both 'in open view' and 'blocked' in the same event sentence.",
+        "Never state both 'in open view' and 'blocked' in one sentence.",
     ),
     ProseRequirementSpec(
         "c_fidelity_unlogged_party",
-        "Never mention any party name not listed in agents or absent_parties.",
+        "Never mention any party not in agents or absent_parties.",
     ),
     ProseRequirementSpec(
         "c_fidelity_unlogged_entity",
-        "Never mention any room, object, container, occluder, fixture, note item, mechanism, or motive from another domain.",
+        "Never mention any entity or phrase from another domain.",
     ),
     ProseRequirementSpec(
         "c_fidelity_unlogged_motive",
-        "Never assert an unlogged motive when stated_reason is absent from the event log.",
+        "Never assert an unlogged motive when stated_reason is absent.",
     ),
     ProseRequirementSpec(
         "c_fidelity_unlogged_placer",
-        "Never attribute placement or movement of the unsigned note item to any party when no move event for that note is logged.",
+        "Never attribute placement/movement of the unsigned note when no move event is logged.",
     ),
     ProseRequirementSpec(
         "a_no_markers_bracket",
-        "Do not emit any square-bracket markers ('[...]') in the prose.",
+        "Do not emit bracket markers ('[...]').",
     ),
     ProseRequirementSpec(
         "a_no_markers_fact_id",
-        "Do not emit internal fact identifiers (letter F followed by a digit) in the prose.",
+        "Do not emit fact IDs (F0-F9).",
     ),
     ProseRequirementSpec(
         "a_no_markers_step_number",
-        "Do not emit explicit step numbers in 'step N' form in the prose.",
+        "Do not emit step numbers ('step N').",
     ),
     ProseRequirementSpec(
         "b_banned_adverbs",
-        "Never use any banned mental, emotional, or epistemic adverb: "
-        + ", ".join(BANNED_ADVERBS)
-        + ".",
+        "Never use banned adverbs: " + ", ".join(BANNED_ADVERBS) + ".",
     ),
 )
 
@@ -304,15 +352,27 @@ WRITER_PROSE_REQUIREMENTS_BY_ID: dict[str, ProseRequirementSpec] = {
 _PROMPT_REQ_LINE_RE = re.compile(r"^-\s+\(([a-z0-9_]+)\)\s+(.+)$")
 
 
+def render_writer_prompt_constraints(
+    requirements: Sequence[ProseRequirementSpec] = WRITER_PROSE_REQUIREMENTS,
+) -> str:
+    """Render the `HARD CONSTRAINTS (MANDATORY):` bullet lines from `WRITER_PROSE_REQUIREMENTS`."""
+    return "\n".join(f"- ({req.check_id}) {req.rule_text}" for req in requirements)
+
+
 def parse_writer_prompt_requirements(prompt_text: str) -> tuple[ProseRequirementSpec, ...]:
-    """Parse the mandatory requirement list from `prompt_text` and reject any untracked requirement lines."""
+    """Parse the mandatory requirement list from `prompt_text` (expanding `{hard_constraints_block}` if unformatted) and reject any untracked requirement lines."""
+    expanded_text = (
+        prompt_text.replace(HARD_CONSTRAINTS_PLACEHOLDER, render_writer_prompt_constraints())
+        if HARD_CONSTRAINTS_PLACEHOLDER in prompt_text
+        else prompt_text
+    )
     start_marker = "HARD CONSTRAINTS (MANDATORY):"
     end_marker = "INPUT SPECIFICATION:"
-    start_idx = prompt_text.find(start_marker)
-    end_idx = prompt_text.find(end_marker)
+    start_idx = expanded_text.find(start_marker)
+    end_idx = expanded_text.find(end_marker)
     if start_idx < 0 or end_idx < 0 or end_idx <= start_idx:
         raise ValueError("Writer prompt is missing HARD CONSTRAINTS (MANDATORY) or INPUT SPECIFICATION section.")
-    section = prompt_text[start_idx + len(start_marker) : end_idx]
+    section = expanded_text[start_idx + len(start_marker) : end_idx]
     parsed: list[ProseRequirementSpec] = []
     for raw_line in section.splitlines():
         line = raw_line.strip()
@@ -366,11 +426,24 @@ def verify_prompt_and_checker_requirements_aligned(
     prompt_text: str | None = None,
 ) -> tuple[ProseRequirementSpec, ...]:
     """Verify that the writer prompt's parsed requirements, `WRITER_PROSE_REQUIREMENTS`, and the checker's enforced `check_id`s are identical."""
-    raw_text = (
-        prompt_text
-        if prompt_text is not None
-        else WRITER_PROMPT_PATH.read_text(encoding="utf-8")
-    )
+    if prompt_text is None:
+        disk_raw = WRITER_PROMPT_PATH.read_text(encoding="utf-8")
+        if HARD_CONSTRAINTS_PLACEHOLDER not in disk_raw:
+            raise ValueError(
+                f"On-disk writer prompt '{WRITER_PROMPT_PATH}' must contain {HARD_CONSTRAINTS_PLACEHOLDER!r} placeholder."
+            )
+        for line in disk_raw.splitlines():
+            if _PROMPT_REQ_LINE_RE.match(line.strip()):
+                raise ValueError(
+                    f"On-disk writer prompt '{WRITER_PROMPT_PATH}' must not contain hand-copied requirement lines: {line!r}"
+                )
+        raw_text = disk_raw.replace(HARD_CONSTRAINTS_PLACEHOLDER, render_writer_prompt_constraints())
+    else:
+        raw_text = (
+            prompt_text.replace(HARD_CONSTRAINTS_PLACEHOLDER, render_writer_prompt_constraints())
+            if HARD_CONSTRAINTS_PLACEHOLDER in prompt_text
+            else prompt_text
+        )
     parsed_prompt_reqs = parse_writer_prompt_requirements(raw_text)
     if parsed_prompt_reqs != WRITER_PROSE_REQUIREMENTS:
         prompt_ids = [r.check_id for r in parsed_prompt_reqs]
@@ -395,9 +468,24 @@ def _raise_prose_check_error(check_id: str, message: str) -> NoReturn:
 
 
 def load_writer_prompt_template(path: Path | None = None) -> str:
-    """Load the `qwen3.6:35b` writer prompt text file and verify banned-adverb, belief-rule, and requirement alignment."""
+    """Load the `qwen3.6:35b` writer prompt text file, expand `{hard_constraints_block}` from `WRITER_PROSE_REQUIREMENTS`, and verify alignment."""
     target = path or WRITER_PROMPT_PATH
-    text = target.read_text(encoding="utf-8")
+    raw_disk_text = target.read_text(encoding="utf-8")
+    if target == WRITER_PROMPT_PATH:
+        if HARD_CONSTRAINTS_PLACEHOLDER not in raw_disk_text:
+            raise ValueError(
+                f"Writer prompt template '{target}' must keep only non-constraint text plus {HARD_CONSTRAINTS_PLACEHOLDER!r}."
+            )
+        for line in raw_disk_text.splitlines():
+            if _PROMPT_REQ_LINE_RE.match(line.strip()):
+                raise ValueError(
+                    f"Writer prompt template '{target}' must not contain hand-maintained requirement lines: {line!r}"
+                )
+    text = (
+        raw_disk_text.replace(HARD_CONSTRAINTS_PLACEHOLDER, render_writer_prompt_constraints())
+        if HARD_CONSTRAINTS_PLACEHOLDER in raw_disk_text
+        else raw_disk_text
+    )
     missing = [w for w in BANNED_ADVERBS if w not in text.lower()]
     if missing:
         raise ValueError(f"Writer prompt template is missing banned adverbs: {missing}")
@@ -471,8 +559,13 @@ def format_writer_prompt(world: World, focal_agent: str, template: str | None = 
             ev_entry["stated_reason"] = ev.stated_reason
         event_log.append(ev_entry)
 
+    expanded_template = (
+        raw_template.replace(HARD_CONSTRAINTS_PLACEHOLDER, render_writer_prompt_constraints())
+        if HARD_CONSTRAINTS_PLACEHOLDER in raw_template
+        else raw_template
+    )
     formatted = (
-        raw_template.replace("{focal_agent}", focal_agent)
+        expanded_template.replace("{focal_agent}", focal_agent)
         .replace("{noise_threshold}", str(world.noise_threshold))
         .replace("{world_setup_json}", json.dumps(world_setup, separators=(",", ":"), sort_keys=True))
         .replace("{event_log_json}", json.dumps(event_log, separators=(",", ":"), sort_keys=True))
@@ -525,15 +618,6 @@ def indefinite_article(phrase: str) -> str:
         return "an"
     return "a"
 
-
-_ACTION_VERBS_BY_KIND: dict[str, tuple[str, ...]] = {
-    "enter": ("walked", "entered", "stepped", "came", "arrived", "went", "moved", "returned"),
-    "leave": ("exited", "left", "departed", "walked", "headed", "went", "stepped"),
-    "move": ("moved", "stepped", "placed", "put", "shifted", "transferred", "adjusted", "turned", "pulled", "set"),
-    "see": ("observed", "looked", "saw", "spotted", "noticed", "inspected", "checked", "viewed", "watched", "glanced"),
-    "say": ("said", "stated", "spoke", "announced", "uttered", "claimed", "reported", "told"),
-    "message": ("sent", "messaged", "texted", "transmitted", "notified", "wrote"),
-}
 
 _SPEECH_AND_MESSAGE_VERBS_RE = re.compile(
     r"\b(?:"
@@ -836,8 +920,14 @@ def _sentence_matches_event(
             )
         if "in open view" not in s_low or "blocked" in s_low:
             return False
-        if ev.to_location and ev.to_location.lower() not in s_low:
-            return False
+        all_containers = (
+            {c.lower() for pair in world.containers_by_room.values() for c in pair}
+            if world is not None
+            else {c.lower() for dom in DOMAINS for pair in dom.containers for c in pair}
+        )
+        if ev.to_location and ev.to_location.lower() in all_containers:
+            if ev.to_location.lower() not in s_low:
+                return False
         return True
 
     if ev.kind == "say":
@@ -979,14 +1069,11 @@ def check_prose_render_fidelity(
             )
 
     # Verify initial agent rooms (agent name and starting room in the same setup sentence), absent parties, goals, and stakes
-    candidate_init_sents = [
-        s for s in setup_sents_low if CONTAINER_BAY_STATION.lower() not in s
-    ] or setup_sents_low
     for ag in world.agents:
         init_r = world.initial_agent_rooms[ag]
         if not any(
             re.search(rf"\b{re.escape(ag.lower())}\b", s_low) and init_r.lower() in s_low
-            for s_low in candidate_init_sents
+            for s_low in setup_sents_low
         ):
             _raise_prose_check_error(
                 "c_fidelity_initial_room",

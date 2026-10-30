@@ -2809,43 +2809,74 @@ def test_38_phrasing_4_period_in_quoted_speech_with_post_quote_attribution_passe
 
 
 def test_39_prompt_and_checker_requirements_list_aligned() -> None:
-    """Test 39 (Decision 1): Parse the writer prompt and the checker's requirement list and fail if they diverge."""
+    """Test 39 (Decision 1): The on-disk prompt file keeps only non-constraint text plus a placeholder;
+    format_writer_prompt generates HARD CONSTRAINTS from WRITER_PROSE_REQUIREMENTS (interpolating
+    _ACTION_VERBS_BY_KIND, BANNED_ADVERBS, and BELIEF_PERSISTENCE_RULE); and every check_id the checker
+    can raise (derived from the AST code path) maps to a rule rendered in the prompt and the reverse.
+    """
     import udlab_generator.render as ug_render
+    from udlab_generator.world import BELIEF_PERSISTENCE_RULE
 
     parse_fn = getattr(ug_render, "parse_writer_prompt_requirements", None)
     enforced_fn = getattr(ug_render, "get_checker_enforced_check_ids", None)
     verify_fn = getattr(ug_render, "verify_prompt_and_checker_requirements_aligned", None)
+    render_constraints_fn = getattr(ug_render, "render_writer_prompt_constraints", None)
+    placeholder = getattr(ug_render, "HARD_CONSTRAINTS_PLACEHOLDER", None)
     shared_reqs = getattr(ug_render, "WRITER_PROSE_REQUIREMENTS", None)
-    assert callable(parse_fn) and callable(enforced_fn) and callable(verify_fn)
+    action_verbs_by_kind = getattr(ug_render, "_ACTION_VERBS_BY_KIND", None)
+    assert callable(parse_fn) and callable(enforced_fn) and callable(verify_fn) and callable(render_constraints_fn)
+    assert isinstance(placeholder, str) and placeholder == "{hard_constraints_block}"
     assert isinstance(shared_reqs, tuple) and len(shared_reqs) >= 25
+    assert isinstance(action_verbs_by_kind, dict)
 
-    raw_prompt = ug_render.WRITER_PROMPT_PATH.read_text(encoding="utf-8")
-    parsed_reqs = parse_fn(raw_prompt)
-    assert parsed_reqs == shared_reqs
+    # 1. On-disk prompt file keeps only the non-constraint text plus the placeholder (no hand-copied `- (<check_id>)` lines)
+    raw_disk_prompt = ug_render.WRITER_PROMPT_PATH.read_text(encoding="utf-8")
+    assert placeholder in raw_disk_prompt
+    for line in raw_disk_prompt.splitlines():
+        assert not line.strip().startswith("- ("), (
+            f"On-disk prompt must not keep hand-copied constraint lines; found: {line!r}"
+        )
 
-    enforced_ids = enforced_fn()
-    assert set(enforced_ids) == {r.check_id for r in shared_reqs}
-    assert verify_fn(raw_prompt) == shared_reqs
+    # 2. Verify verify_prompt_and_checker_requirements_aligned() succeeds on the on-disk placeholder file
+    assert verify_fn() == shared_reqs
 
-    # Also verify formatted prompt parses identically
+    # 3. Format writer prompt and verify HARD CONSTRAINTS are generated from WRITER_PROSE_REQUIREMENTS
+    #    interpolating _ACTION_VERBS_BY_KIND, BANNED_ADVERBS, and BELIEF_PERSISTENCE_RULE
     w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
     formatted = format_writer_prompt(w0, w0.agents[0])
-    assert parse_fn(formatted) == shared_reqs
+    assert placeholder not in formatted
+    assert render_constraints_fn() in formatted
+    assert BELIEF_PERSISTENCE_RULE in formatted
+    for adv in BANNED_ADVERBS:
+        assert adv in formatted
+    for kind, verbs in action_verbs_by_kind.items():
+        assert f"{kind}: {', '.join(verbs)}" in formatted
 
-    # Diverging prompt (removing a requirement, altering rule text, or adding an untracked requirement) must fail
+    # 4. Every check_id the checker can raise (derived from AST code path) maps to a rule rendered in the prompt, and the reverse
+    parsed_reqs = parse_fn(formatted)
+    assert parsed_reqs == shared_reqs
+    parsed_by_id = {r.check_id: r.rule_text for r in parsed_reqs}
+    enforced_ids = enforced_fn()
+    assert len(enforced_ids) == len(set(enforced_ids)) == len(shared_reqs)
+    for cid in enforced_ids:
+        assert cid in parsed_by_id and parsed_by_id[cid], f"Checker check_id {cid!r} missing from rendered prompt."
+    for cid in parsed_by_id:
+        assert cid in enforced_ids, f"Prompt rule {cid!r} not enforced by checker code path."
+
+    # 5. Diverging prompt (removing a requirement, altering rule text, or adding an untracked requirement) must fail
     dropped_one = "\n".join(
-        line for line in raw_prompt.splitlines() if "(c_fidelity_doorways)" not in line
+        line for line in formatted.splitlines() if "(c_fidelity_doorways)" not in line
     )
     with pytest.raises(ValueError, match="diverge"):
         verify_fn(dropped_one)
 
-    altered_text = raw_prompt.replace(
+    altered_text = formatted.replace(
         "Copy each agent's goal_text", "Paraphrase each agent's goal_text"
     )
     with pytest.raises(ValueError, match="diverge"):
         verify_fn(altered_text)
 
-    extra_untracked = raw_prompt.replace(
+    extra_untracked = formatted.replace(
         "HARD CONSTRAINTS (MANDATORY):\n",
         "HARD CONSTRAINTS (MANDATORY):\n- (untracked_extra_rule) Use exact template phrasing.\n",
     )
@@ -2894,6 +2925,298 @@ def test_40_verify_written_checks_every_generations_record(tmp_path: Path) -> No
     assert rep_2["generations_valid"] is False
     assert any("Line 1" in err and "done_reason='length'" in err for err in rep_2["generations_errors"])
     assert cli_main(["--verify-written", str(out_dir)]) == 1
+
+
+def _build_sj_writer_in_the_loop_scen_0000() -> tuple[str, list[str]]:
+    """Return `(sj_setup, sj_event_sentences)` for `scen_0000` starting with sj §2's exact setup paragraph
+    and first five event sentences, extended to all 30 events in the same style (including the four sj traps:
+    unoccluded see of a container without 'container bay', broadened verbs like 'examined'/'relocated'/'carried'/
+    'took'/'proceeded'/'crossed', prepositions from/out of and to/into/toward/at/in/onto).
+    """
+    sj_setup = (
+        "Following Eva through the archival registry, the workspace spans four rooms: the vault room, "
+        "the reading room, the bindery room, and the sorting room. In the vault room, the oak drawer and "
+        "the steel cabinet sit at the container bay, while a frosted partition stands between the far-side "
+        "alcove and the container bay. In the reading room, the slate tray and the cedar shelf occupy the "
+        "container bay, with a tall bookstack standing between the far-side alcove and the container bay. "
+        "In the bindery room, the linen bin and the copper rack are located at the container bay, where a "
+        "canvas screen stands between the far-side alcove and the container bay. In the sorting room, the "
+        "maple cubby and the iron safe rest at the container bay, and a rolling pillar stands between the "
+        "far-side alcove and the container bay; in each room, the occluder blocks sight from the far-side "
+        "alcove while the container bay sees the containers in open view. Doorways connect the vault room "
+        "with the reading room, link the reading room to the bindery room, and join the bindery room to the "
+        "sorting room, with a doorway hearing threshold of 50 dB so speech at or above 50 dB carries through "
+        "one doorway while quieter speech stays in the room. Eva, Dan, and Cara all start in the bindery room, "
+        "whereas Gia is absent off-site. Eva plans to complete the quarterly audit packet; Dan plans to verify "
+        "the municipal deed transfer; Cara plans to catalog the incoming charter folio. Gia is off-site and "
+        "depends on the location of the brass ledger for tomorrow's courier handoff. Each agent assumes an "
+        "object remains where that agent last saw it in open view or heard a witness state it was placed, and "
+        "assumes another agent looks where they last saw or communicated that agent perceiving it."
+    )
+
+    sj_event_sentences = [
+        # Events 1..5 verbatim from sj §2:
+        "In the bindery room, Eva observed the index reel in the linen bin in open view.",
+        "Dan left the bindery room and headed toward the sorting room.",
+        "Dan entered the sorting room from the bindery room.",
+        "Cara departed from the bindery room for the sorting room.",
+        "Cara walked from the bindery room into the sorting room.",
+        # Events 6..30 extended in the same natural style (exercising sj traps (a)-(c)):
+        "In the sorting room, Cara saw the maple cubby in open view.",
+        "In the sorting room, Cara relocated the brass ledger from the intake bench into the iron safe in open view.",
+        "Eva exited the bindery room and proceeded toward the sorting room.",
+        "Eva crossed from the bindery room into the sorting room.",
+        "In the sorting room, Cara carried the brass ledger out of the iron safe to the maple cubby in open view.",
+        "In the sorting room, Eva examined the ventilation grille in open view.",
+        "Cara left the sorting room and proceeded to the bindery room.",
+        "Cara entered the bindery room from the sorting room.",
+        "Cara departed the bindery room toward the reading room.",
+        "Cara walked from the bindery room into the reading room.",
+        "In the sorting room, Dan stepped from the container bay behind the rolling pillar into the far-side alcove.",
+        "In the sorting room, from the far-side alcove, Dan looked toward the iron safe, but the rolling pillar blocked the view.",
+        "In the sorting room, from the far-side alcove, Dan glanced at the maple cubby, yet the rolling pillar blocked his sightline.",
+        "In the reading room, Cara examined the index reel in the slate tray in open view.",
+        "Eva exited the sorting room and headed toward the bindery room.",
+        "Eva arrived in the bindery room from the sorting room.",
+        "In the reading room, Cara took the seal stamp from the slate tray onto the cedar shelf in open view.",
+        'In the reading room, Cara announced at 60 dB: "The seal stamp is stored in the cedar shelf."',
+        "In the bindery room, Eva spotted the humidity dial in open view.",
+        'In the reading room, Cara texted to Gia: "Update for Gia: the brass ledger is stored at the maple cubby."',
+        "In the bindery room, Eva noticed the unsigned transfer slip on the countertop in the bindery room in open view.",
+        "In the sorting room, Dan adjusted the overhead louver from latch position A to latch position B in open view.",
+        'In the sorting room, Dan stated at 20 dB: "I adjusted the overhead louver to clear binding dust from the bench."',
+        "In the sorting room, from the far-side alcove, Dan watched the iron safe, though the rolling pillar blocked the sightline.",
+        'In the sorting room, Dan claimed at 20 dB: "I am certain the brass ledger was moved into the copper rack."',
+    ]
+    return sj_setup, sj_event_sentences
+
+
+def test_41_four_traps_fixed_per_sj() -> None:
+    """Test 41 (Decision 2): Verify all four traps from sj §1/§2/§4 are fixed:
+    (a) Unoccluded 'see' requires target_object and to_location when to_location is a container, but never requires
+        station names ('container bay'/'far-side alcove'), so 'In the sorting room, Cara saw the maple cubby in open view.' passes,
+        while omitting a container to_location ('linen bin' on event #1) is refused.
+    (b) Broadened _ACTION_VERBS_BY_KIND includes 'examined', 'relocated', 'carried', 'took', 'proceeded', 'crossed'
+        and renders them into the prompt.
+    (c) Prepositions on from-locations (from/out of) and to-locations (to/into/toward/at/in/onto) are stated in the prompt
+        and enforced by the checker.
+    (d) Starting-room sentences in setup that also mention 'container bay' pass without being filtered out.
+    """
+    from udlab_generator.render import _sentence_matches_event
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+
+    # (a) Unoccluded see: station name ('container bay' on event #6, 'far-side alcove' on event #11) not required
+    assert w.events[5].kind == "see" and w.events[5].to_location == "container bay"
+    assert _sentence_matches_event("In the sorting room, Cara saw the maple cubby in open view.", w.events[5], w.noise_threshold, world=w)
+    # Whereas container to_location ('linen bin' on event #1) IS required on unoccluded see
+    assert w.events[0].kind == "see" and w.events[0].to_location == "linen bin"
+    assert _sentence_matches_event(
+        "In the bindery room, Eva examined the index reel in the linen bin in open view.",
+        w.events[0],
+        w.noise_threshold,
+        world=w,
+    )
+    assert not _sentence_matches_event(
+        "In the bindery room, Eva examined the index reel in open view.",
+        w.events[0],
+        w.noise_threshold,
+        world=w,
+    )
+
+    # (b) Broadened verbs ('examined', 'relocated', 'carried', 'took', 'proceeded', 'crossed') pass
+    assert _sentence_matches_event(
+        "In the sorting room, Cara relocated the brass ledger from the intake bench into the iron safe in open view.",
+        w.events[6],
+        w.noise_threshold,
+        world=w,
+    )
+    assert _sentence_matches_event(
+        "In the sorting room, Cara carried the brass ledger out of the iron safe to the maple cubby in open view.",
+        w.events[9],
+        w.noise_threshold,
+        world=w,
+    )
+    assert _sentence_matches_event(
+        "In the reading room, Cara took the seal stamp from the slate tray onto the cedar shelf in open view.",
+        w.events[21],
+        w.noise_threshold,
+        world=w,
+    )
+    assert _sentence_matches_event(
+        "Eva proceeded from the bindery room to the sorting room.",
+        w.events[7],
+        w.noise_threshold,
+        world=w,
+    )
+    assert _sentence_matches_event(
+        "Eva crossed from the bindery room into the sorting room.",
+        w.events[8],
+        w.noise_threshold,
+        world=w,
+    )
+
+    # (c) Prepositions: stated in the prompt and enforced on enter/move
+    prompt_str = format_writer_prompt(w, fa)
+    assert "from-locations on enter/move use 'from'/'out of'" in prompt_str
+    assert "to-locations on enter/leave/move use 'to'/'into'/'toward'/'at'/'in'/'onto'" in prompt_str
+    assert not _sentence_matches_event(
+        "In the sorting room, Cara relocated the brass ledger the intake bench the iron safe in open view.",
+        w.events[6],
+        w.noise_threshold,
+        world=w,
+    )
+
+    # (d) Starting rooms: setup sentence mentioning 'container bay' alongside starting room passes
+    setup_with_bay_in_start = sj_setup.replace(
+        "Eva, Dan, and Cara all start in the bindery room, whereas Gia is absent off-site.",
+        "Eva, Dan, and Cara all start at the container bay in the bindery room, whereas Gia is absent off-site.",
+    )
+    assert "start at the container bay in the bindery room" in setup_with_bay_in_start
+    assert check_rendered_prose(f"{setup_with_bay_in_start}\n\n{' '.join(sj_sents)}", w, focal_agent=fa) == ()
+
+
+def test_42_writer_in_the_loop_scen_0000_passes_and_fault_per_event_check_id_refused() -> None:
+    """Test 42 (Decision 3): Take sj §2's hand-derived setup paragraph and first five event sentences for scen_0000,
+    extend them to the full 30-event scenario in the same style, and assert that they pass.
+    Then make one fault edit per check_id that applies to event sentences, and assert that each is refused with that id.
+    """
+    import udlab_generator as ug
+    from udlab_generator.world import DOMAINS
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    assert w.scenario_id == "scen_0000"
+    fa = w.agents[0]  # Eva
+
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    assert len(sj_sents) == len(w.events) == 30
+    full_prose = f"{sj_setup}\n\n{' '.join(sj_sents)}"
+
+    # Assert the full extended sj §2 prose passes all prose checks (a)-(d)
+    assert check_rendered_prose(full_prose, w, focal_agent=fa) == ()
+
+    # Now make one fault edit per check_id that applies to event sentences (12 event-applicable check_ids)
+    # and assert that each is refused with that exact check_id:
+    current_domain = next(d for d in DOMAINS if d.name == w.domain_name)
+    foreign_domain = next(d for d in DOMAINS if d.name != w.domain_name)
+    unlogged_motive = next(
+        r for r in current_domain.side_reasons if r not in {e.stated_reason for e in w.events if e.stated_reason}
+    )
+    unlogged_party = next(
+        p for pool in ug.world.AGENT_NAME_POOLS for p in pool if p not in w.agents and p not in w.absent_parties
+    )
+
+    fault_cases: list[tuple[str, list[str]]] = [
+        # 1. c_fidelity_event_order: swap chronological order of events #1 and #6 (two independent intra-room see events)
+        (
+            "c_fidelity_event_order",
+            [sj_sents[5], *sj_sents[1:5], sj_sents[0], *sj_sents[6:]],
+        ),
+        # 2. c_fidelity_missing_event: omit container to_location ('linen bin') on event #1 (unoccluded see in a container)
+        (
+            "c_fidelity_missing_event",
+            [
+                "In the bindery room, Eva observed the index reel in open view.",
+                *sj_sents[1:],
+            ],
+        ),
+        # 3. c_fidelity_unlogged_event: append an extra unlogged 31st event sentence
+        (
+            "c_fidelity_unlogged_event",
+            [
+                *sj_sents,
+                "In the bindery room, Eva observed the index reel in the linen bin in open view.",
+            ],
+        ),
+        # 4. c_fidelity_contradictory_occlusion: state both 'in open view' and 'blocked' in event #1
+        (
+            "c_fidelity_contradictory_occlusion",
+            [
+                "In the bindery room, Eva observed the index reel in the linen bin in open view while blocked.",
+                *sj_sents[1:],
+            ],
+        ),
+        # 5. c_fidelity_unlogged_party: mention a party name not in agents or absent_parties in an event sentence
+        (
+            "c_fidelity_unlogged_party",
+            [
+                f"In the bindery room, near {unlogged_party}, Eva observed the index reel in the linen bin in open view.",
+                *sj_sents[1:],
+            ],
+        ),
+        # 6. c_fidelity_unlogged_entity: mention an entity from another domain in an event sentence
+        (
+            "c_fidelity_unlogged_entity",
+            [
+                f"In the bindery room, near the {foreign_domain.objects[0]}, Eva observed the index reel in the linen bin in open view.",
+                *sj_sents[1:],
+            ],
+        ),
+        # 7. c_fidelity_unlogged_motive: assert an unlogged side_reason motive in an event sentence
+        (
+            "c_fidelity_unlogged_motive",
+            [
+                f"In the bindery room, {unlogged_motive}, Eva observed the index reel in the linen bin in open view.",
+                *sj_sents[1:],
+            ],
+        ),
+        # 8. c_fidelity_unlogged_placer: attribute placement of the unsigned note item when no move event is logged
+        (
+            "c_fidelity_unlogged_placer",
+            [
+                *sj_sents[:25],
+                "In the bindery room, after Eva placed the unsigned transfer slip, Eva noticed the unsigned transfer slip on the countertop in the bindery room in open view.",
+                *sj_sents[26:],
+            ],
+        ),
+        # 9. a_no_markers_bracket: emit a square-bracket marker in an event sentence
+        (
+            "a_no_markers_bracket",
+            [
+                "In the bindery room [logged], Eva observed the index reel in the linen bin in open view.",
+                *sj_sents[1:],
+            ],
+        ),
+        # 10. a_no_markers_fact_id: emit an internal fact ID F1 in an event sentence
+        (
+            "a_no_markers_fact_id",
+            [
+                "In the bindery room, Eva observed the index reel F1 in the linen bin in open view.",
+                *sj_sents[1:],
+            ],
+        ),
+        # 11. a_no_markers_step_number: emit 'step 1' in an event sentence
+        (
+            "a_no_markers_step_number",
+            [
+                "At step 1, in the bindery room, Eva observed the index reel in the linen bin in open view.",
+                *sj_sents[1:],
+            ],
+        ),
+        # 12. b_banned_adverbs: use a banned adverb in an event sentence
+        (
+            "b_banned_adverbs",
+            [
+                "In the bindery room, Eva furtively observed the index reel in the linen bin in open view.",
+                *sj_sents[1:],
+            ],
+        ),
+    ]
+
+    tested_ids: list[str] = []
+    for expected_check_id, faulty_sents in fault_cases:
+        faulty_prose = f"{sj_setup}\n\n{' '.join(faulty_sents)}"
+        with pytest.raises(RenderCheckError) as exc_info:
+            check_rendered_prose(faulty_prose, w, focal_agent=fa)
+        assert exc_info.value.check_id == expected_check_id, (
+            f"Expected fault {expected_check_id!r}, got {exc_info.value.check_id!r}: {exc_info.value}"
+        )
+        tested_ids.append(expected_check_id)
+
+    assert len(tested_ids) == 12 == len(set(tested_ids))
+
 
 
 

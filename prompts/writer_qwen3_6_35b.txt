@@ -4,31 +4,7 @@ You are a precise third-person prose renderer for the udlab benchmark.
 Write a clear, natural, third-person narrative retelling focalized through {focal_agent}, covering the complete event log in exact chronological order ({focal_agent} is introduced first in setup; {focal_agent} framing anchors transitions around {focal_agent} and never omits any event; doorway threshold: {noise_threshold} dB).
 
 HARD CONSTRAINTS (MANDATORY):
-- (c_fidelity_paragraph_split) Output two paragraphs separated by a blank line ("\n\n"): Paragraph 1 is the setup paragraph; Paragraph 2 is the event paragraph.
-- (c_fidelity_focal_agent) Name the designated focal_agent in the setup paragraph, framing transitions relative to focal_agent without omitting any event.
-- (c_fidelity_room_setup) Name every room from rooms in the setup paragraph.
-- (c_fidelity_containers) Name both containers of every room from containers_by_room in the setup paragraph.
-- (c_fidelity_occluder) Name each room's occluder from occluders_by_room in the setup paragraph, stating it stands between 'far-side alcove' and 'container bay' and blocks sight from 'far-side alcove' while 'container bay' sees containers in open view.
-- (c_fidelity_stations) Name both room stations ('container bay' and 'far-side alcove') in the setup paragraph.
-- (c_fidelity_doorways) For each doorway edge [room_a, room_b] in doorways, name both rooms in the same setup sentence (natural phrasing, never an exact phrase).
-- (c_fidelity_initial_room) For each agent in agents, name the agent and starting room (initial_agent_rooms[agent]) in the same setup sentence (grouped agents pass).
-- (c_fidelity_goal) Copy each agent's goal_text (goals[agent].goal_text) verbatim into the setup paragraph.
-- (c_fidelity_absent_party) Name every absent party from absent_parties in the setup paragraph.
-- (c_fidelity_stake_edge) Copy each stake description (stake_edges[].description) verbatim into the setup paragraph.
-- (d_rule_sentence) Include the belief-persistence rule sentence byte-identically once in the setup paragraph: "Each agent assumes an object remains where that agent last saw it in open view or heard a witness state it was placed, and assumes another agent looks where they last saw or communicated that agent perceiving it."
-- (d_hearing_threshold) State the doorway hearing threshold in dB and 'doorway' in the setup paragraph (say >= threshold dB carries one doorway; quieter stays in room).
-- (c_fidelity_event_order) In the event paragraph, write one sentence per logged event in exact chronological order: name the actor explicitly (no pronouns) before the action verb with no other party name between actor and verb; name the event room in each sentence ('in/from/inside/at/of [the] <room>' and no other room on intra-room events); state from_location before to_location on enter/leave/move (or 'entered/arrived in <to> ... from <from>' on enter); state 'in open view' (never 'blocked') on unoccluded (occluded=false) object move/see, and name the room occluder plus 'blocked' (and 'far-side alcove' on occluded see) on occluded (occluded=true) move/see; on say, state '<noise_level> dB' and quote utterance verbatim (without narrator endorsement if is_bluff=true); on message, state 'to/for/messaged/texted/notified <recipient>' and quote utterance verbatim; end say/message sentences with the quoted speech.
-- (c_fidelity_missing_event) Include every logged event in the event paragraph as its own sentence without omitting or merging events.
-- (c_fidelity_unlogged_event) Include no extra unlogged sentences in the event paragraph beyond one sentence per logged event.
-- (c_fidelity_contradictory_occlusion) Never state both 'in open view' and 'blocked' in the same event sentence.
-- (c_fidelity_unlogged_party) Never mention any party name not listed in agents or absent_parties.
-- (c_fidelity_unlogged_entity) Never mention any room, object, container, occluder, fixture, note item, mechanism, or motive from another domain.
-- (c_fidelity_unlogged_motive) Never assert an unlogged motive when stated_reason is absent from the event log.
-- (c_fidelity_unlogged_placer) Never attribute placement or movement of the unsigned note item to any party when no move event for that note is logged.
-- (a_no_markers_bracket) Do not emit any square-bracket markers ('[...]') in the prose.
-- (a_no_markers_fact_id) Do not emit internal fact identifiers (letter F followed by a digit) in the prose.
-- (a_no_markers_step_number) Do not emit explicit step numbers in 'step N' form in the prose.
-- (b_banned_adverbs) Never use any banned mental, emotional, or epistemic adverb: nervously, secretly, suspiciously, anxiously, furtively, stealthily, guiltily, gleefully, angrily, frustratedly, eagerly, reluctantly, hesitantly, deceitfully, slyly, cautiously, fearfully, bitterly, jealously, knowingly, unknowingly, unwittingly, inadvertently, deliberately, intentionally, purposely.
+{hard_constraints_block}
 
 INPUT SPECIFICATION:
 Focal Agent: {focal_agent}
