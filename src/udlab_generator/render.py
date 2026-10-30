@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 import datetime
@@ -244,6 +245,13 @@ NEGATION_PHRASES: tuple[str, ...] = (
     "nobody",
     "nothing",
     "failed to",
+    "refused to",
+    "forgot to",
+    "declined to",
+    "neglected to",
+    "avoided",
+    "omitted to",
+    "refrained from",
     "without",
     "neither",
     "nor",
@@ -265,6 +273,17 @@ _NEGATION_PATTERN = re.compile(
 )
 _ADJACENT_ROOMS_COULD_NOT_HEAR_RE = re.compile(r"\badjacent\s+rooms\s+could\s+not\s+hear\b", re.IGNORECASE)
 _COULD_NOT_SEE_RE = re.compile(r"\bcould\s+not\s+see\b", re.IGNORECASE)
+_FRONTED_TIME_PLACE_NEG_RE = re.compile(
+    r"\b(?:not\s+long\s+(?:after(?:wards?)?|before)|not\s+far\s+(?:from|away|off)(?:\s+[a-z0-9_-]+){0,6}|without\s+(?:delay|pause|waiting|hesitation))\b",
+    re.IGNORECASE,
+)
+_POST_ARG_ADJUNCT_NEG_RE = re.compile(
+    r"(?:\bwithout\s+(?:[a-z]+ing\b[^,;:.]*|delay|pause|waiting|hesitation|incident|difficulty)\b"
+    r"|\bnot\s+(?:far\s+(?:from|away|off)|long\s+(?:after(?:wards?)?|before))\b[^,;:.]*"
+    r"|,\s*(?:which|where|who)\b[^.;:]*)",
+    re.IGNORECASE,
+)
+_ARTICLE_OPT_RE = r"(?:(?:the|a|an)\s+)?"
 
 SETUP_CHECKLIST_ORDER: str = (
     "rooms -> containers per room -> fixtures per room -> occluders -> doorways -> "
@@ -539,6 +558,10 @@ def verify_prompt_and_checker_requirements_aligned(
         raise ValueError(
             f"Checker enforced check_ids diverge from WRITER_PROSE_REQUIREMENTS: only_in_checker={sorted(enforced_ids - shared_id_set)}, only_in_shared={sorted(shared_id_set - enforced_ids)}"
         )
+    if set(_REPAIR_TARGET_BY_CHECK_ID.keys()) != shared_id_set:
+        raise ValueError(
+            f"_REPAIR_TARGET_BY_CHECK_ID keys diverge from WRITER_PROSE_REQUIREMENTS: {sorted(set(_REPAIR_TARGET_BY_CHECK_ID.keys()) ^ shared_id_set)}"
+        )
     return parsed_prompt_reqs
 
 
@@ -563,26 +586,86 @@ def _raise_prose_check_error(
 
 
 _REPAIR_HINT_BY_EVENT_KIND: dict[str, str] = {
-    "enter": "name the room the actor came from and the room entered, with the actor as subject",
-    "leave": "name the room the actor left and the destination room, with the actor as subject",
-    "move": "name the actor as subject, the target object, the source location, the destination location, and the room",
-    "see": "name the actor as subject before a sighting verb, the target object, the room, and any required container or occlusion clause",
-    "say": "name the actor as subject before a speech verb, the noise level in dB, and the verbatim quote",
-    "message": "name the actor as subject before a message verb, the recipient, and the verbatim quote",
+    "enter": "names the room the actor came from and the room entered, with the actor as subject",
+    "leave": "names the room the actor left and the destination room, with the actor as subject",
+    "move": "names the actor as subject, the target object, the source location, the destination location, and the room",
+    "see": "names the actor as subject before a sighting verb, the target object, the room, and any required container or occlusion clause",
+    "say": "names the actor as subject before a speech verb, the noise level in dB, and the verbatim quote",
+    "message": "names the actor as subject before a message verb, the recipient, and the verbatim quote",
+}
+
+_REPAIR_TARGET_BY_CHECK_ID: dict[str, str] = {
+    "c_fidelity_paragraph_split": "the two-paragraph setup and events layout",
+    "c_fidelity_focal_agent": "the setup focal_agent framing",
+    "c_fidelity_room_setup": "the setup room list",
+    "c_fidelity_containers": "the setup containers per room",
+    "c_fidelity_fixtures": "the setup fixtures per room",
+    "c_fidelity_occluder": "the setup occluder description",
+    "c_fidelity_stations": "the setup station names",
+    "c_fidelity_doorways": "the setup doorway sentences",
+    "c_fidelity_initial_room": "the setup starting-room sentence",
+    "c_fidelity_goal": "the setup agent goal text",
+    "c_fidelity_absent_party": "the setup absent-party sentence",
+    "c_fidelity_stake_edge": "the setup stake description",
+    "d_rule_sentence": "the setup belief-persistence rule sentence",
+    "d_hearing_threshold": "the setup doorway hearing threshold sentence",
+    "c_fidelity_event_order": "the out-of-order event sentence",
+    "c_fidelity_missing_event": "the missing event sentence",
+    "c_fidelity_unlogged_event": "the extra unlogged event sentence",
+    "c_fidelity_contradictory_occlusion": "the contradictory occlusion sentence",
+    "c_fidelity_unlogged_party": "the sentence naming an unlogged party",
+    "c_fidelity_unlogged_entity": "the sentence naming an unlogged entity",
+    "c_fidelity_unlogged_motive": "the sentence stating an unlogged motive",
+    "c_fidelity_unlogged_placer": "the sentence attributing unlogged note placement",
+    "a_no_markers_bracket": "the sentence containing a bracket marker",
+    "a_no_markers_fact_id": "the sentence containing a fact ID",
+    "a_no_markers_step_number": "the sentence containing a step number",
+    "b_banned_adverbs": "the sentence containing a banned adverb",
 }
 
 
 def format_repair_retry_line(exc: RenderCheckError) -> str:
-    """Format a single repair-retry line naming `exc.check_id` and (when applicable) the event number and kind, without key content or model text."""
+    """Format a single repair-retry line asking for one targeted fix while keeping the earlier text unchanged, without key content or model text."""
     if exc.event_index is not None and exc.event_kind is not None:
         hint = _REPAIR_HINT_BY_EVENT_KIND.get(
             exc.event_kind,
-            "state the logged event with its actor, verb, locations, and room",
+            "states the logged event with its actor, verb, locations, and room",
         )
-        return f"Repair retry ({exc.check_id}): Event {exc.event_index}, {exc.event_kind}: {hint}."
+        if exc.check_id == "c_fidelity_event_order":
+            return (
+                f"Keep your earlier text exactly as it was; change only event {exc.event_index} "
+                f"({exc.event_kind}, check {exc.check_id}) so that it appears in its logged chronological position "
+                f"and {hint}, leaving every other sentence unchanged."
+            )
+        return (
+            f"Keep your earlier text exactly as it was; change only event {exc.event_index} "
+            f"({exc.event_kind}, check {exc.check_id}) so that it {hint}, leaving every other sentence unchanged."
+        )
+    target_item = _REPAIR_TARGET_BY_CHECK_ID.get(exc.check_id, "the failing item")
     rule_spec = WRITER_PROSE_REQUIREMENTS_BY_ID.get(exc.check_id)
     rule_hint = rule_spec.rule_text if rule_spec is not None else "satisfy this mandatory constraint."
-    return f"Repair retry ({exc.check_id}): {rule_hint}"
+    return (
+        f"Keep your earlier text exactly as it was; change only {target_item} "
+        f"(check {exc.check_id}) so that it satisfies: {rule_hint} Leave every other sentence unchanged."
+    )
+
+
+def _count_unchanged_sentences(attempt0_text: str, retry_text: str) -> tuple[int, int]:
+    """Return `(unchanged_sentence_count, attempt0_sentence_count)` comparing `attempt0_text` and `retry_text`."""
+    sents_0 = [
+        s
+        for para in attempt0_text.split("\n\n")
+        if para.strip()
+        for s in _split_prose_sentences(para.strip())
+    ]
+    sents_1 = [
+        s
+        for para in retry_text.split("\n\n")
+        if para.strip()
+        for s in _split_prose_sentences(para.strip())
+    ]
+    unchanged = sum((Counter(sents_0) & Counter(sents_1)).values())
+    return unchanged, len(sents_0)
 
 
 def load_writer_prompt_template(path: Path | None = None) -> str:
@@ -880,6 +963,12 @@ def _actor_precedes_verb_as_subject(
             continue
         for m_verb in re.finditer(rf"\b(?:{verb_alt})\b", after_actor):
             between = after_actor[: m_verb.start()]
+            # Allow bare "see" as a sighting verb ONLY after "could not" on an occluded see
+            if m_verb.group(0).lower() == "see":
+                if re.search(r"\bcould\s+not\s+$", between) is None:
+                    continue
+                if ev is not None and not (ev.kind == "see" and ev.occluded and ev.occluder):
+                    continue
             # No other party name (or second occurrence of actor) may intervene as the closer subject before the verb
             intervening_party = any(
                 re.search(rf"\b{re.escape(p.lower())}\b", between)
@@ -893,6 +982,39 @@ def _actor_precedes_verb_as_subject(
     return False
 
 
+def _post_verb_core_args_end(frame_low: str, verb_end: int, ev: Event) -> int:
+    """Return the index (`>= verb_end`) in `frame_low` where `ev`'s post-verb object and location arguments end."""
+    after_verb = frame_low[verb_end:]
+    core_args: list[str] = []
+    if ev.kind in ("enter", "leave"):
+        if ev.from_location:
+            core_args.append(ev.from_location)
+        if ev.to_location:
+            core_args.append(ev.to_location)
+    elif ev.kind == "move":
+        for piece in (ev.target_object, ev.from_location, ev.to_location, ev.occluder if ev.occluded else None):
+            if piece:
+                core_args.append(piece)
+    elif ev.kind == "see":
+        if ev.target_object:
+            core_args.append(ev.target_object)
+        if ev.occluded and ev.occluder:
+            core_args.extend((ev.occluder, FAR_SIDE_ALCOVE_STATION))
+        elif ev.to_location:
+            core_args.append(ev.to_location)
+    elif ev.kind == "say":
+        core_args.append(f"{ev.noise_level} db")
+    elif ev.kind == "message" and ev.recipient:
+        core_args.append(ev.recipient)
+
+    max_rel_end = 0
+    for arg in core_args:
+        m = re.search(rf"\b{re.escape(arg.lower())}\b", after_verb)
+        if m is not None and m.end() > max_rel_end:
+            max_rel_end = m.end()
+    return verb_end + max_rel_end
+
+
 def _verb_is_scoped_by_negation(
     frame_low: str,
     actor_start: int,
@@ -901,15 +1023,38 @@ def _verb_is_scoped_by_negation(
     ev: Event,
 ) -> bool:
     """Return True if the event verb at `[verb_start, verb_end)` is scoped by a negation from `NEGATION_PHRASES`."""
-    span_from_actor = frame_low[actor_start:]
-    cleaned = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", span_from_actor)
-    if ev.kind == "see" and ev.occluded and ev.occluder:
-        cleaned = _COULD_NOT_SEE_RE.sub("", cleaned)
-    if _NEGATION_PATTERN.search(cleaned) is not None:
-        return True
+    # 1. Before the actor: refuse sentence-level negation unless the fronted part is a plain time or place phrase.
     before_actor = frame_low[:actor_start]
-    last_clause_before = re.split(r"[,;:]", before_actor)[-1]
-    if _NEGATION_PATTERN.search(last_clause_before) is not None:
+    cleaned_before = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", before_actor)
+    cleaned_before = _FRONTED_TIME_PLACE_NEG_RE.sub("", cleaned_before)
+    if _NEGATION_PATTERN.search(cleaned_before) is not None:
+        return True
+
+    # 2. From the actor through the event verb `[actor_start, verb_end)`: any negation directly scopes the verb
+    # (except "could not see" on an occluded see).
+    actor_to_verb = frame_low[actor_start:verb_start] + frame_low[verb_start:verb_end]
+    cleaned_actor_to_verb = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", actor_to_verb)
+    if ev.kind == "see" and ev.occluded and ev.occluder:
+        cleaned_actor_to_verb = _COULD_NOT_SEE_RE.sub("", cleaned_actor_to_verb)
+    if _NEGATION_PATTERN.search(cleaned_actor_to_verb) is not None:
+        return True
+
+    # 3. After `verb_end`: negation before the event's object and location (`[verb_end, core_end)`) scopes the VP
+    # and is refused; after `core_end`, non-scoping clauses/adjuncts (`_POST_ARG_ADJUNCT_NEG_RE`) are allowed.
+    core_end = _post_verb_core_args_end(frame_low, verb_end, ev)
+    core_span = frame_low[verb_end:core_end]
+    cleaned_core = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", core_span)
+    if ev.kind == "see" and ev.occluded and ev.occluder:
+        cleaned_core = _COULD_NOT_SEE_RE.sub("", cleaned_core)
+    if _NEGATION_PATTERN.search(cleaned_core) is not None:
+        return True
+
+    post_arg_tail = frame_low[core_end:]
+    cleaned_tail = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", post_arg_tail)
+    if ev.kind == "see" and ev.occluded and ev.occluder:
+        cleaned_tail = _COULD_NOT_SEE_RE.sub("", cleaned_tail)
+    cleaned_tail = _POST_ARG_ADJUNCT_NEG_RE.sub("", cleaned_tail)
+    if _NEGATION_PATTERN.search(cleaned_tail) is not None:
         return True
     return False
 
@@ -926,7 +1071,7 @@ def _ordered_from_to_positions(
     to_esc = re.escape(to_loc.lower())
     if require_from_prep:
         from_matches = list(
-            re.finditer(rf"\b(?:from|out of|exited|left|departed)\s+(?:the\s+)?{from_esc}\b", s_low)
+            re.finditer(rf"\b(?:from|out of|exited|left|departed)\s+{_ARTICLE_OPT_RE}{from_esc}\b", s_low)
         )
     else:
         from_matches = list(re.finditer(rf"\b{from_esc}\b", s_low))
@@ -935,14 +1080,14 @@ def _ordered_from_to_positions(
 
     to_matches = list(
         re.finditer(
-            rf"\b(?:to|into|toward|towards|for|onto|in|at|behind|around|entered|arrived\s+in)\s+(?:the\s+)?{to_esc}\b",
+            rf"\b(?:to|into|toward|towards|for|onto|in|at|behind|around|entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}\b",
             s_low,
         )
     )
     if not to_matches:
         return False
 
-    if re.search(rf"\b(?:entered|arrived\s+in)\s+(?:the\s+)?{to_esc}\b.*\bfrom\s+(?:the\s+)?{from_esc}\b", s_low):
+    if re.search(rf"\b(?:entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}\b.*\b(?:from|out of)\s+{_ARTICLE_OPT_RE}{from_esc}\b", s_low):
         return True
 
     for fm in from_matches:
@@ -991,6 +1136,46 @@ def _preceding_sentence_is_matching_leave(
     return bool(re.search(rf"\b{re.escape(ev.from_location.lower())}\b", prev_sentence.lower()))
 
 
+def _sentence_matches_folded_leave_enter(
+    prev_sentence: str | None,
+    prev_event: Event | None,
+    ev: Event,
+    noise_threshold: int,
+    world: World | None = None,
+) -> bool:
+    """Return True if `prev_sentence` is a folded movement sentence satisfying both consecutive `prev_event` (leave) and `ev` (enter)."""
+    if (
+        prev_sentence is None
+        or prev_event is None
+        or ev.kind != "enter"
+        or not ev.from_location
+        or not ev.to_location
+    ):
+        return False
+    if not _preceding_sentence_is_matching_leave(
+        prev_sentence, prev_event, ev, noise_threshold, world=world
+    ):
+        return False
+    if not _sentence_matches_event(
+        prev_sentence, ev, noise_threshold, world=world
+    ):
+        return False
+    prev_low = prev_sentence.lower()
+    to_esc = re.escape(ev.to_location.lower())
+    # Must assert arrival/entry at `to_location` (not merely "heading toward")
+    if not re.search(
+        rf"\b(?:to|into|onto|in|at|entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}\b",
+        prev_low,
+    ):
+        return False
+    return _ordered_from_to_positions(
+        prev_low,
+        ev.from_location,
+        ev.to_location,
+        require_from_prep=True,
+    )
+
+
 def _sentence_matches_event(
     sentence: str,
     ev: Event,
@@ -1025,7 +1210,7 @@ def _sentence_matches_event(
             for o_room in other_rooms:
                 if o_room.lower() in frame_low:
                     return False
-            if not re.search(rf"\b(?:in|from|inside|at|of)\s+(?:the\s+)?{re.escape(ev.room.lower())}\b", frame_low):
+            if not re.search(rf"\b(?:in|from|inside|at|of)\s+{_ARTICLE_OPT_RE}{re.escape(ev.room.lower())}\b", frame_low):
                 return False
 
     if ev.kind in ("say", "message") and ev.room.lower() not in frame_low and world is not None:
@@ -1052,7 +1237,7 @@ def _sentence_matches_event(
         to_esc = re.escape(ev.to_location.lower())
         has_to_dest = bool(
             re.search(
-                rf"\b(?:to|into|toward|towards|for|onto|in|at|entered|arrived\s+in)\s+(?:the\s+)?{to_esc}\b",
+                rf"\b(?:to|into|toward|towards|for|onto|in|at|entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}\b",
                 s_low,
             )
         )
@@ -1117,7 +1302,7 @@ def _sentence_matches_event(
         return True
 
     if ev.kind == "see":
-        if not _actor_precedes_verb_as_subject(frame_low, ev.actor, SIGHTING_VERBS, all_parties):
+        if not _actor_precedes_verb_as_subject(frame_low, ev.actor, SIGHTING_VERBS, all_parties, ev=ev):
             return False
         if not (ev.target_object and ev.target_object.lower() in s_low):
             return False
@@ -1453,27 +1638,81 @@ def check_prose_render_fidelity(
     for ev_idx, ev in enumerate(world.events):
         prev_ev = world.events[ev_idx - 1] if ev_idx > 0 else None
         found_idx: int | None = None
-        for s_idx in range(search_start, len(event_sentences)):
-            prev_sent = (
-                event_sentences[s_idx - 1]
-                if (
-                    ev_idx > 0
-                    and s_idx > 0
-                    and matched_sentence_indices
-                    and matched_sentence_indices[-1] == s_idx - 1
-                )
-                else None
-            )
-            if _sentence_matches_event(
-                event_sentences[s_idx],
+        if (
+            ev.kind == "enter"
+            and prev_ev is not None
+            and matched_sentence_indices
+            and search_start == matched_sentence_indices[-1] + 1
+        ):
+            s_prev = matched_sentence_indices[-1]
+            if search_start < len(event_sentences) and _sentence_matches_event(
+                event_sentences[search_start],
                 ev,
                 world.noise_threshold,
                 world=world,
-                prev_sentence=prev_sent,
+                prev_sentence=event_sentences[s_prev],
                 prev_event=prev_ev,
             ):
-                found_idx = s_idx
-                break
+                found_idx = search_start
+            elif _sentence_matches_folded_leave_enter(
+                event_sentences[s_prev],
+                prev_ev,
+                ev,
+                world.noise_threshold,
+                world=world,
+            ):
+                found_idx = s_prev
+        if found_idx is None:
+            for s_idx in range(search_start, len(event_sentences)):
+                prev_sent = (
+                    event_sentences[s_idx - 1]
+                    if (
+                        ev_idx > 0
+                        and s_idx > 0
+                        and matched_sentence_indices
+                        and matched_sentence_indices[-1] == s_idx - 1
+                    )
+                    else None
+                )
+                if _sentence_matches_event(
+                    event_sentences[s_idx],
+                    ev,
+                    world.noise_threshold,
+                    world=world,
+                    prev_sentence=prev_sent,
+                    prev_event=prev_ev,
+                ) and not (
+                    ev.kind == "leave"
+                    and ev_idx + 1 < len(world.events)
+                    and world.events[ev_idx + 1].kind == "enter"
+                    and world.events[ev_idx + 1].actor == ev.actor
+                    and any(
+                        i not in matched_sentence_indices
+                        and _sentence_matches_event(
+                            event_sentences[i],
+                            ev,
+                            world.noise_threshold,
+                            world=world,
+                        )
+                        and not _sentence_matches_folded_leave_enter(
+                            event_sentences[i],
+                            ev,
+                            world.events[ev_idx + 1],
+                            world.noise_threshold,
+                            world=world,
+                        )
+                        for i in range(0, search_start)
+                    )
+                    and _sentence_matches_folded_leave_enter(
+                        event_sentences[s_idx],
+                        ev,
+                        world.events[ev_idx + 1],
+                        world.noise_threshold,
+                        world=world,
+                    )
+                ):
+                    found_idx = s_idx
+                    break
         if found_idx is None:
             # Check if the event appears out of order earlier in event_sentences
             earlier_idx = next(
@@ -1509,13 +1748,13 @@ def check_prose_render_fidelity(
         matched_sentence_indices.append(found_idx)
         search_start = found_idx + 1
 
-    if len(event_sentences) != len(world.events):
-        unmatched = [
-            event_sentences[i]
-            for i in range(len(event_sentences))
-            if i not in set(matched_sentence_indices)
-        ]
-        cand_sent = unmatched[0] if unmatched else "no candidate sentence"
+    unmatched = [
+        event_sentences[i]
+        for i in range(len(event_sentences))
+        if i not in set(matched_sentence_indices)
+    ]
+    if unmatched:
+        cand_sent = unmatched[0]
         _raise_prose_check_error(
             "c_fidelity_unlogged_event",
             f"Render check (c) failed: prose asserts {len(unmatched)} unlogged event sentence(s) not in world.events: {unmatched[:2]} (candidate sentence: {cand_sent!r}).",
@@ -2289,6 +2528,11 @@ class GenerationCallRecord:
     seed: int = 0
     response_sha256: str = ""
     thinking_sha256: str = ""
+    repair_line: str = ""
+    repair_line_sha256: str = ""
+    retry_form: str = ""
+    retry_unchanged_sentences: int | None = None
+    retry_attempt0_sentences: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -2313,6 +2557,11 @@ class GenerationCallRecord:
             "prompt_sha256": self.prompt_sha256,
             "response_sha256": self.response_sha256,
             "thinking_sha256": self.thinking_sha256,
+            "repair_line": self.repair_line,
+            "repair_line_sha256": self.repair_line_sha256,
+            "retry_form": self.retry_form,
+            "retry_unchanged_sentences": self.retry_unchanged_sentences,
+            "retry_attempt0_sentences": self.retry_attempt0_sentences,
             "tokens": {
                 "prompt_tokens_estimate": self.prompt_tokens_estimate,
                 "prompt_eval_count": self.prompt_eval_count,
@@ -2824,6 +3073,19 @@ class WriterCheckpointManager:
                         seed=int(c_dict.get("seed", 0)),
                         response_sha256=str(c_dict.get("response_sha256") or ""),
                         thinking_sha256=str(c_dict.get("thinking_sha256") or ""),
+                        repair_line=str(c_dict.get("repair_line") or ""),
+                        repair_line_sha256=str(c_dict.get("repair_line_sha256") or ""),
+                        retry_form=str(c_dict.get("retry_form") or ""),
+                        retry_unchanged_sentences=(
+                            int(c_dict["retry_unchanged_sentences"])
+                            if c_dict.get("retry_unchanged_sentences") is not None
+                            else None
+                        ),
+                        retry_attempt0_sentences=(
+                            int(c_dict["retry_attempt0_sentences"])
+                            if c_dict.get("retry_attempt0_sentences") is not None
+                            else None
+                        ),
                     )
                 )
 
@@ -3165,25 +3427,59 @@ class OllamaWriter:
 
         chat_url = f"{self._base_url}/api/chat"
         last_exc: RenderCheckError | None = None
+        attempt_0_content: str | None = None
+        attempt_0_eval_pair: tuple[int, int] = (0, 0)
 
         for attempt in range(self._max_retries + 1):
             call_index = len(self._call_records) + 1
             call_id = f"{scenario_id}:r{rendering_index}:call_{call_index:04d}"
             call_seed = base_seed
-            active_prompt = (
-                f"{prompt_text.rstrip('\n')}\n{format_repair_retry_line(last_exc)}"
-                if (attempt > 0 and last_exc is not None)
-                else prompt_text
-            )
-            attempt_messages = [
-                {
-                    "role": "user",
-                    "content": active_prompt,
-                }
-            ]
+            if attempt > 0 and last_exc is not None:
+                repair_line = format_repair_retry_line(last_exc)
+                repair_line_sha = _sha256_bytes(repair_line.encode("utf-8"))
+                retry_form = "multi_turn"
+                attempt_messages = [
+                    {
+                        "role": "user",
+                        "content": prompt_text,
+                    },
+                    {
+                        "role": "assistant",
+                        "content": attempt_0_content or "",
+                    },
+                    {
+                        "role": "user",
+                        "content": repair_line,
+                    },
+                ]
+            else:
+                repair_line = ""
+                repair_line_sha = ""
+                retry_form = ""
+                attempt_messages = [
+                    {
+                        "role": "user",
+                        "content": prompt_text,
+                    }
+                ]
             attempt_prompt_sha = _sha256_bytes(_canonical_json_line(attempt_messages).encode("utf-8"))
             attempt_prompt_est = estimate_prompt_tokens(attempt_messages)
-            if self._think and attempt_prompt_est + self._num_predict <= self._max_num_ctx:
+            if attempt > 0:
+                effective_prompt_tokens = (
+                    attempt_0_eval_pair[0] + attempt_0_eval_pair[1] + estimate_prompt_tokens(repair_line)
+                    if attempt_0_eval_pair[0] > 0
+                    else attempt_prompt_est
+                )
+                attempt_num_ctx = min(
+                    self._max_num_ctx,
+                    compute_num_ctx(
+                        effective_prompt_tokens,
+                        self._num_predict,
+                        margin=NUM_CTX_MARGIN_TOKENS,
+                        step=NUM_CTX_STEP_TOKENS,
+                    ),
+                )
+            elif self._think and attempt_prompt_est + self._num_predict <= self._max_num_ctx:
                 attempt_num_ctx = min(
                     self._max_num_ctx,
                     compute_num_ctx(
@@ -3243,6 +3539,15 @@ class OllamaWriter:
                 if isinstance(raw_logprobs, list)
                 else ()
             )
+            if attempt == 0:
+                attempt_0_content = content
+                attempt_0_eval_pair = (prompt_eval_count, eval_count)
+                retry_unchanged: int | None = None
+                retry_attempt0_total: int | None = None
+            else:
+                retry_unchanged, retry_attempt0_total = _count_unchanged_sentences(
+                    attempt_0_content or "", content
+                )
 
             if done_reason == "length":
                 reason_msg = (
@@ -3282,6 +3587,11 @@ class OllamaWriter:
                     seed=call_seed,
                     response_sha256=resp_sha,
                     thinking_sha256=think_sha,
+                    repair_line=repair_line,
+                    repair_line_sha256=repair_line_sha,
+                    retry_form=retry_form,
+                    retry_unchanged_sentences=retry_unchanged,
+                    retry_attempt0_sentences=retry_attempt0_total,
                 )
                 self._append_generation_record(rec, response_text=content, thinking_text=thinking_text)
                 self._refusals.append(
@@ -3332,6 +3642,11 @@ class OllamaWriter:
                     seed=call_seed,
                     response_sha256=resp_sha,
                     thinking_sha256=think_sha,
+                    repair_line=repair_line,
+                    repair_line_sha256=repair_line_sha,
+                    retry_form=retry_form,
+                    retry_unchanged_sentences=retry_unchanged,
+                    retry_attempt0_sentences=retry_attempt0_total,
                 )
                 self._append_generation_record(rec, response_text=content, thinking_text=thinking_text)
                 self._refusals.append(
@@ -3385,6 +3700,11 @@ class OllamaWriter:
                 seed=call_seed,
                 response_sha256=resp_sha,
                 thinking_sha256=think_sha,
+                repair_line=repair_line,
+                repair_line_sha256=repair_line_sha,
+                retry_form=retry_form,
+                retry_unchanged_sentences=retry_unchanged,
+                retry_attempt0_sentences=retry_attempt0_total,
             )
             self._append_generation_record(rec, response_text=content, thinking_text=thinking_text)
             return content
