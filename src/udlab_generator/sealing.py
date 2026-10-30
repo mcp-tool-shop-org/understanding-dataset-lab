@@ -59,6 +59,8 @@ FORBIDDEN_PUBLIC_FIELDS: frozenset[str] = frozenset(
         "scenario_id",
         "response_text",
         "thinking_text",
+        "attempt_0_content",
+        "attempt_messages",
     }
 )
 

@@ -2531,6 +2531,7 @@ class GenerationCallRecord:
     repair_line: str = ""
     repair_line_sha256: str = ""
     retry_form: str = ""
+    retry_fallback_reason: str = ""
     retry_unchanged_sentences: int | None = None
     retry_attempt0_sentences: int | None = None
 
@@ -2560,6 +2561,7 @@ class GenerationCallRecord:
             "repair_line": self.repair_line,
             "repair_line_sha256": self.repair_line_sha256,
             "retry_form": self.retry_form,
+            "retry_fallback_reason": self.retry_fallback_reason,
             "retry_unchanged_sentences": self.retry_unchanged_sentences,
             "retry_attempt0_sentences": self.retry_attempt0_sentences,
             "tokens": {
@@ -3076,6 +3078,7 @@ class WriterCheckpointManager:
                         repair_line=str(c_dict.get("repair_line") or ""),
                         repair_line_sha256=str(c_dict.get("repair_line_sha256") or ""),
                         retry_form=str(c_dict.get("retry_form") or ""),
+                        retry_fallback_reason=str(c_dict.get("retry_fallback_reason") or ""),
                         retry_unchanged_sentences=(
                             int(c_dict["retry_unchanged_sentences"])
                             if c_dict.get("retry_unchanged_sentences") is not None
@@ -3428,6 +3431,7 @@ class OllamaWriter:
         chat_url = f"{self._base_url}/api/chat"
         last_exc: RenderCheckError | None = None
         attempt_0_content: str | None = None
+        attempt_0_response_sha256: str = ""
         attempt_0_eval_pair: tuple[int, int] = (0, 0)
 
         for attempt in range(self._max_retries + 1):
@@ -3437,65 +3441,109 @@ class OllamaWriter:
             if attempt > 0 and last_exc is not None:
                 repair_line = format_repair_retry_line(last_exc)
                 repair_line_sha = _sha256_bytes(repair_line.encode("utf-8"))
-                retry_form = "multi_turn"
-                attempt_messages = [
-                    {
-                        "role": "user",
-                        "content": prompt_text,
-                    },
-                    {
-                        "role": "assistant",
-                        "content": attempt_0_content or "",
-                    },
-                    {
-                        "role": "user",
-                        "content": repair_line,
-                    },
-                ]
+                repair_tokens = estimate_prompt_tokens(repair_line)
+                p0_tokens = (
+                    attempt_0_eval_pair[0]
+                    if attempt_0_eval_pair[0] > 0
+                    else prompt_tokens_estimate
+                )
+                e0_tokens = (
+                    attempt_0_eval_pair[1]
+                    if attempt_0_eval_pair[0] > 0
+                    else estimate_prompt_tokens(attempt_0_content or "")
+                )
+                multiturn_need = (
+                    p0_tokens + e0_tokens + repair_tokens + self._num_predict + NUM_CTX_MARGIN_TOKENS
+                )
+                if multiturn_need <= self._max_num_ctx:
+                    if (
+                        attempt_0_content is None
+                        or not attempt_0_response_sha256
+                        or _sha256_bytes(attempt_0_content.encode("utf-8")) != attempt_0_response_sha256
+                    ):
+                        raise AssertionError(
+                            "Multi-turn retry assistant turn is not byte-identical to the sealed attempt-0 response."
+                        )
+                    if self._sealed_responses:
+                        sealed_a0 = next(
+                            (
+                                sr
+                                for sr in reversed(self._sealed_responses)
+                                if sr.scenario_id == scenario_id
+                                and sr.rendering_index == rendering_index
+                                and sr.attempt == 0
+                            ),
+                            None,
+                        )
+                        if (
+                            sealed_a0 is None
+                            or sealed_a0.response_sha256 != attempt_0_response_sha256
+                            or _sha256_bytes(attempt_0_content.encode("utf-8")) != sealed_a0.response_sha256
+                        ):
+                            raise AssertionError(
+                                "Multi-turn retry assistant turn sha256 does not match sealed_store attempt-0 response_sha256."
+                            )
+                    retry_form = "multi_turn"
+                    retry_fallback_reason = ""
+                    attempt_messages = [
+                        {
+                            "role": "user",
+                            "content": prompt_text,
+                        },
+                        {
+                            "role": "assistant",
+                            "content": attempt_0_content,
+                        },
+                        {
+                            "role": "user",
+                            "content": repair_line,
+                        },
+                    ]
+                    attempt_num_ctx = compute_num_ctx(
+                        p0_tokens + e0_tokens + repair_tokens,
+                        self._num_predict,
+                        margin=NUM_CTX_MARGIN_TOKENS,
+                        step=NUM_CTX_STEP_TOKENS,
+                    )
+                else:
+                    retry_form = "single_turn"
+                    retry_fallback_reason = (
+                        f"multiturn_need_exceeds_max_num_ctx: need={multiturn_need} "
+                        f"(prompt_eval_count={p0_tokens} + eval_count={e0_tokens} + "
+                        f"repair_tokens={repair_tokens} + num_predict={self._num_predict} + "
+                        f"margin={NUM_CTX_MARGIN_TOKENS}) > max_num_ctx={self._max_num_ctx}"
+                    )
+                    single_turn_prompt = f"{prompt_text.rstrip('\n')}\n{repair_line}"
+                    attempt_messages = [
+                        {
+                            "role": "user",
+                            "content": single_turn_prompt,
+                        }
+                    ]
+                    single_turn_tokens = p0_tokens + repair_tokens
+                    if single_turn_tokens + self._num_predict + NUM_CTX_MARGIN_TOKENS <= self._max_num_ctx:
+                        attempt_num_ctx = compute_num_ctx(
+                            single_turn_tokens,
+                            self._num_predict,
+                            margin=NUM_CTX_MARGIN_TOKENS,
+                            step=NUM_CTX_STEP_TOKENS,
+                        )
+                    else:
+                        attempt_num_ctx = self._max_num_ctx
             else:
                 repair_line = ""
                 repair_line_sha = ""
                 retry_form = ""
+                retry_fallback_reason = ""
                 attempt_messages = [
                     {
                         "role": "user",
                         "content": prompt_text,
                     }
                 ]
+                attempt_num_ctx = num_ctx
             attempt_prompt_sha = _sha256_bytes(_canonical_json_line(attempt_messages).encode("utf-8"))
             attempt_prompt_est = estimate_prompt_tokens(attempt_messages)
-            if attempt > 0:
-                effective_prompt_tokens = (
-                    attempt_0_eval_pair[0] + attempt_0_eval_pair[1] + estimate_prompt_tokens(repair_line)
-                    if attempt_0_eval_pair[0] > 0
-                    else attempt_prompt_est
-                )
-                attempt_num_ctx = min(
-                    self._max_num_ctx,
-                    compute_num_ctx(
-                        effective_prompt_tokens,
-                        self._num_predict,
-                        margin=NUM_CTX_MARGIN_TOKENS,
-                        step=NUM_CTX_STEP_TOKENS,
-                    ),
-                )
-            elif self._think and attempt_prompt_est + self._num_predict <= self._max_num_ctx:
-                attempt_num_ctx = min(
-                    self._max_num_ctx,
-                    compute_num_ctx(
-                        attempt_prompt_est,
-                        self._num_predict,
-                        margin=NUM_CTX_MARGIN_TOKENS,
-                        step=NUM_CTX_STEP_TOKENS,
-                    ),
-                )
-            else:
-                attempt_num_ctx = compute_num_ctx(
-                    attempt_prompt_est,
-                    self._num_predict,
-                    margin=NUM_CTX_MARGIN_TOKENS,
-                    step=NUM_CTX_STEP_TOKENS,
-                )
             payload: dict[str, Any] = {
                 "model": self.ollama_tag,
                 "messages": attempt_messages,
@@ -3541,6 +3589,7 @@ class OllamaWriter:
             )
             if attempt == 0:
                 attempt_0_content = content
+                attempt_0_response_sha256 = resp_sha
                 attempt_0_eval_pair = (prompt_eval_count, eval_count)
                 retry_unchanged: int | None = None
                 retry_attempt0_total: int | None = None
@@ -3590,6 +3639,7 @@ class OllamaWriter:
                     repair_line=repair_line,
                     repair_line_sha256=repair_line_sha,
                     retry_form=retry_form,
+                    retry_fallback_reason=retry_fallback_reason,
                     retry_unchanged_sentences=retry_unchanged,
                     retry_attempt0_sentences=retry_attempt0_total,
                 )
@@ -3645,6 +3695,7 @@ class OllamaWriter:
                     repair_line=repair_line,
                     repair_line_sha256=repair_line_sha,
                     retry_form=retry_form,
+                    retry_fallback_reason=retry_fallback_reason,
                     retry_unchanged_sentences=retry_unchanged,
                     retry_attempt0_sentences=retry_attempt0_total,
                 )
@@ -3703,6 +3754,7 @@ class OllamaWriter:
                 repair_line=repair_line,
                 repair_line_sha256=repair_line_sha,
                 retry_form=retry_form,
+                retry_fallback_reason=retry_fallback_reason,
                 retry_unchanged_sentences=retry_unchanged,
                 retry_attempt0_sentences=retry_attempt0_total,
             )
