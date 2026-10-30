@@ -32,6 +32,7 @@ from udlab_generator.world import (
     FAR_SIDE_ALCOVE_STATION,
     OCCLUSION_RULE,
     Event,
+    StakeEdge,
     World,
     is_station_transition_event,
 )
@@ -488,6 +489,64 @@ def format_negation_phrases_summary() -> str:
     return ", ".join(NEGATION_PHRASES)
 
 
+STAKE_SUBJECT_LEADINS: tuple[str, ...] = (
+    "is off-site and",
+    "is an absent party who",
+    "is absent off-site and",
+    "is an absent party and",
+    "as an absent party who",
+    "as an absent party",
+    "who is off-site and",
+    "who is absent and",
+    "who",
+)
+STAKE_RELATION_PHRASE: str = "depends on"
+
+
+def format_stake_rule_summary() -> str:
+    """Format the stake-edge constraint rule from the shared relation phrase."""
+    return (
+        f"For each absent party stake, state `<agent> ... {STAKE_RELATION_PHRASE} <dependency phrase>` "
+        f"verbatim in setup."
+    )
+
+
+def _build_stake_statement_regex(stake: StakeEdge) -> re.Pattern[str]:
+    """Build the regex matching a single statement of `stake` by meaning (absent agent as subject + 'depends on' + verbatim dependency phrase)."""
+    dep = stake.dependency_phrase
+    other_parties = sorted(ALL_KNOWN_PARTY_NAMES - {stake.agent})
+    no_other_party = (
+        r"(?:(?!(?:\b" + "|".join(re.escape(p) for p in other_parties) + r"\b)|[.;!?\n]).){0,80}?"
+        if other_parties
+        else r"[^.;!?\n]{0,80}?"
+    )
+    rel_esc = r"\s+".join(re.escape(tok) for tok in STAKE_RELATION_PHRASE.split())
+    return re.compile(
+        rf"\b{re.escape(stake.agent)}\b{no_other_party}\b{rel_esc}\s+{re.escape(dep)}(?=$|[\s.,;!?\"')])",
+        re.IGNORECASE,
+    )
+
+
+def count_stake_statement_occurrences(setup_text: str, stake: StakeEdge) -> int:
+    """Count how many times `stake` is stated by meaning in `setup_text`."""
+    norm_setup = normalize_prose_line_endings(setup_text)
+    pat = _build_stake_statement_regex(stake)
+    return sum(1 for _ in pat.finditer(norm_setup))
+
+
+def count_duplicate_stake_statements(prose: str, world: World) -> int:
+    """Count extra (duplicate) statements of logged stakes in the setup paragraph of `prose`."""
+    norm = normalize_prose_line_endings(prose)
+    paragraphs = [p.strip() for p in norm.split("\n\n") if p.strip()]
+    setup_text = paragraphs[0] if paragraphs else norm
+    dup_count = 0
+    for stake in world.stake_edges:
+        occ = count_stake_statement_occurrences(setup_text, stake)
+        if occ > 1:
+            dup_count += occ - 1
+    return dup_count
+
+
 WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ProseRequirementSpec(
         "c_fidelity_paragraph_split",
@@ -535,7 +594,7 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ),
     ProseRequirementSpec(
         "c_fidelity_stake_edge",
-        "Copy each stake description (stake_edges[].description) verbatim into setup.",
+        format_stake_rule_summary(),
     ),
     ProseRequirementSpec(
         "d_rule_sentence",
@@ -1943,12 +2002,22 @@ def check_prose_render_fidelity(
                 failing_sentence=cand,
             )
 
+    staked_agents = {stake.agent for stake in world.stake_edges}
+    for abs_p in world.absent_parties:
+        if abs_p not in staked_agents:
+            cand = _find_sentence_with_substring(setup_text, abs_p)
+            _raise_prose_check_error(
+                "c_fidelity_stake_edge",
+                f"Render check (c) failed: absent party '{abs_p}' has no logged stake edge in setup prose (candidate sentence: {cand!r}).",
+                failing_sentence=cand,
+            )
+
     for stake in world.stake_edges:
-        if stake.description.lower() not in setup_low:
+        if count_stake_statement_occurrences(setup_text, stake) < 1:
             cand = _find_sentence_with_substring(setup_text, stake.agent)
             _raise_prose_check_error(
                 "c_fidelity_stake_edge",
-                f"Render check (c) failed: stake edge '{stake.description}' missing from setup prose (candidate sentence: {cand!r}).",
+                f"Render check (c) failed: stake edge for '{stake.agent}' ('{STAKE_RELATION_PHRASE} {stake.dependency_phrase}') missing from setup prose (candidate sentence: {cand!r}).",
                 failing_sentence=cand,
             )
 

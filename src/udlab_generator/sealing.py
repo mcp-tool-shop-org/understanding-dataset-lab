@@ -31,6 +31,7 @@ from udlab_generator.render import (
     RenderCheckError,
     RenderedScenario,
     check_rendered_prose,
+    count_duplicate_stake_statements,
     format_non_sealed_refusal_reason,
     sanitize_render_check_error_for_stderr,
 )
@@ -99,6 +100,17 @@ def _canonical_json_line(obj: dict[str, Any]) -> str:
 
 def _canonical_json_doc(obj: dict[str, Any]) -> str:
     return json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def _value_sha256(val: Any) -> str:
+    """Compute SHA-256 hex digest of a canonicalized value without exposing the value itself."""
+    if isinstance(val, tuple):
+        val = list(val)
+    if isinstance(val, str):
+        raw = val.encode("utf-8")
+    else:
+        raw = json.dumps(val, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _hmac_hex(private_seed_hex: str, message: str, length: int = 24) -> str:
@@ -781,7 +793,9 @@ def verify_sealed_part(public_dir: Path, sealed_dir: Path) -> None:
                     exp_key_ser = list(exp_q.key) if isinstance(exp_q.key, tuple) else exp_q.key
                     if q_dict.get("key") != exp_key_ser:
                         raise SealingError(
-                            f"Sealed key mismatch in {scen_id} {slot_id}: got {q_dict.get('key')!r}, expected {exp_key_ser!r}."
+                            f"Sealed key mismatch in {scen_id} {slot_id}: "
+                            f"sealed_sha256={_value_sha256(q_dict.get('key'))} != "
+                            f"expected_sha256={_value_sha256(exp_key_ser)}."
                         )
 
 
@@ -1075,6 +1089,7 @@ def verify_written_dataset_recounts_and_prose(
 
     prose_checked = 0
     recount_checked = 0
+    duplicate_stake_statements = 0
     for row in sealed_rows:
         scen_id = str(row["scenario_id"])
         if scen_id not in worlds_by_sid:
@@ -1104,6 +1119,7 @@ def verify_written_dataset_recounts_and_prose(
                 f"Prose check failed in {scen_id} (focal={focal_ag}): {type(exc).__name__}"
             ) from None
         prose_checked += 1
+        duplicate_stake_statements += count_duplicate_stake_statements(prose, w_obj)
 
         recounted = recounts_by_sid[scen_id]
         perc_row = row.get("perceptual_records", {})
@@ -1129,11 +1145,13 @@ def verify_written_dataset_recounts_and_prose(
             norm_key = tuple(raw_key) if isinstance(raw_key, list) else raw_key
             if norm_key != recounted[qtype]:
                 raise SealingError(
-                    f"Independent recount mismatch in {scen_id} for {qtype}: sealed={norm_key!r} != recounted={recounted[qtype]!r}."
+                    f"Independent recount mismatch in {scen_id} for {qtype}: "
+                    f"sealed_sha256={_value_sha256(norm_key)} != recounted_sha256={_value_sha256(recounted[qtype])}."
                 )
             if qtype == "B2" and str(raw_key) != b2_by_sid[scen_id]:
                 raise SealingError(
-                    f"Independent B2 rule-sentence derivation mismatch in {scen_id}: sealed={raw_key!r} != rule_derived={b2_by_sid[scen_id]!r}."
+                    f"Independent B2 rule-sentence derivation mismatch in {scen_id}: "
+                    f"sealed_sha256={_value_sha256(str(raw_key))} != rule_derived_sha256={_value_sha256(b2_by_sid[scen_id])}."
                 )
         recount_checked += 1
 
@@ -1141,6 +1159,7 @@ def verify_written_dataset_recounts_and_prose(
         "scenarios_recounted": len(worlds_by_sid),
         "renderings_prose_checked": prose_checked,
         "rows_recount_verified": recount_checked,
+        "duplicate_stake_statements": duplicate_stake_statements,
         "independent_b2_verified": True,
         "independent_recounts_verified": True,
         "prose_checks_passed": True,

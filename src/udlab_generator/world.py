@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import hashlib
 import itertools
 import random
+import re
 from typing import Literal
 
 EventKind = Literal["enter", "leave", "move", "say", "see", "message"]
@@ -42,6 +43,13 @@ class StakeEdge:
     agent: str
     variable: str
     description: str
+
+    @property
+    def dependency_phrase(self) -> str:
+        """Extract the verbatim dependency phrase after `depends on` without trailing punctuation."""
+        m = re.search(r"\bdepends\s+on\s+(.+)$", self.description, flags=re.IGNORECASE)
+        raw = m.group(1) if m is not None else self.description
+        return raw.rstrip(" \t\r\n.;,!?")
 
 
 @dataclass(frozen=True)

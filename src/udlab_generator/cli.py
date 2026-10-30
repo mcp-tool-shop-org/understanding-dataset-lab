@@ -46,6 +46,7 @@ from udlab_generator.render import (
     check_rendered_prose,
     compute_num_ctx,
     compute_sealed_response_digests,
+    count_duplicate_stake_statements,
     estimate_prompt_tokens,
     format_non_sealed_refusal_reason,
     kill_pid_tree,
@@ -207,6 +208,7 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
     refusals_by_check_id: Counter[str] = Counter()
     calls_kept = 0
     calls_refused = 0
+    duplicate_stake_statements = 0
     legacy_refusal_format_calls = 0
     final_by_rendering: dict[tuple[str, int], bool] = {}
     scenarios_seen: list[str] = []
@@ -253,6 +255,8 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
             failing_sentence: str | None = None
             reason: str | None = None
             calls_kept += 1
+            call_dup_stakes = count_duplicate_stake_statements(response_text, world)
+            duplicate_stake_statements += call_dup_stakes
         except RenderCheckError as exc:
             passed = False
             check_id = exc.check_id
@@ -261,6 +265,7 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
             failing_sentence = exc.failing_sentence
             reason = str(exc)
             calls_refused += 1
+            call_dup_stakes = count_duplicate_stake_statements(response_text, world)
             refusals_by_check_id[exc.check_id] += 1
 
         recomputed_fail_sha, recomputed_fail_off, recomputed_fail_len = (
@@ -347,6 +352,7 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
                 "failing_sentence_offset": fail_off,
                 "failing_sentence_length": fail_len,
                 "failing_sentence_sha256_verified": failing_sentence_sha_verified,
+                "duplicate_stake_statements": call_dup_stakes,
                 "reason": reason,
             }
         )
@@ -374,6 +380,7 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
         "calls_refused": calls_refused,
         "kept": renderings_kept,
         "refused": renderings_refused,
+        "duplicate_stake_statements": duplicate_stake_statements,
         "refusals_by_check_id": dict(sorted(refusals_by_check_id.items())),
         "legacy_refusal_format_calls": legacy_refusal_format_calls,
         "matches_recorded_verdicts": all_verdicts_match,
@@ -904,6 +911,7 @@ def build_and_probe_dataset(
         "ollama_server": server_info,
         "num_scenarios": receipt.num_scenarios,
         "num_items": receipt.num_items,
+        "duplicate_stake_statements": int(recount_verification.get("duplicate_stake_statements", 0)),
         **outcomes,
         "items_sha256": receipt.items_sha256,
         "part_json_sha256": receipt.part_json_sha256,

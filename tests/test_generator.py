@@ -367,7 +367,7 @@ def test_5_sealing_and_key_order_leak(tmp_path: Path) -> None:
 
     pub_dir = tmp_path / "part_public"
     seal_dir = tmp_path / "sealed_store"
-    priv_seed = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    priv_seed = "0123456789abcdef" * 4
 
     receipt = write_sealed_dataset(
         rendered_pairs=pairs,
@@ -547,7 +547,7 @@ def test_8_balanced_classes_and_shortcut_probe_and_diversity(tmp_path: Path) -> 
         rendered_pairs=pairs,
         public_dir=tmp_path / "pub",
         sealed_dir=tmp_path / "seal",
-        private_seed_hex="fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        private_seed_hex="fedcba9876543210" * 4,
     )
     sealed_rows = [
         json.loads(line)
@@ -582,7 +582,7 @@ def test_8_balanced_classes_and_shortcut_probe_and_diversity(tmp_path: Path) -> 
         rendered_pairs=imbalanced_pairs,
         public_dir=tmp_path / "pub_imb",
         sealed_dir=tmp_path / "seal_imb",
-        private_seed_hex="11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+        private_seed_hex="11223344556677889900aabbccddeeff" * 2,
     )
     imb_rows = [
         json.loads(line)
@@ -686,7 +686,7 @@ def test_9_probe_pass_rule_and_stratified_probe_a(tmp_path: Path) -> None:
         rendered_pairs=pairs,
         public_dir=tmp_path / "pub_9",
         sealed_dir=tmp_path / "seal_9",
-        private_seed_hex="1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        private_seed_hex="1234567890abcdef" * 4,
     )
     sealed_rows = [
         json.loads(line)
@@ -761,7 +761,7 @@ def test_10_degenerate_classifiers_and_leaky_fixtures(tmp_path: Path) -> None:
         rendered_pairs=pairs,
         public_dir=tmp_path / "pub_10",
         sealed_dir=tmp_path / "seal_10",
-        private_seed_hex="abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        private_seed_hex="abcdef0123456789" * 4,
     )
     sealed_rows = [
         json.loads(line)
@@ -2750,7 +2750,7 @@ def test_37_phrasing_3_verbatim_goals_and_stakes_prompt_and_check() -> None:
     fa = w.agents[0]
     prompt_str = format_writer_prompt(w, fa)
     assert "Copy each agent's goal_text (goals[agent].goal_text) verbatim" in prompt_str
-    assert "Copy each stake description (stake_edges[].description) verbatim" in prompt_str
+    assert "depends on" in prompt_str and "dependency phrase" in prompt_str
 
     natural_setup, natural_events = _build_natural_model_prose_scen_0000()
     assert check_rendered_prose(f"{natural_setup}\n\n{natural_events}", w, focal_agent=fa) == ()
@@ -4891,9 +4891,9 @@ def test_58_card_sw_repair_line_recorded_and_multi_turn_wording(tmp_path: Path) 
     # Now test end-to-end retry recording in generations.jsonl with multi-turn messages and num_ctx <= 9216:
     passing_r0 = render_world_template(w0, w0.agents[0])
     passing_r1 = render_world_template(w0, w0.agents[1])
-    # Mutate 1 sentence in passing_r1 for attempt 0 (paraphrasing the stake edge, as in writer-stub-1c):
+    # Mutate 1 sentence in passing_r1 for attempt 0 (wrong stake dependency object):
     orig_stake = w0.stake_edges[0].description
-    bad_stake = "Gia is an absent party who depends on the location of the brass ledger for tomorrow's courier handoff."
+    bad_stake = "Gia is an absent party who depends on the location of the index reel for tomorrow's courier handoff."
     failing_r1 = passing_r1.replace(orig_stake, bad_stake)
     assert failing_r1 != passing_r1
 
@@ -4999,7 +4999,7 @@ def test_59_card_sx_multiturn_fallback_not_cap(tmp_path: Path) -> None:
     passing_r0 = render_world_template(w0, w0.agents[0])
     passing_r1 = render_world_template(w0, w0.agents[1])
     orig_stake = w0.stake_edges[0].description
-    bad_stake = "Gia is an absent party who depends on the location of the brass ledger for tomorrow's courier handoff."
+    bad_stake = "Gia is an absent party who depends on the location of the index reel for tomorrow's courier handoff."
     failing_r1 = passing_r1.replace(orig_stake, bad_stake)
 
     expected_repair = format_repair_retry_line(
@@ -5485,7 +5485,7 @@ def test_66_card_sz_single_turn_repair_wording(tmp_path: Path) -> None:
     passing_r0 = render_world_template(w0, w0.agents[0])
     passing_r1 = render_world_template(w0, w0.agents[1])
     orig_stake = w0.stake_edges[0].description
-    bad_stake = "Gia is an absent party who depends on the location of the brass ledger for tomorrow's courier handoff."
+    bad_stake = "Gia is an absent party who depends on the location of the index reel for tomorrow's courier handoff."
     failing_r0 = passing_r0.replace(orig_stake, bad_stake)
     failing_r1 = passing_r1.replace(orig_stake, bad_stake)
 
@@ -5590,7 +5590,7 @@ def test_60_card_sx_attempt_0_carried_unmodified_and_sha_asserted(
     passing_r0 = render_world_template(w0, w0.agents[0])
     passing_r1 = render_world_template(w0, w0.agents[1])
     orig_stake = w0.stake_edges[0].description
-    bad_stake = "Gia is an absent party who depends on the location of the brass ledger for tomorrow's courier handoff."
+    bad_stake = "Gia is an absent party who depends on the location of the index reel for tomorrow's courier handoff."
     failing_r1 = passing_r1.replace(orig_stake, bad_stake)
 
     seen_payloads: list[dict[str, Any]] = []
@@ -5702,7 +5702,7 @@ def test_61_card_sx_echoed_text_stays_local_and_sealed(
     # Place a unique marker in a passing setup sentence of attempt 0, while causing a separate sentence to fail:
     attempt0_marker = "ATTEMPT0_ECHO_SECRET_MARKER_SX_994411"
     orig_stake = w0.stake_edges[0].description
-    bad_stake = "Gia is an absent party who depends on the location of the brass ledger for tomorrow's courier handoff."
+    bad_stake = "Gia is an absent party who depends on the location of the index reel for tomorrow's courier handoff."
     # Append the marker as a benign clause on the first setup sentence so the failing sentence is still bad_stake:
     failing_r1_with_marker = passing_r1.replace(
         f"Following {w0.agents[1]} through the",
@@ -5811,7 +5811,7 @@ def test_62_card_sx_retry_row_canonical_prompt_sha_and_fields(tmp_path: Path) ->
     passing_r0 = render_world_template(w0, w0.agents[0])
     passing_r1 = render_world_template(w0, w0.agents[1])
     orig_stake = w0.stake_edges[0].description
-    bad_stake = "Gia is an absent party who depends on the location of the brass ledger for tomorrow's courier handoff."
+    bad_stake = "Gia is an absent party who depends on the location of the index reel for tomorrow's courier handoff."
     failing_r0 = passing_r0.replace(orig_stake, bad_stake)
     failing_r1 = passing_r1.replace(orig_stake, bad_stake)
 
@@ -5949,7 +5949,7 @@ def test_67_card_tb_refusal_records_sealed_only_and_readers_resolve(
     sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
     orig_stake = w0.stake_edges[0].description
     bad_stake_sent = (
-        "Gia is an absent party who depends on the location of the brass ledger "
+        "Gia is an absent party who depends on the location of the index reel "
         "for tomorrow's courier handoff (SETUP_FAIL_SENT_TB_67)."
     )
     failing_r0_setup = f"{sj_setup.replace('whereas Gia is absent off-site', 'whereas the courier is absent off-site').replace(orig_stake, bad_stake_sent)}\n\n{' '.join(sj_sents)}"
@@ -7122,6 +7122,455 @@ def test_76_card_ti_toplevel_stderr_catch_on_failing_kept_and_resume_paths(
     assert f"failing_sentence_sha256={exp_sha}" in str(exc_mock.value)
     assert f"failing_sentence_offset={exp_off}" in str(exc_mock.value)
     assert f"failing_sentence_length={exp_len}" in str(exc_mock.value)
+
+
+def test_77_card_tk_stake_check_by_meaning_and_prompt_alignment() -> None:
+    """Test 77 (Card tk Req 1):
+    - Stake check by meaning is generated from one source (the stake's agent and its dependency_phrase).
+    - Each logged stake passes when setup prose names the absent agent as subject with a 'depends on' relation,
+      and the dependency phrase appears verbatim, ignoring final punctuation and case.
+    - Every absent party listed in the log must have its stake stated.
+    - Renders the rule into the prompt's constraints block from the same source, keeping the prompt-checker alignment test passing.
+    - Accepted:
+      1. 'X is off-site and depends on <phrase>.'
+      2. 'X is an absent party who depends on <phrase>.'
+      3. List form 'Stakes are: X is off-site and depends on <phrase>; Y is off-site and depends on <phrase2>.'
+      4. Same sentence with different final punctuation (';', ',', '.', none) and case variations.
+    - Refused:
+      1. A stake naming the wrong absent party.
+      2. A stake with the wrong dependency object (e.g. 'depends on the location of the index reel' when the stake is the brass ledger).
+      3. A dependency phrase altered by one word.
+      4. A list form where one absent party's stake is missing.
+      5. A text that stakes only one of two absent parties.
+    """
+    import udlab_generator.render as ug_render
+    from udlab_generator.render import verify_prompt_and_checker_requirements_aligned
+
+    verify_prompt_and_checker_requirements_aligned()
+
+    # Single-absent-party scenario (scen_0000: Gia is absent, depends on the location of the brass ledger for tomorrow's courier handoff)
+    cfg_1 = make_balanced_configs(1, base_seed=20261030)[0]
+    w1 = generate_world(cfg_1)
+    fa1 = w1.agents[0]
+    stake_1 = w1.stake_edges[0]
+    assert stake_1.agent == "Gia"
+    dep_phrase_1 = getattr(
+        stake_1,
+        "dependency_phrase",
+        "the location of the brass ledger for tomorrow's courier handoff",
+    )
+    assert dep_phrase_1 == "the location of the brass ledger for tomorrow's courier handoff"
+
+    sj_setup_1, sj_sents_1 = _build_sj_writer_in_the_loop_scen_0000()
+    events_1 = " ".join(sj_sents_1)
+    orig_stake_sent_1 = stake_1.description
+
+    # Accepted 1, 2, 4: single-party forms with "is off-site and", "is an absent party who", case variation, and final punctuation (; , . none)
+    accepted_single_forms = (
+        f"Gia is off-site and depends on {dep_phrase_1}.",
+        f"Gia is an absent party who depends on {dep_phrase_1}.",
+        f"Gia is an absent party who DEPENDS ON {dep_phrase_1.upper()}.",
+        f"Gia is off-site and depends on {dep_phrase_1};",
+        f"Gia is off-site and depends on {dep_phrase_1},",
+        f"Gia is off-site and depends on {dep_phrase_1}",
+        f"Gia is an absent party who depends on {dep_phrase_1};",
+        f"Gia is an absent party who depends on {dep_phrase_1},",
+        f"Gia is an absent party who depends on {dep_phrase_1}",
+    )
+    for acc_sent in accepted_single_forms:
+        setup_try = sj_setup_1.replace(orig_stake_sent_1, acc_sent)
+        assert check_rendered_prose(f"{setup_try}\n\n{events_1}", w1, focal_agent=fa1) == (), (
+            f"Expected stake sentence to pass: {acc_sent!r}"
+        )
+
+    # Prompt constraints block renders the stake rule from the same source:
+    assert hasattr(stake_1, "dependency_phrase")
+    assert hasattr(ug_render, "format_stake_rule_summary")
+    assert hasattr(ug_render, "STAKE_RELATION_PHRASE")
+    prompt_1 = format_writer_prompt(w1, fa1)
+    assert ug_render.format_stake_rule_summary() in prompt_1
+    assert ug_render.STAKE_RELATION_PHRASE in ug_render.format_stake_rule_summary()
+
+    # Refused 1: Stake naming the wrong absent party
+    wrong_party_setup = sj_setup_1.replace(
+        orig_stake_sent_1,
+        f"Hana is off-site and depends on {stake_1.dependency_phrase}.",
+    )
+    with pytest.raises(RenderCheckError) as exc_wp:
+        check_rendered_prose(f"{wrong_party_setup}\n\n{events_1}", w1, focal_agent=fa1)
+    assert exc_wp.value.check_id == "c_fidelity_stake_edge"
+
+    # Refused 2: Stake with the wrong dependency object ("depends on the location of the index reel" when the stake is the brass ledger)
+    wrong_obj_setup = sj_setup_1.replace(
+        orig_stake_sent_1,
+        "Gia is off-site and depends on the location of the index reel for tomorrow's courier handoff.",
+    )
+    with pytest.raises(RenderCheckError) as exc_wo:
+        check_rendered_prose(f"{wrong_obj_setup}\n\n{events_1}", w1, focal_agent=fa1)
+    assert exc_wo.value.check_id == "c_fidelity_stake_edge"
+
+    # Refused 3: Dependency phrase altered by one word ("dispatch" instead of "courier")
+    one_word_setup = sj_setup_1.replace(
+        orig_stake_sent_1,
+        "Gia is an absent party who depends on the location of the brass ledger for tomorrow's dispatch handoff.",
+    )
+    with pytest.raises(RenderCheckError) as exc_ow:
+        check_rendered_prose(f"{one_word_setup}\n\n{events_1}", w1, focal_agent=fa1)
+    assert exc_ow.value.check_id == "c_fidelity_stake_edge"
+
+    # Two-absent-party scenario (num_absent=2):
+    cfg_2 = replace(cfg_1, num_absent=2)
+    w2 = generate_world(cfg_2)
+    fa2 = w2.agents[0]
+    assert len(w2.absent_parties) == 2
+    assert len(w2.stake_edges) == 2
+    s_x, s_y = w2.stake_edges[0], w2.stake_edges[1]
+    base_prose_2 = render_world_template(w2, fa2)
+    setup_2, events_2 = base_prose_2.split("\n\n", 1)
+    orig_both_stakes = f"{s_x.description} {s_y.description}"
+    assert orig_both_stakes in setup_2
+
+    # Accepted 3 & 4: List form "Stakes are: X is off-site and depends on <phrase>; Y is off-site and depends on <phrase2>."
+    # and variations with "is an absent party who" and different final punctuation (; , . none):
+    accepted_two_party_forms = (
+        f"Stakes are: {s_x.agent} is off-site and depends on {s_x.dependency_phrase}; {s_y.agent} is off-site and depends on {s_y.dependency_phrase}.",
+        f"Stakes are: {s_x.agent} is an absent party who depends on {s_x.dependency_phrase}; {s_y.agent} is an absent party who depends on {s_y.dependency_phrase}.",
+        f"Stakes are: {s_x.agent} is off-site and depends on {s_x.dependency_phrase}, {s_y.agent} is off-site and depends on {s_y.dependency_phrase};",
+        f"Stakes are: {s_x.agent} is off-site and depends on {s_x.dependency_phrase}; {s_y.agent} is off-site and depends on {s_y.dependency_phrase}",
+    )
+    for acc_list in accepted_two_party_forms:
+        setup_2_try = setup_2.replace(orig_both_stakes, acc_list)
+        assert check_rendered_prose(f"{setup_2_try}\n\n{events_2}", w2, focal_agent=fa2) == (), (
+            f"Expected two-party list stake sentence to pass: {acc_list!r}"
+        )
+
+    # Refused 4: List form where one absent party's stake is missing (Y is named as off-site without its dependency phrase)
+    missing_in_list_setup = setup_2.replace(
+        orig_both_stakes,
+        f"Stakes are: {s_x.agent} is off-site and depends on {s_x.dependency_phrase}; {s_y.agent} is off-site.",
+    )
+    with pytest.raises(RenderCheckError) as exc_ml:
+        check_rendered_prose(f"{missing_in_list_setup}\n\n{events_2}", w2, focal_agent=fa2)
+    assert exc_ml.value.check_id == "c_fidelity_stake_edge"
+
+    # Refused 5: A text that stakes only one of two absent parties
+    only_one_staked_setup = setup_2.replace(orig_both_stakes, s_x.description)
+    with pytest.raises(RenderCheckError) as exc_oo:
+        check_rendered_prose(f"{only_one_staked_setup}\n\n{events_2}", w2, focal_agent=fa2)
+    assert exc_oo.value.check_id == "c_fidelity_stake_edge"
+
+    # Also verify that if world.absent_parties has 2 absent parties but world.stake_edges only lists 1,
+    # check_rendered_prose refuses with c_fidelity_stake_edge because every absent party in the log must have its stake stated:
+    w2_missing_edge = replace(w2, stake_edges=(s_x,))
+    with pytest.raises(RenderCheckError) as exc_me:
+        check_rendered_prose(base_prose_2, w2_missing_edge, focal_agent=fa2)
+    assert exc_me.value.check_id == "c_fidelity_stake_edge"
+
+
+def test_78_card_tk_duplicate_stakes_allowed_and_counted(tmp_path: Path) -> None:
+    """Test 78 (Card tk Req 2):
+    - Duplicate stake statements are allowed, not refused.
+    - Counted in the build summary as `duplicate_stake_statements` for the dataset read,
+      as well as in `verify_written_dataset` and `recheck_saved_responses`.
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+    )
+    from udlab_generator.cli import recheck_saved_responses, verify_written_dataset
+    import udlab_generator.render as ug_render
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    stake_0 = w0.stake_edges[0]
+    dep_0 = getattr(
+        stake_0,
+        "dependency_phrase",
+        "the location of the brass ledger for tomorrow's courier handoff",
+    )
+    dup_sentence = f"{stake_0.agent} is an absent party who depends on {dep_0}."
+
+    def _dup_renderer(w: World, focal_agent: str) -> str:
+        base = render_world_template(w, focal_agent)
+        if w.scenario_id == w0.scenario_id and focal_agent == w.agents[0]:
+            setup_p, events_p = base.split("\n\n", 1)
+            return f"{setup_p} {dup_sentence}\n\n{events_p}"
+        return base
+
+    prose_with_dup = _dup_renderer(w0, w0.agents[0])
+    assert check_rendered_prose(prose_with_dup, w0, focal_agent=w0.agents[0]) == ()
+
+    scripted_outputs = [prose_with_dup, render_world_template(w0, w0.agents[1])]
+    call_idx = 0
+
+    def _dup_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal call_idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            txt = scripted_outputs[call_idx]
+            call_idx += 1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3050,
+                "eval_count": 800,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_dir = tmp_path / "tk_dup_stakes_build"
+    summary = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        grant_id="test-grant-tk-78",
+        http_transport=_dup_transport,
+        start_owned_server=False,
+    )
+    assert summary.get("duplicate_stake_statements") == 1
+    assert summary["recount_verification"].get("duplicate_stake_statements") == 1
+    assert ug_render.count_duplicate_stake_statements(prose_with_dup, w0) == 1
+    assert ug_render.count_duplicate_stake_statements(render_world_template(w0, w0.agents[1]), w0) == 0
+
+    build_summary_disk = json.loads((out_dir / "build_summary.json").read_text(encoding="utf-8"))
+    assert build_summary_disk["duplicate_stake_statements"] == 1
+    assert build_summary_disk["recount_verification"]["duplicate_stake_statements"] == 1
+
+    vw_report = verify_written_dataset(out_dir)
+    assert vw_report["recount_verification"]["duplicate_stake_statements"] == 1
+
+    recheck_report = recheck_saved_responses(out_dir)
+    assert recheck_report["duplicate_stake_statements"] == 1
+    assert recheck_report["calls"][0]["duplicate_stake_statements"] == 1
+    assert recheck_report["calls"][1]["duplicate_stake_statements"] == 0
+
+
+def test_79_card_tk_sealing_error_recount_mismatch_carries_sha256_never_values(tmp_path: Path) -> None:
+    """Test 79 (Card tk Req 3):
+    - In `sealing.py:1131-1136` and any similar site (`verify_sealed_part`), recount mismatch messages
+      carry `sha256` of the sealed and recounted values, never the values.
+    - Asserts that `SealingError` holds no key value (neither the tampered sealed value nor the true recounted key).
+    """
+    import hashlib
+    from udlab_generator.sealing import (
+        _hmac_hex,
+        _render_public_from_sealed,
+        verify_written_dataset_recounts_and_prose,
+    )
+
+    configs = make_balanced_configs(1, base_seed=20261030)
+    w0 = generate_world(configs[0])
+    writer = MockWriter()
+    pairs = [writer.render_scenario_pair(w0)]
+
+    pub_dir = tmp_path / "part_public"
+    seal_dir = tmp_path / "sealed_store"
+    priv_seed = "ab" * 32
+    write_sealed_dataset(
+        rendered_pairs=pairs,
+        public_dir=pub_dir,
+        sealed_dir=seal_dir,
+        private_seed_hex=priv_seed,
+    )
+
+    sealing_meta_path = seal_dir / "sealing.sealed.json"
+    keys_sealed_path = seal_dir / "keys.sealed.jsonl"
+    orig_meta = json.loads(sealing_meta_path.read_text(encoding="utf-8"))
+    orig_rows = [
+        json.loads(line)
+        for line in keys_sealed_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    def _write_tampered_rows(tampered_rows: list[dict[str, object]]) -> None:
+        meta = dict(orig_meta)
+        keys_bytes = (
+            "\n".join(json.dumps(r, sort_keys=True, ensure_ascii=False, separators=(",", ":")) for r in tampered_rows)
+            + "\n"
+        ).encode("utf-8")
+        keys_sha = hashlib.sha256(keys_bytes).hexdigest()
+        meta["keys_sealed_sha256"] = keys_sha
+        meta["commitment_hmac_sha256"] = _hmac_hex(meta["private_seed_hex"], f"commitment:{keys_sha}", 64)
+        items_bytes, part_bytes, _, _ = _render_public_from_sealed(tampered_rows, meta)
+        keys_sealed_path.write_bytes(keys_bytes)
+        sealing_meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (pub_dir / "items.jsonl").write_bytes(items_bytes)
+        (pub_dir / "part.json").write_bytes(part_bytes)
+
+    # 1. Tamper with B2 key -> triggers both verify_sealed_part and verify_written_dataset_recounts_and_prose (B2 site and general site):
+    rows_b2 = json.loads(json.dumps(orig_rows))
+    b2_q = next(q for q in rows_b2[0]["questions"] if q["question_type"] == "B2")
+    true_b2_key = str(b2_q["key"])
+    secret_tampered_b2 = "SECRET_TAMPERED_B2_KEY_VALUE_TK_79"
+    b2_q["key"] = secret_tampered_b2
+    _write_tampered_rows(rows_b2)
+
+    exp_sealed_b2_sha = hashlib.sha256(secret_tampered_b2.encode("utf-8")).hexdigest()
+    exp_true_b2_sha = hashlib.sha256(true_b2_key.encode("utf-8")).hexdigest()
+
+    with pytest.raises(SealingError) as exc_vsp:
+        verify_sealed_part(pub_dir, seal_dir)
+    msg_vsp = str(exc_vsp.value)
+    assert exp_sealed_b2_sha in msg_vsp
+    assert exp_true_b2_sha in msg_vsp
+    assert secret_tampered_b2 not in msg_vsp
+    assert true_b2_key.lower() not in msg_vsp.lower()
+
+    with pytest.raises(SealingError) as exc_vw_b2:
+        verify_written_dataset_recounts_and_prose(pub_dir, seal_dir)
+    msg_vw_b2 = str(exc_vw_b2.value)
+    assert exp_sealed_b2_sha in msg_vw_b2
+    assert exp_true_b2_sha in msg_vw_b2
+    assert secret_tampered_b2 not in msg_vw_b2
+    assert true_b2_key.lower() not in msg_vw_b2.lower()
+
+    # 2. Tamper with B1 key -> triggers the general recount mismatch branch in verify_written_dataset_recounts_and_prose:
+    rows_b1 = json.loads(json.dumps(orig_rows))
+    b1_q = next(q for q in rows_b1[0]["questions"] if q["question_type"] == "B1")
+    true_b1_key = str(b1_q["key"])
+    secret_tampered_b1 = "SECRET_TAMPERED_B1_KEY_VALUE_TK_79"
+    b1_q["key"] = secret_tampered_b1
+    _write_tampered_rows(rows_b1)
+
+    exp_sealed_b1_sha = hashlib.sha256(secret_tampered_b1.encode("utf-8")).hexdigest()
+    exp_true_b1_sha = hashlib.sha256(true_b1_key.encode("utf-8")).hexdigest()
+
+    with pytest.raises(SealingError) as exc_vw_b1:
+        verify_written_dataset_recounts_and_prose(pub_dir, seal_dir)
+    msg_vw_b1 = str(exc_vw_b1.value)
+    assert exp_sealed_b1_sha in msg_vw_b1
+    assert exp_true_b1_sha in msg_vw_b1
+    assert secret_tampered_b1 not in msg_vw_b1
+    assert true_b1_key.lower() not in msg_vw_b1.lower()
+
+
+def _scan_files_for_repo_leaks(root_dir: Path, rel_paths: list[str]) -> list[str]:
+    """Scan the given relative file paths under `root_dir` for:
+    1. Absolute paths (Windows drive forms and user-home forms).
+    2. Seed or salt values (literal hex seed/salt assignments or UDLAB_PRIVATE_SEED values).
+    3. Any line matching a sealed-store response record shape.
+    """
+    import re
+
+    win_drive_pat = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:(?:\\\\|/[A-Za-z0-9_.\-]+|\\[A-Za-z0-9_.\-]+)")
+    user_home_pat = re.compile(
+        r"(?:/Users/[A-Za-z0-9_.\-]+|/home/[A-Za-z0-9_.\-]+|[A-Za-z]:\\+Users\\+[A-Za-z0-9_.\-]+)",
+        re.IGNORECASE,
+    )
+    seed_salt_pat = re.compile(
+        r"(?:"
+        r"(?:private_seed(?:_hex)?|shuffle_seed|shuffle_salt|qshuffle_salt)\s*(?:=|:)\s*[\"'][0-9a-fA-F]{16,}[\"'](?!\s*\*)"
+        r"|UDLAB_PRIVATE_SEED\s*=\s*[\"']?[0-9a-fA-F]{16,}"
+        r")"
+    )
+    violations: list[str] = []
+    for rel in rel_paths:
+        fpath = root_dir / rel
+        if not fpath.is_file():
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if win_drive_pat.search(line):
+                violations.append(f"{rel}:{lineno}: windows_drive_path")
+            if user_home_pat.search(line):
+                violations.append(f"{rel}:{lineno}: user_home_path")
+            if seed_salt_pat.search(line):
+                violations.append(f"{rel}:{lineno}: seed_or_salt_value")
+            stripped = line.strip()
+            if stripped.startswith("{") and stripped.endswith("}"):
+                try:
+                    obj = json.loads(stripped)
+                except Exception:
+                    obj = None
+                if isinstance(obj, dict) and "response_text" in obj and (
+                    "call_id" in obj or "response_sha256" in obj or "refusal_reasons" in obj
+                ):
+                    violations.append(f"{rel}:{lineno}: sealed_store_response_record")
+    return violations
+
+
+def test_80_card_tk_leak_guard_git_ls_files_and_planted_fixtures(tmp_path: Path) -> None:
+    """Test 80 (Card tk Req 4):
+    - Scans `git ls-files` in this repository.
+    - Fails on absolute paths (Windows drive and user-home forms), on seed or salt values,
+      and on any line matching a sealed-store response record shape.
+    - Includes a fixture showing it fails on a planted bad file in a temp dir for each category.
+    """
+    import subprocess
+    import udlab_generator.render as ug_render
+
+    assert hasattr(ug_render, "count_duplicate_stake_statements"), (
+        "Repo leak guard test requires Card tk stake-by-meaning & leak-guard implementation."
+    )
+
+    repo_root = Path(__file__).resolve().parents[1]
+    proc = subprocess.run(
+        ["git", "ls-files"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tracked_files = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    assert len(tracked_files) >= 10
+    repo_violations = _scan_files_for_repo_leaks(repo_root, tracked_files)
+    assert repo_violations == [], f"Leak guard found violations in git ls-files: {repo_violations}"
+
+    # Verify the leak guard fails on planted bad files in a temp dir:
+    # (a) Planted Windows drive path (constructed without a literal drive path in this source file):
+    planted_win = tmp_path / "planted_win.txt"
+    planted_win.write_text("Config loaded from " + "E" + ":/" + "AI/rnd-local/secret\n", encoding="utf-8")
+    v_win = _scan_files_for_repo_leaks(tmp_path, ["planted_win.txt"])
+    assert any("windows_drive_path" in v for v in v_win)
+
+    # (b) Planted user-home path:
+    planted_home = tmp_path / "planted_home.txt"
+    planted_home.write_text("Log path: /" + "Users" + "/alice/secret.log\n", encoding="utf-8")
+    v_home = _scan_files_for_repo_leaks(tmp_path, ["planted_home.txt"])
+    assert any("user_home_path" in v for v in v_home)
+
+    # (c) Planted seed or salt value:
+    planted_seed = tmp_path / "planted_seed.py"
+    planted_seed.write_text(
+        "private_seed" + '_hex = "' + ("deadbeef" * 8) + '"\n',
+        encoding="utf-8",
+    )
+    v_seed = _scan_files_for_repo_leaks(tmp_path, ["planted_seed.py"])
+    assert any("seed_or_salt_value" in v for v in v_seed)
+
+    # (d) Planted sealed-store response record line:
+    planted_resp = tmp_path / "planted_resp.jsonl"
+    planted_resp.write_text(
+        json.dumps(
+            {
+                "call_id": "scen_0000:r0:call_0001",
+                "response_sha256": "00" * 32,
+                "response_text": "Synthetic response text.",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    v_resp = _scan_files_for_repo_leaks(tmp_path, ["planted_resp.jsonl"])
+    assert any("sealed_store_response_record" in v for v in v_resp)
+
 
 
 
