@@ -244,6 +244,9 @@ NEGATION_PHRASES: tuple[str, ...] = (
     "no one",
     "nobody",
     "nothing",
+    "under no circumstances",
+    "by no means",
+    "at no time",
     "failed to",
     "refused to",
     "forgot to",
@@ -274,15 +277,18 @@ _NEGATION_PATTERN = re.compile(
 _ADJACENT_ROOMS_COULD_NOT_HEAR_RE = re.compile(r"\badjacent\s+rooms\s+could\s+not\s+hear\b", re.IGNORECASE)
 _COULD_NOT_SEE_RE = re.compile(r"\bcould\s+not\s+see\b", re.IGNORECASE)
 _FRONTED_TIME_PLACE_NEG_RE = re.compile(
-    r"\b(?:not\s+long\s+(?:after(?:wards?)?|before)|not\s+far\s+(?:from|away|off)(?:\s+[a-z0-9_-]+){0,6}|without\s+(?:delay|pause|waiting|hesitation))\b",
+    r"\b(?:not\s+long\s+(?:after(?:wards?)?|before)\s*,"
+    r"|not\s+far\s+(?:from|away|off)(?:\s+[a-z0-9_-]+){0,6}\s*,"
+    r"|without\s+(?:delay|pause|waiting|hesitation)(?:\s*,|\b))",
     re.IGNORECASE,
 )
-_POST_ARG_ADJUNCT_NEG_RE = re.compile(
-    r"(?:\bwithout\s+(?:[a-z]+ing\b[^,;:.]*|delay|pause|waiting|hesitation|incident|difficulty)\b"
-    r"|\bnot\s+(?:far\s+(?:from|away|off)|long\s+(?:after(?:wards?)?|before))\b[^,;:.]*"
-    r"|,\s*(?:which|where|who)\b[^.;:]*)",
+_POST_ARG_BENIGN_NEG_RE = re.compile(
+    r"(?:\bwithout\s+(?:delay|pause|waiting|hesitation|incident|difficulty)\b"
+    r"|\bnot\s+(?:far\s+(?:from|away|off)|long\s+(?:after(?:wards?)?|before))\b[^,;:.]*)",
     re.IGNORECASE,
 )
+_POST_ARG_GERUND_CLAUSE_RE = re.compile(r"\bwithout\s+([a-z]+ing)\b[^,;:.]*", re.IGNORECASE)
+_POST_ARG_REL_CLAUSE_RE = re.compile(r",\s*(?:which|where|who)\b[^.;:]*", re.IGNORECASE)
 _ARTICLE_OPT_RE = r"(?:(?:the|a|an)\s+)?"
 
 SETUP_CHECKLIST_ORDER: str = (
@@ -311,6 +317,68 @@ _ACTION_VERBS_BY_KIND: dict[str, tuple[str, ...]] = {
     "see": SIGHTING_VERBS,
     "say": ("said", "stated", "spoke", "announced", "uttered", "claimed", "reported", "told"),
     "message": ("sent", "messaged", "texted", "transmitted", "notified", "wrote"),
+}
+_FOLDED_LEAVE_ENTER_VERBS: tuple[str, ...] = tuple(
+    dict.fromkeys(_ACTION_VERBS_BY_KIND["enter"] + _ACTION_VERBS_BY_KIND["leave"])
+)
+
+_GERUNDS_BY_KIND: dict[str, frozenset[str]] = {
+    "enter": frozenset(
+        {"walking", "entering", "stepping", "coming", "arriving", "going", "moving", "returning", "proceeding", "crossing"}
+    ),
+    "leave": frozenset(
+        {"exiting", "leaving", "departing", "walking", "heading", "going", "stepping", "proceeding", "crossing", "moving"}
+    ),
+    "move": frozenset(
+        {
+            "moving",
+            "stepping",
+            "placing",
+            "putting",
+            "shifting",
+            "transferring",
+            "adjusting",
+            "turning",
+            "pulling",
+            "setting",
+            "relocating",
+            "carrying",
+            "taking",
+        }
+    ),
+    "see": frozenset(
+        {
+            "observing",
+            "looking",
+            "seeing",
+            "spotting",
+            "noticing",
+            "inspecting",
+            "checking",
+            "viewing",
+            "watching",
+            "glancing",
+            "examining",
+        }
+    ),
+    "say": frozenset(
+        {"saying", "stating", "speaking", "announcing", "uttering", "claiming", "reporting", "telling"}
+    ),
+    "message": frozenset(
+        {"sending", "messaging", "texting", "transmitting", "notifying", "writing"}
+    ),
+}
+_BASE_VERBS_BY_KIND: dict[str, frozenset[str]] = {
+    "enter": frozenset({"walk", "enter", "step", "come", "arrive", "go", "move", "return", "proceed", "cross"}),
+    "leave": frozenset({"exit", "leave", "depart", "walk", "head", "go", "step", "proceed", "cross", "move"}),
+    "move": frozenset(
+        {"move", "step", "place", "put", "shift", "transfer", "adjust", "turn", "pull", "set", "relocate", "carry", "take"}
+    ),
+    "see": frozenset(
+        {"observe", "look", "see", "spot", "notice", "inspect", "check", "view", "watch", "glance", "examine"}
+    ),
+    "say": frozenset({"say", "state", "speak", "announce", "utter", "claim", "report", "tell"}),
+    "message": frozenset({"send", "message", "text", "transmit", "notify", "write"}),
 }
 
 
@@ -624,18 +692,32 @@ _REPAIR_TARGET_BY_CHECK_ID: dict[str, str] = {
 }
 
 
-def format_repair_retry_line(exc: RenderCheckError) -> str:
-    """Format a single repair-retry line asking for one targeted fix while keeping the earlier text unchanged, without key content or model text."""
+def format_repair_retry_line(exc: RenderCheckError, *, retry_form: str = "multi_turn") -> str:
+    """Format a single repair-retry line asking for one targeted fix, without key content or model text.
+
+    When `retry_form == 'single_turn'`, omits 'keep your earlier text' / 'leaving every other sentence unchanged'
+    because attempt-0 text is not included in the single-turn fallback request.
+    """
+    is_single_turn = retry_form == "single_turn"
     if exc.event_index is not None and exc.event_kind is not None:
         hint = _REPAIR_HINT_BY_EVENT_KIND.get(
             exc.event_kind,
             "states the logged event with its actor, verb, locations, and room",
         )
         if exc.check_id == "c_fidelity_event_order":
+            if is_single_turn:
+                return (
+                    f"Ensure event {exc.event_index} ({exc.event_kind}, check {exc.check_id}) "
+                    f"appears in its logged chronological position and {hint}."
+                )
             return (
                 f"Keep your earlier text exactly as it was; change only event {exc.event_index} "
                 f"({exc.event_kind}, check {exc.check_id}) so that it appears in its logged chronological position "
                 f"and {hint}, leaving every other sentence unchanged."
+            )
+        if is_single_turn:
+            return (
+                f"Ensure event {exc.event_index} ({exc.event_kind}, check {exc.check_id}) {hint}."
             )
         return (
             f"Keep your earlier text exactly as it was; change only event {exc.event_index} "
@@ -644,6 +726,8 @@ def format_repair_retry_line(exc: RenderCheckError) -> str:
     target_item = _REPAIR_TARGET_BY_CHECK_ID.get(exc.check_id, "the failing item")
     rule_spec = WRITER_PROSE_REQUIREMENTS_BY_ID.get(exc.check_id)
     rule_hint = rule_spec.rule_text if rule_spec is not None else "satisfy this mandatory constraint."
+    if is_single_turn:
+        return f"Ensure {target_item} (check {exc.check_id}) satisfies: {rule_hint}"
     return (
         f"Keep your earlier text exactly as it was; change only {target_item} "
         f"(check {exc.check_id}) so that it satisfies: {rule_hint} Leave every other sentence unchanged."
@@ -1015,6 +1099,57 @@ def _post_verb_core_args_end(frame_low: str, verb_end: int, ev: Event) -> int:
     return verb_end + max_rel_end
 
 
+def _adjunct_negates_event_verb_object_or_location(clause_low: str, ev: Event) -> bool:
+    """Return True if a post-argument `without <gerund>` or relative clause negates `ev`'s own verb, target object, or location."""
+    kind_gerunds = _GERUNDS_BY_KIND.get(ev.kind, frozenset())
+    m_gerund = _POST_ARG_GERUND_CLAUSE_RE.match(clause_low.strip())
+    if m_gerund is not None:
+        gerund_word = m_gerund.group(1).lower()
+        if gerund_word in kind_gerunds:
+            return True
+    else:
+        for g_word in kind_gerunds:
+            if re.search(rf"\b{re.escape(g_word)}\b", clause_low):
+                return True
+        kind_verbs = set(_ACTION_VERBS_BY_KIND.get(ev.kind, ())) | set(_BASE_VERBS_BY_KIND.get(ev.kind, frozenset()))
+        if ev.kind in ("enter", "leave"):
+            kind_verbs |= (
+                set(_ACTION_VERBS_BY_KIND["enter"])
+                | set(_ACTION_VERBS_BY_KIND["leave"])
+                | set(_BASE_VERBS_BY_KIND["enter"])
+                | set(_BASE_VERBS_BY_KIND["leave"])
+            )
+        for v_word in kind_verbs:
+            if re.search(rf"\b{re.escape(v_word)}\b", clause_low):
+                return True
+
+    for piece in (ev.target_object, ev.from_location, ev.to_location, ev.room):
+        if piece and re.search(rf"\b{re.escape(piece.lower())}\b", clause_low):
+            return True
+    return False
+
+
+def _strip_benign_post_arg_adjuncts(tail_low: str, ev: Event) -> str:
+    """Strip post-argument `without <gerund>` and relative clauses from `tail_low` only when they do not negate `ev`'s verb, object, or location."""
+    cleaned = _POST_ARG_BENIGN_NEG_RE.sub("", tail_low)
+
+    def _replace_gerund(m: re.Match[str]) -> str:
+        clause = m.group(0)
+        if _adjunct_negates_event_verb_object_or_location(clause, ev):
+            return clause
+        return ""
+
+    def _replace_rel(m: re.Match[str]) -> str:
+        clause = m.group(0)
+        if _NEGATION_PATTERN.search(clause) is not None and _adjunct_negates_event_verb_object_or_location(clause, ev):
+            return clause
+        return ""
+
+    cleaned = _POST_ARG_GERUND_CLAUSE_RE.sub(_replace_gerund, cleaned)
+    cleaned = _POST_ARG_REL_CLAUSE_RE.sub(_replace_rel, cleaned)
+    return cleaned
+
+
 def _verb_is_scoped_by_negation(
     frame_low: str,
     actor_start: int,
@@ -1040,7 +1175,7 @@ def _verb_is_scoped_by_negation(
         return True
 
     # 3. After `verb_end`: negation before the event's object and location (`[verb_end, core_end)`) scopes the VP
-    # and is refused; after `core_end`, non-scoping clauses/adjuncts (`_POST_ARG_ADJUNCT_NEG_RE`) are allowed.
+    # and is refused; after `core_end`, non-scoping clauses/adjuncts are allowed unless they negate the event's verb, object, or location.
     core_end = _post_verb_core_args_end(frame_low, verb_end, ev)
     core_span = frame_low[verb_end:core_end]
     cleaned_core = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", core_span)
@@ -1053,7 +1188,7 @@ def _verb_is_scoped_by_negation(
     cleaned_tail = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", post_arg_tail)
     if ev.kind == "see" and ev.occluded and ev.occluder:
         cleaned_tail = _COULD_NOT_SEE_RE.sub("", cleaned_tail)
-    cleaned_tail = _POST_ARG_ADJUNCT_NEG_RE.sub("", cleaned_tail)
+    cleaned_tail = _strip_benign_post_arg_adjuncts(cleaned_tail, ev)
     if _NEGATION_PATTERN.search(cleaned_tail) is not None:
         return True
     return False
@@ -1097,16 +1232,45 @@ def _ordered_from_to_positions(
     return False
 
 
-def _has_forbidden_event_negation(frame_low: str, ev: Event, all_parties: Sequence[str] = ()) -> bool:
+def _has_forbidden_event_negation(
+    frame_low: str,
+    ev: Event,
+    all_parties: Sequence[str] = (),
+    *,
+    action_verbs: Sequence[str] | None = None,
+) -> bool:
     """Return True if the event's verb in `frame_low` is scoped by any negation from `NEGATION_PHRASES` outside the allowed occluded-see blocking clause."""
     parties = all_parties if all_parties else (ev.actor, *([ev.recipient] if ev.recipient else []))
-    action_verbs = _ACTION_VERBS_BY_KIND.get(ev.kind, ())
-    if not _actor_precedes_verb_as_subject(frame_low, ev.actor, action_verbs, parties):
+    verbs = action_verbs if action_verbs is not None else _ACTION_VERBS_BY_KIND.get(ev.kind, ())
+    if not _actor_precedes_verb_as_subject(frame_low, ev.actor, verbs, parties):
         cleaned = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", frame_low)
         if ev.kind == "see" and ev.occluded and ev.occluder:
             cleaned = _COULD_NOT_SEE_RE.sub("", cleaned)
         return _NEGATION_PATTERN.search(cleaned) is not None
-    return not _actor_precedes_verb_as_subject(frame_low, ev.actor, action_verbs, parties, ev=ev)
+    return not _actor_precedes_verb_as_subject(frame_low, ev.actor, verbs, parties, ev=ev)
+
+
+def _sentence_has_folded_from_and_arrival(
+    s_low: str,
+    from_loc: str,
+    to_loc: str,
+) -> bool:
+    """Return True if `s_low` explicitly names both `from <from_loc>` and arrival at `<to_loc>` (`to/into/onto/in/at/entered/arrived in <to_loc>`)."""
+    from_esc = re.escape(from_loc.lower())
+    to_esc = re.escape(to_loc.lower())
+    if not re.search(rf"\bfrom\s+{_ARTICLE_OPT_RE}{from_esc}\b", s_low):
+        return False
+    if not re.search(
+        rf"\b(?:to|into|onto|in|at|entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}\b",
+        s_low,
+    ):
+        return False
+    return _ordered_from_to_positions(
+        s_low,
+        from_loc,
+        to_loc,
+        require_from_prep=True,
+    )
 
 
 def _preceding_sentence_is_matching_leave(
@@ -1148,31 +1312,25 @@ def _sentence_matches_folded_leave_enter(
         prev_sentence is None
         or prev_event is None
         or ev.kind != "enter"
+        or prev_event.kind != "leave"
+        or prev_event.actor != ev.actor
         or not ev.from_location
+        or not prev_event.from_location
+        or prev_event.from_location.lower() != ev.from_location.lower()
+        or prev_event.room.lower() != ev.from_location.lower()
         or not ev.to_location
+        or not prev_event.to_location
+        or prev_event.to_location.lower() != ev.to_location.lower()
     ):
         return False
-    if not _preceding_sentence_is_matching_leave(
-        prev_sentence, prev_event, ev, noise_threshold, world=world
-    ):
+    if not _sentence_matches_event(prev_sentence, prev_event, noise_threshold, world=world):
         return False
-    if not _sentence_matches_event(
-        prev_sentence, ev, noise_threshold, world=world
-    ):
+    if not _sentence_matches_event(prev_sentence, ev, noise_threshold, world=world):
         return False
-    prev_low = prev_sentence.lower()
-    to_esc = re.escape(ev.to_location.lower())
-    # Must assert arrival/entry at `to_location` (not merely "heading toward")
-    if not re.search(
-        rf"\b(?:to|into|onto|in|at|entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}\b",
-        prev_low,
-    ):
-        return False
-    return _ordered_from_to_positions(
-        prev_low,
+    return _sentence_has_folded_from_and_arrival(
+        prev_sentence.lower(),
         ev.from_location,
         ev.to_location,
-        require_from_prep=True,
     )
 
 
@@ -1184,6 +1342,8 @@ def _sentence_matches_event(
     *,
     prev_sentence: str | None = None,
     prev_event: Event | None = None,
+    next_sentence: str | None = None,
+    next_event: Event | None = None,
 ) -> bool:
     """Return True if `sentence` states `ev` with role-bound actor, action, object, ordered from/to, and room."""
     s_low = sentence.lower()
@@ -1194,11 +1354,52 @@ def _sentence_matches_event(
         if world is not None
         else (ev.actor, *([ev.recipient] if ev.recipient else []))
     )
-    if _has_forbidden_event_negation(frame_low, ev, all_parties):
+    is_folded_movement = (
+        ev.kind in ("enter", "leave")
+        and bool(ev.from_location and ev.to_location)
+        and _sentence_has_folded_from_and_arrival(
+            s_low,
+            ev.from_location or "",
+            ev.to_location or "",
+        )
+    )
+    if (
+        is_folded_movement
+        and ev.kind == "leave"
+        and next_sentence is not None
+        and next_event is not None
+        and next_event.kind == "enter"
+        and next_event.actor == ev.actor
+        and next_event.from_location
+        and next_event.to_location
+        and _actor_precedes_verb_as_subject(
+            next_sentence.lower(),
+            next_event.actor,
+            _FOLDED_LEAVE_ENTER_VERBS,
+            all_parties,
+            ev=next_event,
+        )
+        and _sentence_has_folded_from_and_arrival(
+            next_sentence.lower(),
+            next_event.from_location,
+            next_event.to_location,
+        )
+    ):
+        is_folded_movement = False
+    action_verbs: Sequence[str] = (
+        _FOLDED_LEAVE_ENTER_VERBS
+        if is_folded_movement
+        else _ACTION_VERBS_BY_KIND.get(ev.kind, ())
+    )
+    if _has_forbidden_event_negation(frame_low, ev, all_parties, action_verbs=action_verbs):
         return False
-    action_verbs = _ACTION_VERBS_BY_KIND.get(ev.kind, ())
     if not _actor_precedes_verb_as_subject(frame_low, ev.actor, action_verbs, all_parties, ev=ev):
         return False
+
+    if ev.target_object:
+        target_esc = re.escape(ev.target_object.lower())
+        if re.search(rf"\bno\s+{_ARTICLE_OPT_RE}{target_esc}\b", frame_low):
+            return False
 
     if ev.room.lower() not in frame_low:
         if ev.kind not in ("say", "message"):
@@ -1210,7 +1411,14 @@ def _sentence_matches_event(
             for o_room in other_rooms:
                 if o_room.lower() in frame_low:
                     return False
-            if not re.search(rf"\b(?:in|from|inside|at|of)\s+{_ARTICLE_OPT_RE}{re.escape(ev.room.lower())}\b", frame_low):
+            room_esc = re.escape(ev.room.lower())
+            # Strip any "not far from [the] <room>" before checking that the event's room is stated as the location
+            frame_for_room = re.sub(
+                rf"\bnot\s+far\s+from\s+{_ARTICLE_OPT_RE}{room_esc}\b",
+                "",
+                frame_low,
+            )
+            if not re.search(rf"\b(?:in|from|inside|at|of)\s+{_ARTICLE_OPT_RE}{room_esc}\b", frame_for_room):
                 return False
 
     if ev.kind in ("say", "message") and ev.room.lower() not in frame_low and world is not None:
@@ -1233,6 +1441,15 @@ def _sentence_matches_event(
             ev.to_location,
             require_from_prep=True,
         ):
+            # Prevent two consecutive folded movement sentences from covering one logged leave+enter pair:
+            if (
+                prev_sentence is not None
+                and prev_event is not None
+                and _sentence_matches_folded_leave_enter(
+                    prev_sentence, prev_event, ev, noise_threshold, world=world
+                )
+            ):
+                return False
             return True
         to_esc = re.escape(ev.to_location.lower())
         has_to_dest = bool(
@@ -1637,6 +1854,7 @@ def check_prose_render_fidelity(
     search_start = 0
     for ev_idx, ev in enumerate(world.events):
         prev_ev = world.events[ev_idx - 1] if ev_idx > 0 else None
+        next_ev = world.events[ev_idx + 1] if ev_idx + 1 < len(world.events) else None
         found_idx: int | None = None
         if (
             ev.kind == "enter"
@@ -1674,6 +1892,11 @@ def check_prose_render_fidelity(
                     )
                     else None
                 )
+                next_sent = (
+                    event_sentences[s_idx + 1]
+                    if s_idx + 1 < len(event_sentences)
+                    else None
+                )
                 if _sentence_matches_event(
                     event_sentences[s_idx],
                     ev,
@@ -1681,34 +1904,52 @@ def check_prose_render_fidelity(
                     world=world,
                     prev_sentence=prev_sent,
                     prev_event=prev_ev,
+                    next_sentence=next_sent,
+                    next_event=next_ev,
                 ) and not (
                     ev.kind == "leave"
                     and ev_idx + 1 < len(world.events)
                     and world.events[ev_idx + 1].kind == "enter"
                     and world.events[ev_idx + 1].actor == ev.actor
-                    and any(
-                        i not in matched_sentence_indices
-                        and _sentence_matches_event(
-                            event_sentences[i],
-                            ev,
-                            world.noise_threshold,
-                            world=world,
+                    and (
+                        (
+                            s_idx > search_start
+                            and s_idx - 1 not in matched_sentence_indices
+                            and ev.actor.lower() in event_sentences[s_idx - 1].lower()
+                            and _sentence_matches_folded_leave_enter(
+                                event_sentences[s_idx],
+                                ev,
+                                world.events[ev_idx + 1],
+                                world.noise_threshold,
+                                world=world,
+                            )
                         )
-                        and not _sentence_matches_folded_leave_enter(
-                            event_sentences[i],
-                            ev,
-                            world.events[ev_idx + 1],
-                            world.noise_threshold,
-                            world=world,
+                        or (
+                            any(
+                                i not in matched_sentence_indices
+                                and _sentence_matches_event(
+                                    event_sentences[i],
+                                    ev,
+                                    world.noise_threshold,
+                                    world=world,
+                                )
+                                and not _sentence_matches_folded_leave_enter(
+                                    event_sentences[i],
+                                    ev,
+                                    world.events[ev_idx + 1],
+                                    world.noise_threshold,
+                                    world=world,
+                                )
+                                for i in range(0, search_start)
+                            )
+                            and _sentence_matches_folded_leave_enter(
+                                event_sentences[s_idx],
+                                ev,
+                                world.events[ev_idx + 1],
+                                world.noise_threshold,
+                                world=world,
+                            )
                         )
-                        for i in range(0, search_start)
-                    )
-                    and _sentence_matches_folded_leave_enter(
-                        event_sentences[s_idx],
-                        ev,
-                        world.events[ev_idx + 1],
-                        world.noise_threshold,
-                        world=world,
                     )
                 ):
                     found_idx = s_idx
@@ -3439,9 +3680,8 @@ class OllamaWriter:
             call_id = f"{scenario_id}:r{rendering_index}:call_{call_index:04d}"
             call_seed = base_seed
             if attempt > 0 and last_exc is not None:
-                repair_line = format_repair_retry_line(last_exc)
-                repair_line_sha = _sha256_bytes(repair_line.encode("utf-8"))
-                repair_tokens = estimate_prompt_tokens(repair_line)
+                mt_repair_line = format_repair_retry_line(last_exc, retry_form="multi_turn")
+                mt_repair_tokens = estimate_prompt_tokens(mt_repair_line)
                 p0_tokens = (
                     attempt_0_eval_pair[0]
                     if attempt_0_eval_pair[0] > 0
@@ -3453,7 +3693,7 @@ class OllamaWriter:
                     else estimate_prompt_tokens(attempt_0_content or "")
                 )
                 multiturn_need = (
-                    p0_tokens + e0_tokens + repair_tokens + self._num_predict + NUM_CTX_MARGIN_TOKENS
+                    p0_tokens + e0_tokens + mt_repair_tokens + self._num_predict + NUM_CTX_MARGIN_TOKENS
                 )
                 if multiturn_need <= self._max_num_ctx:
                     if (
@@ -3485,6 +3725,8 @@ class OllamaWriter:
                             )
                     retry_form = "multi_turn"
                     retry_fallback_reason = ""
+                    repair_line = mt_repair_line
+                    repair_line_sha = _sha256_bytes(repair_line.encode("utf-8"))
                     attempt_messages = [
                         {
                             "role": "user",
@@ -3500,17 +3742,20 @@ class OllamaWriter:
                         },
                     ]
                     attempt_num_ctx = compute_num_ctx(
-                        p0_tokens + e0_tokens + repair_tokens,
+                        p0_tokens + e0_tokens + mt_repair_tokens,
                         self._num_predict,
                         margin=NUM_CTX_MARGIN_TOKENS,
                         step=NUM_CTX_STEP_TOKENS,
                     )
                 else:
                     retry_form = "single_turn"
+                    repair_line = format_repair_retry_line(last_exc, retry_form="single_turn")
+                    repair_line_sha = _sha256_bytes(repair_line.encode("utf-8"))
+                    st_repair_tokens = estimate_prompt_tokens(repair_line)
                     retry_fallback_reason = (
                         f"multiturn_need_exceeds_max_num_ctx: need={multiturn_need} "
                         f"(prompt_eval_count={p0_tokens} + eval_count={e0_tokens} + "
-                        f"repair_tokens={repair_tokens} + num_predict={self._num_predict} + "
+                        f"repair_tokens={mt_repair_tokens} + num_predict={self._num_predict} + "
                         f"margin={NUM_CTX_MARGIN_TOKENS}) > max_num_ctx={self._max_num_ctx}"
                     )
                     single_turn_prompt = f"{prompt_text.rstrip('\n')}\n{repair_line}"
@@ -3520,7 +3765,7 @@ class OllamaWriter:
                             "content": single_turn_prompt,
                         }
                     ]
-                    single_turn_tokens = p0_tokens + repair_tokens
+                    single_turn_tokens = p0_tokens + st_repair_tokens
                     if single_turn_tokens + self._num_predict + NUM_CTX_MARGIN_TOKENS <= self._max_num_ctx:
                         attempt_num_ctx = compute_num_ctx(
                             single_turn_tokens,

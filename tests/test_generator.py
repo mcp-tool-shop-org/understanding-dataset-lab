@@ -5118,7 +5118,15 @@ def test_59_card_sx_multiturn_fallback_not_cap(tmp_path: Path) -> None:
     assert len(retry_payload_over["messages"]) == 1
     assert retry_payload_over["messages"][0]["role"] == "user"
     orig_prompt_r1 = payloads_over[1]["messages"][0]["content"]
-    assert retry_payload_over["messages"][0]["content"] == f"{orig_prompt_r1.rstrip('\n')}\n{expected_repair}"
+    expected_single_repair = format_repair_retry_line(
+        RenderCheckError(
+            "missing stake",
+            check_id="c_fidelity_stake_edge",
+            failing_sentence=bad_stake,
+        ),
+        retry_form="single_turn",
+    )
+    assert retry_payload_over["messages"][0]["content"] == f"{orig_prompt_r1.rstrip('\n')}\n{expected_single_repair}"
     assert retry_payload_over["options"]["num_predict"] == DEFAULT_WRITER_NUM_PREDICT
     assert retry_payload_over["options"]["num_ctx"] <= 9216
 
@@ -5138,6 +5146,413 @@ def test_59_card_sx_multiturn_fallback_not_cap(tmp_path: Path) -> None:
         )
     ).hexdigest()
     assert retry_row_over["prompt_sha256"] == expected_single_sha
+
+
+def test_63_card_sz_folded_leave_enter_verbs_and_no_double_count() -> None:
+    """Test 63 (Card sz Req 1 & 2):
+    - Req 1: A folded sentence naming the actor, `from <from_room>` and arrival at `<to_room>` is accepted with any verb
+      in the union of the enter and leave sets:
+      - 'Dan entered the sorting room from the bindery room.' passes;
+      - 'Dan arrived in the sorting room from the bindery room.' passes;
+      - 'Dan moved from the bindery room to the sorting room.' passes;
+      - 'Dan went to the sorting room.' stays refused.
+    - Req 2: Two consecutive folded movement sentences cannot cover one logged leave+enter pair; the second is unlogged.
+      A folded sentence followed by a pure enter sentence ('Dan entered the sorting room.') still passes, counted once each.
+    """
+    from udlab_generator.render import (
+        _ACTION_VERBS_BY_KIND,
+        _sentence_matches_folded_leave_enter,
+    )
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[1]  # Dan
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    setup_dan = sj_setup.replace("Following Eva", "Following Dan")
+    ev_2 = w.events[1]  # leave by Dan: bindery room -> sorting room
+    ev_3 = w.events[2]  # enter by Dan: bindery room -> sorting room
+
+    # Base folded event list for scen_0000 (omitting separate enter sentences at indices 2, 4, 8, 12, 14, 20):
+    skip_indices = {2, 4, 8, 12, 14, 20}
+    folded_by_leave_idx = {
+        1: "Dan walked from the bindery room to the sorting room.",
+        3: "Cara walked from the bindery room to the sorting room.",
+        7: "Eva walked from the bindery room to the sorting room.",
+        11: "Cara walked from the sorting room to the bindery room.",
+        13: "Cara walked from the bindery room to the reading room.",
+        19: "Eva walked from the sorting room to the bindery room.",
+    }
+    base_folded_sents = [
+        folded_by_leave_idx.get(idx, sent)
+        for idx, sent in enumerate(sj_sents)
+        if idx not in skip_indices
+    ]
+
+    # Req 1: Three explicit brief sentences pass both _sentence_matches_folded_leave_enter and full check_rendered_prose:
+    req1_passing = (
+        "Dan entered the sorting room from the bindery room.",
+        "Dan arrived in the sorting room from the bindery room.",
+        "Dan moved from the bindery room to the sorting room.",
+    )
+    for s_pass in req1_passing:
+        assert _sentence_matches_folded_leave_enter(s_pass, ev_2, ev_3, w.noise_threshold, world=w), (
+            f"Expected folded sentence to match folded leave+enter: {s_pass!r}"
+        )
+        sents_try = list(base_folded_sents)
+        sents_try[1] = s_pass
+        assert check_rendered_prose(f"{setup_dan}\n\n{' '.join(sents_try)}", w, focal_agent=fa) == ()
+
+    # Every verb in the union of enter and leave sets passes when naming actor, from <from_room>, and arrival at <to_room>:
+    union_verbs = set(_ACTION_VERBS_BY_KIND["enter"]) | set(_ACTION_VERBS_BY_KIND["leave"])
+    for verb in sorted(union_verbs):
+        if verb == "entered":
+            cand = "Dan entered the sorting room from the bindery room."
+        elif verb == "arrived":
+            cand = "Dan arrived in the sorting room from the bindery room."
+        else:
+            cand = f"Dan {verb} from the bindery room into the sorting room."
+        assert _sentence_matches_folded_leave_enter(cand, ev_2, ev_3, w.noise_threshold, world=w), (
+            f"Expected union verb {verb!r} to pass folded leave+enter: {cand!r}"
+        )
+
+    # Req 1 negative direction: "Dan went to the sorting room." stays refused:
+    assert not _sentence_matches_folded_leave_enter(
+        "Dan went to the sorting room.", ev_2, ev_3, w.noise_threshold, world=w
+    )
+    sents_ref = list(base_folded_sents)
+    sents_ref[1] = "Dan went to the sorting room."
+    with pytest.raises(RenderCheckError) as exc_went:
+        check_rendered_prose(f"{setup_dan}\n\n{' '.join(sents_ref)}", w, focal_agent=fa)
+    assert exc_went.value.check_id == "c_fidelity_missing_event"
+    assert exc_went.value.failing_sentence == "Dan went to the sorting room."
+
+    # Req 2: Two consecutive folded movement sentences cannot cover one logged leave+enter pair; the second is unlogged:
+    for second_folded in (
+        "Dan walked from the bindery room to the sorting room.",
+        "Dan entered the sorting room from the bindery room.",
+        "Dan moved from the bindery room to the sorting room.",
+    ):
+        sents_double_folded = list(sj_sents)
+        sents_double_folded[1] = "Dan walked from the bindery room to the sorting room."
+        sents_double_folded[2] = second_folded
+        with pytest.raises(RenderCheckError) as exc_double:
+            check_rendered_prose(f"{setup_dan}\n\n{' '.join(sents_double_folded)}", w, focal_agent=fa)
+        assert exc_double.value.check_id == "c_fidelity_unlogged_event"
+        assert exc_double.value.failing_sentence == second_folded
+
+    # Req 2 positive direction: A folded sentence followed by a pure enter sentence ("Dan entered the sorting room.")
+    # still passes, counted once each:
+    sents_folded_then_pure_enter = list(sj_sents)
+    sents_folded_then_pure_enter[1] = "Dan walked from the bindery room to the sorting room."
+    sents_folded_then_pure_enter[2] = "Dan entered the sorting room."
+    assert check_rendered_prose(f"{setup_dan}\n\n{' '.join(sents_folded_then_pure_enter)}", w, focal_agent=fa) == ()
+
+
+def test_64_card_sz_post_argument_adjuncts() -> None:
+    """Test 64 (Card sz Req 3):
+    - A post-argument `without <gerund>` or relative clause is refused when it negates the event's own verb
+      (any verb of that kind), its target object, or its location.
+    - Refused:
+      - '...without seeing it.'
+      - '...without moving it.'
+      - '..., which was not in the linen bin.'
+      - '..., where Eva did not see the index reel.'
+    - Benign adjuncts stay passing:
+      - '...without touching it.'
+      - '..., not far from the doorway.'
+      - '..., which had not moved.'
+    """
+    from udlab_generator.render import _sentence_matches_event
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    ev_1 = w.events[0]  # see by Eva: index reel in linen bin in bindery room
+    ev_2 = w.events[1]  # leave by Dan: bindery room -> sorting room
+    ev_3 = w.events[2]  # enter by Dan: bindery room -> sorting room
+    ev_7 = w.events[6]  # move by Cara: brass ledger from intake bench to iron safe in sorting room
+
+    refused_see = (
+        "In the bindery room, Eva observed the index reel in the linen bin without seeing it.",
+        "In the bindery room, Eva observed the index reel in the linen bin without observing it.",
+        "In the bindery room, Eva observed the index reel in the linen bin without noticing it.",
+        "In the bindery room, Eva observed the index reel in the linen bin without spotting the index reel.",
+        "In the bindery room, Eva observed the index reel in the linen bin, which was not in the linen bin.",
+        "In the bindery room, Eva observed the index reel in the linen bin, which was not the index reel.",
+        "In the bindery room, Eva observed the index reel in the linen bin, where Eva did not see the index reel.",
+        "In the bindery room, Eva observed the index reel in the linen bin, who did not observe it.",
+    )
+    for s_ref in refused_see:
+        assert not _sentence_matches_event(s_ref, ev_1, w.noise_threshold, world=w), (
+            f"Expected self-contradictory post-arg adjunct on see to be refused: {s_ref!r}"
+        )
+        with pytest.raises(RenderCheckError) as exc_info:
+            check_rendered_prose(f"{sj_setup}\n\n{' '.join([s_ref, *sj_sents[1:]])}", w, focal_agent=fa)
+        assert exc_info.value.check_id == "c_fidelity_missing_event"
+
+    refused_move = (
+        "In the sorting room, Cara moved the brass ledger from the intake bench to the iron safe without moving it.",
+        "In the sorting room, Cara moved the brass ledger from the intake bench to the iron safe without placing it in the iron safe.",
+        "In the sorting room, Cara moved the brass ledger from the intake bench to the iron safe, which was not in the iron safe.",
+        "In the sorting room, Cara moved the brass ledger from the intake bench to the iron safe, where Cara did not move the brass ledger.",
+    )
+    for s_ref_m in refused_move:
+        assert not _sentence_matches_event(s_ref_m, ev_7, w.noise_threshold, world=w), (
+            f"Expected self-contradictory post-arg adjunct on move to be refused: {s_ref_m!r}"
+        )
+
+    assert not _sentence_matches_event(
+        "Dan walked from the bindery room to the sorting room without entering the sorting room.",
+        ev_3,
+        w.noise_threshold,
+        world=w,
+    )
+    assert not _sentence_matches_event(
+        "Dan walked from the bindery room to the sorting room without leaving the bindery room.",
+        ev_2,
+        w.noise_threshold,
+        world=w,
+    )
+
+    # Benign adjuncts stay passing:
+    passing_benign = (
+        "In the bindery room, Eva observed the index reel in the linen bin without touching it.",
+        "In the bindery room, Eva observed the index reel in the linen bin, not far from the doorway.",
+        "In the bindery room, Eva observed the index reel in the linen bin, which had not moved.",
+    )
+    for s_pass in passing_benign:
+        assert _sentence_matches_event(s_pass, ev_1, w.noise_threshold, world=w), (
+            f"Expected benign post-arg adjunct to stay passing: {s_pass!r}"
+        )
+        assert check_rendered_prose(f"{sj_setup}\n\n{' '.join([s_pass, *sj_sents[1:]])}", w, focal_agent=fa) == ()
+
+
+def test_65_card_sz_fronted_phrases_and_no() -> None:
+    """Test 65 (Card sz Req 4):
+    - A fronted 'not far from <the event's room>' must not count as the event's room.
+      'Not far from the bindery room, Eva observed...' is refused for an event in the bindery room
+      unless the room is also stated with in/at/inside.
+    - The fronted strip ends at the comma: 'Not long after failing, ...' is refused.
+    - 'no <target>' and sentence-level 'under no circumstances', 'by no means', and 'at no time' are refused.
+    - Keep 'Not long after, Eva observed...' and 'Without delay, Eva observed...' passing.
+    """
+    from udlab_generator.render import _sentence_matches_event
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    ev_1 = w.events[0]  # see by Eva: index reel in linen bin in bindery room
+    ev_7 = w.events[6]  # move by Cara: brass ledger from intake bench to iron safe in sorting room
+
+    # (a) Fronted "Not far from the bindery room, Eva observed..." refused unless room is also stated with in/at/inside:
+    s_not_far_room_only = "Not far from the bindery room, Eva observed the index reel in the linen bin."
+    assert not _sentence_matches_event(s_not_far_room_only, ev_1, w.noise_threshold, world=w)
+    with pytest.raises(RenderCheckError) as exc_nf:
+        check_rendered_prose(f"{sj_setup}\n\n{' '.join([s_not_far_room_only, *sj_sents[1:]])}", w, focal_agent=fa)
+    assert exc_nf.value.check_id == "c_fidelity_missing_event"
+
+    # When the room IS also stated with in/at/inside, or when "not far from the doorway" is used with "in the bindery room", it passes:
+    s_not_far_with_in_room = "Not far from the bindery room doorway, in the bindery room, Eva observed the index reel in the linen bin."
+    assert _sentence_matches_event(s_not_far_with_in_room, ev_1, w.noise_threshold, world=w)
+    s_not_far_room_plus_in = "Not far from the bindery room, inside the bindery room, Eva observed the index reel in the linen bin."
+    assert _sentence_matches_event(s_not_far_room_plus_in, ev_1, w.noise_threshold, world=w)
+
+    # (b) Fronted strip ends at the comma: "Not long after failing, ..." is refused:
+    refused_fronted_comma = (
+        "Not long after failing, in the bindery room, Eva observed the index reel in the linen bin.",
+        "Not long after refusing to help, in the bindery room, Eva observed the index reel in the linen bin.",
+        "Without delay or not, in the bindery room, Eva observed the index reel in the linen bin.",
+    )
+    for s_fc in refused_fronted_comma:
+        assert not _sentence_matches_event(s_fc, ev_1, w.noise_threshold, world=w), (
+            f"Expected non-plain fronted phrase before comma to be refused: {s_fc!r}"
+        )
+
+    # (c) "no <target>" and sentence-level "under no circumstances", "by no means", and "at no time" are refused:
+    refused_no_sentences = (
+        "Eva observed no index reel in the linen bin in the bindery room.",
+        "In the bindery room, Eva observed no index reel in the linen bin.",
+        "Under no circumstances, in the bindery room, Eva observed the index reel in the linen bin.",
+        "By no means, in the bindery room, Eva observed the index reel in the linen bin.",
+        "At no time, in the bindery room, Eva observed the index reel in the linen bin.",
+        "In the bindery room, under no circumstances did Eva observe the index reel in the linen bin.",
+        "In the bindery room, by no means did Eva observe the index reel in the linen bin.",
+        "In the bindery room, at no time did Eva observe the index reel in the linen bin.",
+    )
+    for s_no in refused_no_sentences:
+        assert not _sentence_matches_event(s_no, ev_1, w.noise_threshold, world=w), (
+            f"Expected 'no <target>' or sentence-level 'no' phrase to be refused: {s_no!r}"
+        )
+    assert not _sentence_matches_event(
+        "In the sorting room, Cara moved no brass ledger from the intake bench to the iron safe.",
+        ev_7,
+        w.noise_threshold,
+        world=w,
+    )
+
+    # (d) Keep "Not long after, Eva observed..." and "Without delay, Eva observed..." passing:
+    passing_fronted = (
+        "Not long after, Eva observed the index reel in the linen bin in the bindery room.",
+        "Without delay, Eva observed the index reel in the linen bin in the bindery room.",
+        "Not far from the doorway, in the bindery room, Eva observed the index reel in the linen bin.",
+    )
+    for s_pf in passing_fronted:
+        assert _sentence_matches_event(s_pf, ev_1, w.noise_threshold, world=w), (
+            f"Expected valid fronted phrase to stay passing: {s_pf!r}"
+        )
+        assert check_rendered_prose(f"{sj_setup}\n\n{' '.join([s_pf, *sj_sents[1:]])}", w, focal_agent=fa) == ()
+
+
+def test_66_card_sz_single_turn_repair_wording(tmp_path: Path) -> None:
+    """Test 66 (Card sz Req 5):
+    - Pass `retry_form` to `format_repair_retry_line`.
+    - When `retry_form == 'multi_turn'` (default), the line keeps the multi-turn wording ('Keep your earlier text...').
+    - When the retry falls back to `single_turn`, the repair line must not say 'keep your earlier text',
+      and uses a single-turn wording that names the one item to satisfy (without 'rewrite', key content, or model text).
+    - Tests both forms directly and end-to-end through `build_and_probe_dataset`.
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+    )
+    from udlab_generator.render import (
+        WRITER_PROSE_REQUIREMENTS,
+        format_repair_retry_line,
+    )
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    skeys = compute_scenario_keys(w0)
+    forbidden_key_strings = {
+        q.key.lower()
+        for q in skeys.questions
+        if isinstance(q.key, str) and q.key.lower() not in ("yes", "no", "none")
+    }
+
+    for req in WRITER_PROSE_REQUIREMENTS:
+        if req.check_id in ("c_fidelity_missing_event", "c_fidelity_event_order"):
+            for ev_k in ("enter", "leave", "move", "see", "say", "message"):
+                exc_ev = RenderCheckError(
+                    "synthetic event error",
+                    check_id=req.check_id,
+                    failing_sentence="synthetic secret sentence",
+                    event_index=7,
+                    event_kind=ev_k,
+                )
+                line_mt = format_repair_retry_line(exc_ev, retry_form="multi_turn")
+                line_st = format_repair_retry_line(exc_ev, retry_form="single_turn")
+                assert "keep your earlier text" in line_mt.lower()
+                assert "keep your earlier text" not in line_st.lower()
+                assert "earlier text" not in line_st.lower()
+                assert "leaving every other sentence unchanged" not in line_st.lower()
+                assert f"event 7 ({ev_k}, check {req.check_id})" in line_st
+                assert "rewrite" not in line_st.lower()
+                assert "synthetic secret sentence" not in line_st
+                for k_str in forbidden_key_strings:
+                    assert k_str not in line_st.lower()
+        else:
+            exc_setup = RenderCheckError(
+                "synthetic setup error",
+                check_id=req.check_id,
+                failing_sentence="synthetic secret sentence",
+            )
+            line_mt = format_repair_retry_line(exc_setup, retry_form="multi_turn")
+            line_st = format_repair_retry_line(exc_setup, retry_form="single_turn")
+            assert "keep your earlier text" in line_mt.lower()
+            assert "keep your earlier text" not in line_st.lower()
+            assert "earlier text" not in line_st.lower()
+            assert "leave every other sentence unchanged" not in line_st.lower()
+            assert req.check_id in line_st
+            assert req.rule_text in line_st
+            assert "rewrite" not in line_st.lower()
+            assert "synthetic secret sentence" not in line_st
+            for k_str in forbidden_key_strings:
+                assert k_str not in line_st.lower()
+
+    # End-to-end check on both multi_turn and single_turn retries:
+    passing_r0 = render_world_template(w0, w0.agents[0])
+    passing_r1 = render_world_template(w0, w0.agents[1])
+    orig_stake = w0.stake_edges[0].description
+    bad_stake = "Gia is an absent party who depends on the location of the brass ledger for tomorrow's courier handoff."
+    failing_r0 = passing_r0.replace(orig_stake, bad_stake)
+    failing_r1 = passing_r1.replace(orig_stake, bad_stake)
+
+    seen_payloads: list[dict[str, Any]] = []
+
+    def _transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            assert payload is not None
+            idx = len(seen_payloads)
+            seen_payloads.append(payload)
+            if idx == 0:
+                return {
+                    "message": {"role": "assistant", "content": failing_r0},
+                    "done": True,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 3070,
+                    "eval_count": 814,
+                }
+            if idx == 1:
+                return {
+                    "message": {"role": "assistant", "content": passing_r0},
+                    "done": True,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 3950,
+                    "eval_count": 814,
+                }
+            if idx == 2:
+                return {
+                    "message": {"role": "assistant", "content": failing_r1},
+                    "done": True,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 3070,
+                    "eval_count": 2000,
+                }
+            return {
+                "message": {"role": "assistant", "content": passing_r1},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3180,
+                "eval_count": 814,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_dir = tmp_path / "sz_single_turn_wording"
+    build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        max_retries=1,
+        grant_id="test-grant-sz-wording",
+        http_transport=_transport,
+        start_owned_server=False,
+    )
+    gen_rows = [
+        json.loads(line)
+        for line in (out_dir / "generations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert gen_rows[1]["retry_form"] == "multi_turn"
+    assert "keep your earlier text" in gen_rows[1]["repair_line"].lower()
+    assert gen_rows[3]["retry_form"] == "single_turn"
+    assert "keep your earlier text" not in gen_rows[3]["repair_line"].lower()
+    assert "c_fidelity_stake_edge" in gen_rows[3]["repair_line"]
+    assert "the setup stake description" in gen_rows[3]["repair_line"]
+
 
 
 def test_60_card_sx_attempt_0_carried_unmodified_and_sha_asserted(
