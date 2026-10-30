@@ -1281,10 +1281,10 @@ def _build_event_trace(
         step += 1
 
     # Side events for `U` (unknowable) and `S` (settled twin) projected from `latent_state`:
-    note_surface = f"countertop in the {r_k_dest}"
+    note_source, note_surface = containers_by_room[r_k_dest]
     if config.u_is_who:
-        # `latent_state["note_item_placer"]` placed `note_item` on the countertop in `r_k_dest` prior to step 1 (unlogged),
-        # so only `a0` seeing it already on the countertop in `r_k_dest` is projected to the observable event log.
+        # `latent_state["note_item_placer"]` placed `note_item` in `note_surface` in `r_k_dest` prior to step 1 (unlogged),
+        # so only `a0` seeing it already in `note_surface` in `r_k_dest` is projected to the observable event log.
         events.append(
             Event(
                 step=step,
@@ -1340,14 +1340,14 @@ def _build_event_trace(
                 actor=settled_who,
                 room=r_k_dest,
                 target_object=domain.note_item,
-                from_location="dispatch folder",
+                from_location=note_source,
                 to_location=note_surface,
                 occluded=False,
             )
         )
         step += 1
         # Equalize `a0`'s step count across `u_is_who` so `len(agent_sent_indices)` does not leak into P/K,
-        # and confirm `a0` sees `note_item` on the countertop in the same room `r_k_dest`.
+        # and confirm `a0` sees `note_item` in `note_surface` in the same room `r_k_dest`.
         events.append(
             Event(
                 step=step,
@@ -1376,7 +1376,7 @@ def _build_event_trace(
                 room=r_hub,
                 target_object=domain.note_item,
                 to_location=note_surface,
-                utterance=f"I placed the {domain.note_item} on the {note_surface}.",
+                utterance=f"I placed the {domain.note_item} in the {note_surface}.",
                 occluded=False,
                 noise_level=noise_threshold + 10,
             )
@@ -1654,7 +1654,7 @@ def generate_world(config: ScenarioConfig) -> World:
             causal_preconditions=(fid_shared,),
         )
 
-    who_q_text = f"Who placed the {domain.note_item} on the countertop?"
+    who_q_text = f"Who placed the {domain.note_item}?"
     why_q_text = f"Why did {a1} adjust the {domain.side_mechanism}?"
 
     if config.u_is_who:
@@ -1664,7 +1664,7 @@ def generate_world(config: ScenarioConfig) -> World:
             alternative_a=a1,
             alternative_b=a2,
             target_agent=a0,
-            side_action_desc=f"placing the {domain.note_item} on the countertop",
+            side_action_desc=f"placing the {domain.note_item}",
             trace_a=trace_a,
             trace_b=trace_b,
             latent_state_a=latent_state_a,
@@ -1695,7 +1695,7 @@ def generate_world(config: ScenarioConfig) -> World:
             question_text=who_q_text,
             settled_answer=a2,
             target_agent=a2,
-            side_action_desc=f"placing the {domain.note_item} on the countertop",
+            side_action_desc=f"placing the {domain.note_item}",
         )
 
     world = World(
@@ -1740,6 +1740,7 @@ def generate_world(config: ScenarioConfig) -> World:
     )
     from udlab_generator.keys import (
         validate_belief_forcing,
+        validate_event_locations,
         validate_hearing,
         validate_object_locations,
         validate_occlusion,
@@ -1750,6 +1751,7 @@ def generate_world(config: ScenarioConfig) -> World:
     validate_occlusion(world)
     validate_belief_forcing(world)
     validate_hearing(world)
+    validate_event_locations(world)
     validate_object_locations(world)
     validate_placing_fairness(world)
     return world

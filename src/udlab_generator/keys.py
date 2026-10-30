@@ -1124,8 +1124,34 @@ def validate_hearing(world: World) -> None:
             )
 
 
+def validate_event_locations(world: World) -> None:
+    """Validate that every location an event uses is a declared container, fixture, station, or room in `world`."""
+    all_containers = {c for pair in world.containers_by_room.values() for c in pair}
+    all_fixtures = set(world.fixtures_by_room.values())
+    valid_stations = {CONTAINER_BAY_STATION, FAR_SIDE_ALCOVE_STATION, "intake bench", "latch position A", "latch position B"}
+    all_rooms = set(world.rooms)
+    declared_locations = all_containers | all_fixtures | valid_stations | all_rooms
+
+    for ev in world.events:
+        for field_name, loc in (("room", ev.room), ("from_location", ev.from_location), ("to_location", ev.to_location)):
+            if not loc:
+                continue
+            for r in world.rooms:
+                if loc != r and r in loc:
+                    raise ValueError(
+                        f"Scenario {world.scenario_id} step {ev.step} event location error: "
+                        f"{field_name} {loc!r} embeds room name {r!r}."
+                    )
+            if loc not in declared_locations:
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} event location error: "
+                    f"{field_name} {loc!r} is not a declared container, fixture, station, or room."
+                )
+
+
 def validate_object_locations(world: World) -> None:
-    """Validate per-object room tracking: every countertop/shared surface is per-room, and any object seen or moved at a place is in that room at that step."""
+    """Validate per-object room tracking: every location is declared per-room, and any object seen or moved at a place is in that room at that step."""
+    validate_event_locations(world)
     room_by_container: dict[str, str] = {
         c: r for r, pair in world.containers_by_room.items() for c in pair
     }
@@ -1149,7 +1175,7 @@ def validate_object_locations(world: World) -> None:
         if ev.kind not in ("move", "see") or is_station_transition_event(ev, world):
             continue
 
-        # Check per-room container, fixture, occluder, and shared-surface ("countertop in the <room>") room consistency:
+        # Check per-room container, fixture, and occluder room consistency:
         for loc in (ev.target_object, ev.from_location, ev.to_location):
             if not loc:
                 continue
@@ -1168,13 +1194,6 @@ def validate_object_locations(world: World) -> None:
                     f"Scenario {world.scenario_id} step {ev.step} object location error: "
                     f"occluder '{loc}' belongs to '{room_by_occluder[loc]}', not '{ev.room}'."
                 )
-            if "countertop" in loc:
-                expected_surface = f"countertop in the {ev.room}"
-                if loc != expected_surface:
-                    raise ValueError(
-                        f"Scenario {world.scenario_id} step {ev.step} object location error: "
-                        f"countertop surface '{loc}' does not match per-room surface '{expected_surface}'."
-                    )
 
         target = ev.target_object
         if not target or target in all_containers or target in all_fixtures or target in all_occluders:

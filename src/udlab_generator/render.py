@@ -1031,6 +1031,11 @@ def format_repair_retry_line(
             exc.event_kind,
             "states the logged event with its actor, verb, locations, and room",
         )
+        pos_clause = (
+            "at the start of the events"
+            if exc.event_index <= 1
+            else f"immediately after the sentence for event {exc.event_index - 1}"
+        )
         if exc.check_id == "c_fidelity_event_order":
             if is_single_turn:
                 return (
@@ -1039,8 +1044,8 @@ def format_repair_retry_line(
                 )
             if resolved_kind == "absent":
                 return (
-                    f"Keep your earlier text as it was; add one sentence naming event {exc.event_index} "
-                    f"({exc.event_kind}, check {exc.check_id}) in its logged chronological position "
+                    f"Keep your earlier text as it was; add one sentence for event {exc.event_index} "
+                    f"{pos_clause} ({exc.event_kind}, check {exc.check_id}) "
                     f"so that it {hint}, leaving every other sentence unchanged."
                 )
             return (
@@ -1051,16 +1056,17 @@ def format_repair_retry_line(
         if is_single_turn:
             if resolved_kind == "absent":
                 return (
-                    f"Include one sentence naming event {exc.event_index} ({exc.event_kind}, check {exc.check_id}) "
-                    f"so that it {hint}."
+                    f"Add one sentence for event {exc.event_index} {pos_clause} "
+                    f"({exc.event_kind}, check {exc.check_id}) so that it {hint}."
                 )
             return (
                 f"Ensure event {exc.event_index} ({exc.event_kind}, check {exc.check_id}) {hint}."
             )
         if resolved_kind == "absent":
             return (
-                f"Keep your earlier text as it was; add one sentence naming event {exc.event_index} "
-                f"({exc.event_kind}, check {exc.check_id}) so that it {hint}, leaving every other sentence unchanged."
+                f"Keep your earlier text as it was; add one sentence for event {exc.event_index} "
+                f"{pos_clause} ({exc.event_kind}, check {exc.check_id}) "
+                f"so that it {hint}, leaving every other sentence unchanged."
             )
         return (
             f"Keep your earlier text exactly as it was; change only event {exc.event_index} "
@@ -2701,7 +2707,7 @@ def _render_event_sentence(event: Event, focal_agent: str, noise_threshold: int)
             f" behind the {event.occluder}, which blocked the line of sight for other occupants in the {event.room}"
             if event.occluded and event.occluder
             else f" in open view at the {CONTAINER_BAY_STATION}"
-            if event.from_location not in ("latch position A", "dispatch folder")
+            if event.from_location != "latch position A"
             else " in open view"
         )
         return (

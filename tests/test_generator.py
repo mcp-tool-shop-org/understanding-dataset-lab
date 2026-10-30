@@ -1381,10 +1381,12 @@ def test_17_object_locations_and_two_rooms_world_raises(tmp_path: Path) -> None:
         w = generate_world(cfg)
         validate_obj_fn(w)
 
-    # Hand-built two-rooms world: Dora puts note_item on countertop in room A, then Hana sees it on countertop in room B
+    # Hand-built two-rooms world: Dora puts note_item in r_a's container, then Hana sees it in r_b's container
     w0 = generate_world(configs[0])
     r_a, r_b = w0.doorways[0]
     note_obj = next(d.note_item for d in ug.world.DOMAINS if d.name == w0.domain_name)
+    c_a0, c_a1 = w0.containers_by_room[r_a]
+    c_b0, c_b1 = w0.containers_by_room[r_b]
     two_rooms_events = w0.events + (
         Event(
             step=len(w0.events) + 1,
@@ -1392,8 +1394,8 @@ def test_17_object_locations_and_two_rooms_world_raises(tmp_path: Path) -> None:
             actor=w0.agents[2],
             room=r_a,
             target_object=note_obj,
-            from_location="dispatch folder",
-            to_location=f"countertop in the {r_a}",
+            from_location=c_a0,
+            to_location=c_a1,
         ),
         Event(
             step=len(w0.events) + 2,
@@ -1401,8 +1403,8 @@ def test_17_object_locations_and_two_rooms_world_raises(tmp_path: Path) -> None:
             actor=w0.agents[0],
             room=r_b,
             target_object=note_obj,
-            from_location=f"countertop in the {r_b}",
-            to_location=f"countertop in the {r_b}",
+            from_location=c_b1,
+            to_location=c_b1,
         ),
     )
     two_rooms_world = replace(
@@ -1421,9 +1423,10 @@ def test_17_object_locations_and_two_rooms_world_raises(tmp_path: Path) -> None:
     receipt = write_sealed_dataset(valid_pairs, pub_dir, seal_dir, private_seed_hex="cd" * 32)
     meta = json.loads(receipt.sealing_meta_path.read_text(encoding="utf-8"))
     for ev_dict in meta["scenarios"]["scen_0000"]["events"]:
-        if ev_dict["kind"] == "see" and ev_dict["target_object"] and "countertop" in str(ev_dict.get("to_location", "")):
+        if ev_dict["kind"] == "see" and ev_dict["target_object"] == note_obj:
             other_room = next(r for r in meta["scenarios"]["scen_0000"]["rooms"] if r != ev_dict["room"])
-            ev_dict["to_location"] = f"countertop in the {other_room}"
+            other_cont = meta["scenarios"]["scen_0000"]["containers_by_room"][other_room][1]
+            ev_dict["to_location"] = other_cont
             break
     receipt.sealing_meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     with pytest.raises(SealingError, match="object location|countertop|validation failed"):
@@ -1510,6 +1513,7 @@ def test_18_placing_fairness_rule() -> None:
                 ),
             ]
         )
+    c2_0, c2_1 = w_s_who.containers_by_room[a2_room]
     filtered_evs.append(
         Event(
             step=len(filtered_evs) + 1,
@@ -1517,8 +1521,8 @@ def test_18_placing_fairness_rule() -> None:
             actor=w_s_who.agents[2],
             room=a2_room,
             target_object=note_obj,
-            from_location="dispatch folder",
-            to_location=f"countertop in the {a2_room}",
+            from_location=c2_0,
+            to_location=c2_1,
         )
     )
     reindexed = tuple(replace(ev, step=idx) for idx, ev in enumerate(filtered_evs, start=1))
@@ -2399,7 +2403,7 @@ def _build_natural_model_prose_scen_0000() -> tuple[str, str]:
         '"The seal stamp is stored in the cedar shelf." Cara announced at 60 dB in the reading room. '
         "In the bindery room, Eva looked at the humidity dial in the far-side alcove in open view. "
         '"Update for Gia: the brass ledger is stored at the maple cubby," Cara texted to Gia from the reading room. '
-        "In the bindery room, Eva saw the unsigned transfer slip on the countertop in the bindery room in open view. "
+        "In the bindery room, Eva saw the unsigned transfer slip in the copper rack in open view. "
         "In the sorting room, Dan turned the overhead louver from latch position A to latch position B in open view. "
         '"I adjusted the overhead louver to clear binding dust from the bench." Dan stated at 20 dB in the sorting room. '
         "From the far-side alcove in the sorting room, Dan glanced toward the iron safe, though the rolling pillar blocked the container bay. "
@@ -2982,7 +2986,7 @@ def _build_sj_writer_in_the_loop_scen_0000() -> tuple[str, list[str]]:
         'In the reading room, Cara announced at 60 dB: "The seal stamp is stored in the cedar shelf."',
         "In the bindery room, Eva spotted the humidity dial in open view.",
         'In the reading room, Cara texted to Gia: "Update for Gia: the brass ledger is stored at the maple cubby."',
-        "In the bindery room, Eva noticed the unsigned transfer slip on the countertop in the bindery room in open view.",
+        "In the bindery room, Eva noticed the unsigned transfer slip in the copper rack in open view.",
         "In the sorting room, Dan adjusted the overhead louver from latch position A to latch position B in open view.",
         'In the sorting room, Dan stated at 20 dB: "I adjusted the overhead louver to clear binding dust from the bench."',
         "In the sorting room, from the far-side alcove, Dan watched the iron safe, though the rolling pillar blocked the sightline.",
@@ -3167,7 +3171,7 @@ def test_42_writer_in_the_loop_scen_0000_passes_and_fault_per_event_check_id_ref
             "c_fidelity_unlogged_placer",
             [
                 *sj_sents[:25],
-                "In the bindery room, after Eva placed the unsigned transfer slip, Eva noticed the unsigned transfer slip on the countertop in the bindery room in open view.",
+                "In the bindery room, after Eva placed the unsigned transfer slip, Eva noticed the unsigned transfer slip in the copper rack in open view.",
                 *sj_sents[26:],
             ],
         ),
@@ -7896,7 +7900,9 @@ def test_83_card_tn_repair_wording_absent_altered_false_forms(tmp_path: Path) ->
         )
         line_ev = format_repair_retry_line(exc_ev)
         if f_kind == "absent":
-            assert line_ev.startswith("Keep your earlier text as it was; add one sentence naming event 5 ")
+            assert line_ev.startswith(
+                "Keep your earlier text as it was; add one sentence for event 5 immediately after the sentence for event 4 "
+            )
         else:
             assert line_ev.startswith("Keep your earlier text exactly as it was; change only event 5 ")
         assert "synthetic secret event sentence" not in line_ev
@@ -8001,6 +8007,253 @@ def test_83_card_tn_repair_wording_absent_altered_false_forms(tmp_path: Path) ->
         "Keep your earlier text exactly as it was; change only the false setup statement"
     )
     assert gen_rows[3]["repair_line_sha256"] == hashlib.sha256(gen_rows[3]["repair_line"].encode("utf-8")).hexdigest()
+
+
+def test_84_card_tr_step28_declared_locations_and_event_location_validator(tmp_path: Path) -> None:
+    """Test 84 (Card tr Reqs 3 & 4):
+    - The planted note_item move (and see/say) uses declared world locations in that room (containers_by_room[ev.room]),
+      never undeclared 'dispatch folder' or 'countertop in the <room>'.
+    - No location name embeds a room name anywhere in the generator.
+    - validate_event_locations (called at generation and at --verify-written / verify_sealed_part) verifies that
+      every location an event uses is a declared container, fixture, station, or room, and rejects any undeclared
+      location ('dispatch folder', 'countertop in the <room>') or embedded room name.
+    """
+    import udlab_generator as ug
+    from udlab_generator.world import CONTAINER_BAY_STATION, DOMAINS, FAR_SIDE_ALCOVE_STATION
+
+    validate_ev_loc_fn = getattr(ug, "validate_event_locations", None)
+    configs = make_balanced_configs(300, base_seed=20261030)
+    valid_stations = {CONTAINER_BAY_STATION, FAR_SIDE_ALCOVE_STATION, "intake bench", "latch position A", "latch position B"}
+
+    # First check a scenario where the planted note_item move lands at step 28 (scen_0024), then all 300 scenarios:
+    ordered_configs = sorted(configs, key=lambda c: (c.scenario_id != "scen_0024", c.u_is_who, c.scenario_id))
+    for cfg in ordered_configs:
+        w = generate_world(cfg)
+        all_containers = {c for pair in w.containers_by_room.values() for c in pair}
+        all_fixtures = set(w.fixtures_by_room.values())
+        all_rooms = set(w.rooms)
+        declared_locs = all_containers | all_fixtures | valid_stations | all_rooms
+        dom = next(d for d in DOMAINS if d.name == w.domain_name)
+
+        for ev in w.events:
+            for loc in (ev.room, ev.from_location, ev.to_location):
+                if not loc:
+                    continue
+                assert loc in declared_locs, (
+                    f"{w.scenario_id} step {ev.step} ({ev.kind}): undeclared event location {loc!r}"
+                )
+                for r in w.rooms:
+                    assert not (loc != r and r in loc), (
+                        f"{w.scenario_id} step {ev.step} ({ev.kind}): location {loc!r} embeds room name {r!r}"
+                    )
+            if ev.target_object == dom.note_item and ev.kind in ("move", "see"):
+                room_conts = set(w.containers_by_room[ev.room])
+                assert ev.from_location in room_conts, (
+                    f"{w.scenario_id} step {ev.step}: note_item from_location {ev.from_location!r} not in {room_conts}"
+                )
+                assert ev.to_location in room_conts, (
+                    f"{w.scenario_id} step {ev.step}: note_item to_location {ev.to_location!r} not in {room_conts}"
+                )
+        assert callable(validate_ev_loc_fn), "validate_event_locations must be exported by udlab_generator."
+        validate_ev_loc_fn(w)
+
+    # Verify old 5ea83830 step-28 move ("dispatch folder" -> "countertop in the <room>") is refused
+    # by validate_event_locations, validate_object_locations, verify_sealed_part, and --verify-written:
+    w_s_who = next(generate_world(c) for c in configs if not c.u_is_who)
+    dom_s = next(d for d in DOMAINS if d.name == w_s_who.domain_name)
+    note_move_ev = next(ev for ev in w_s_who.events if ev.kind == "move" and ev.target_object == dom_s.note_item)
+    old_step28_events = tuple(
+        replace(
+            ev,
+            from_location="dispatch folder",
+            to_location=f"countertop in the {ev.room}",
+        )
+        if ev.step == note_move_ev.step
+        else ev
+        for ev in w_s_who.events
+    )
+    old_step28_world = replace(w_s_who, events=old_step28_events)
+    with pytest.raises(ValueError, match="event location|declared|embeds room"):
+        validate_ev_loc_fn(old_step28_world)
+
+    # Also test --verify-written / verify_sealed_part refusal when a sealed world has the old step-28 locations:
+    out_dir = tmp_path / "tr_verify_written_ev_loc"
+    build_and_probe_dataset(
+        count=4,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="mock",
+    )
+    assert cli_main(["--verify-written", str(out_dir)]) == 0
+    sealing_meta_path = out_dir / "sealed_store" / "sealing.sealed.json"
+    meta = json.loads(sealing_meta_path.read_text(encoding="utf-8"))
+    for scen_dict in meta["scenarios"].values():
+        for ev_dict in scen_dict["events"]:
+            if ev_dict.get("target_object") in {d.note_item for d in DOMAINS}:
+                ev_dict["from_location"] = "dispatch folder"
+                ev_dict["to_location"] = f"countertop in the {ev_dict['room']}"
+                break
+        break
+    sealing_meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(SealingError, match="event location|declared|embeds room|validation failed"):
+        verify_sealed_part(out_dir / "part_public", out_dir / "sealed_store")
+    assert cli_main(["--verify-written", str(out_dir)]) == 1
+
+
+def test_85_card_tr_absent_event_repair_position_and_order_refusal(tmp_path: Path) -> None:
+    """Test 85 (Card tr Req 7):
+    - For an ABSENT event, format_repair_retry_line names the position:
+      '...add one sentence for event N immediately after the sentence for event N-1 ...'
+      (and 'at the start of the events' for event 1).
+    - Generated from check_id and the absent flag, recorded with its sha256 in generations.jsonl.
+    - Tested with a made-up case where the absent event (event 28) is inserted in the wrong place
+      (refused as c_fidelity_event_order) and in the right place (passes).
+    """
+    import hashlib
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+    )
+    from udlab_generator.render import format_repair_retry_line
+
+    # 1. Direct unit checks on event 1 vs event N > 1 for absent flag:
+    exc_ev1 = RenderCheckError(
+        "missing event 1",
+        check_id="c_fidelity_missing_event",
+        failing_sentence="synthetic sentence",
+        event_index=1,
+        event_kind="see",
+        failure_kind="absent",
+    )
+    line_ev1 = format_repair_retry_line(exc_ev1)
+    assert "add one sentence for event 1 at the start of the events" in line_ev1
+    assert "c_fidelity_missing_event" in line_ev1
+
+    exc_ev28 = RenderCheckError(
+        "missing event 28",
+        check_id="c_fidelity_missing_event",
+        failing_sentence="synthetic sentence",
+        event_index=28,
+        event_kind="move",
+        failure_kind="absent",
+    )
+    line_ev28 = format_repair_retry_line(exc_ev28)
+    assert "add one sentence for event 28 immediately after the sentence for event 27" in line_ev28
+    assert "c_fidelity_missing_event" in line_ev28
+
+    # 2. Made-up scenario where the settled note_item move event is absent on attempt 0:
+    from udlab_generator.world import DOMAINS
+    from udlab_generator.render import _split_prose_sentences
+
+    cfgs = make_balanced_configs(8, base_seed=20261030)
+    w = next(generate_world(c) for c in cfgs if not c.u_is_who)
+    dom = next(d for d in DOMAINS if d.name == w.domain_name)
+    note_ev = next(ev for ev in w.events if ev.kind == "move" and ev.target_object == dom.note_item)
+    note_idx = note_ev.step - 1  # 0-based index in w.events
+    assert note_ev.step >= 2
+    fa = w.agents[0]
+    full_prose = render_world_template(w, fa)
+    setup_para, events_para = full_prose.split("\n\n", 1)
+
+    ev_sents = _split_prose_sentences(events_para)
+    assert len(ev_sents) == len(w.events)
+
+    # Attempt 0: omit sentence for note_ev
+    sents_absent = ev_sents[:note_idx] + ev_sents[note_idx + 1 :]
+    prose_absent = f"{setup_para}\n\n{' '.join(sents_absent)}"
+    with pytest.raises(RenderCheckError) as exc_abs_ev:
+        check_rendered_prose(prose_absent, w, focal_agent=fa)
+    assert exc_abs_ev.value.check_id == "c_fidelity_missing_event"
+    assert exc_abs_ev.value.event_index == note_ev.step
+    assert exc_abs_ev.value.failure_kind == "absent"
+    repair_note = format_repair_retry_line(exc_abs_ev.value)
+    assert (
+        f"add one sentence for event {note_ev.step} immediately after the sentence for event {note_ev.step - 1}"
+        in repair_note
+    )
+
+    # Wrong-place insertion: insert note_ev sentence two events earlier -> refused as c_fidelity_event_order
+    sents_wrong_place = (
+        ev_sents[: note_idx - 2]
+        + [ev_sents[note_idx], ev_sents[note_idx - 2], ev_sents[note_idx - 1]]
+        + ev_sents[note_idx + 1 :]
+    )
+    prose_wrong_place = f"{setup_para}\n\n{' '.join(sents_wrong_place)}"
+    with pytest.raises(RenderCheckError) as exc_wrong_order:
+        check_rendered_prose(prose_wrong_place, w, focal_agent=fa)
+    assert exc_wrong_order.value.check_id == "c_fidelity_event_order"
+
+    # Right-place insertion: insert note_ev sentence immediately after event (note_ev.step - 1) -> passes
+    sents_right_place = sents_absent[:note_idx] + [ev_sents[note_idx]] + sents_absent[note_idx:]
+    prose_right_place = f"{setup_para}\n\n{' '.join(sents_right_place)}"
+    assert check_rendered_prose(prose_right_place, w, focal_agent=fa) == ()
+
+    # 3. Verify recording of repair_line and repair_line_sha256 in generations.jsonl on absent event:
+    w0 = generate_world(cfgs[0])
+    r0_full = render_world_template(w0, w0.agents[0])
+    r1_full = render_world_template(w0, w0.agents[1])
+    s0_p, e0_p = r0_full.split("\n\n", 1)
+    e0_list = _split_prose_sentences(e0_p)
+    # Omit event 1 on r0 attempt 0, omit event 5 on r1 attempt 0:
+    r0_absent_ev1 = f"{s0_p}\n\n{' '.join(e0_list[1:])}"
+    s1_p, e1_p = r1_full.split("\n\n", 1)
+    e1_list = _split_prose_sentences(e1_p)
+    r1_absent_ev5 = f"{s1_p}\n\n{' '.join(e1_list[:4] + e1_list[5:])}"
+
+    scripted_Texts = [r0_absent_ev1, r0_full, r1_absent_ev5, r1_full]
+    c_idx = 0
+
+    def _transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal c_idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            out_txt = scripted_Texts[c_idx]
+            c_idx += 1
+            return {
+                "message": {"role": "assistant", "content": out_txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3050,
+                "eval_count": 800,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_dir = tmp_path / "tr_absent_event_repair"
+    build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        max_retries=1,
+        grant_id="test-grant-tr-85",
+        http_transport=_transport,
+        start_owned_server=False,
+    )
+    gen_rows = [
+        json.loads(line)
+        for line in (out_dir / "generations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(gen_rows) == 4
+    assert "add one sentence for event 1 at the start of the events" in gen_rows[1]["repair_line"]
+    assert gen_rows[1]["repair_line_sha256"] == hashlib.sha256(gen_rows[1]["repair_line"].encode("utf-8")).hexdigest()
+    assert "add one sentence for event 5 immediately after the sentence for event 4" in gen_rows[3]["repair_line"]
+    assert gen_rows[3]["repair_line_sha256"] == hashlib.sha256(gen_rows[3]["repair_line"].encode("utf-8")).hexdigest()
+
 
 
 

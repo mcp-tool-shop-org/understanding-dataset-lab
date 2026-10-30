@@ -19,6 +19,7 @@ from udlab_generator.keys import (
     build_public_pressure_probe_template,
     compute_scenario_keys,
     validate_belief_forcing,
+    validate_event_locations,
     validate_hearing,
     validate_object_locations,
     validate_occlusion,
@@ -615,6 +616,7 @@ def write_sealed_dataset(
             validate_occlusion(w_obj)
             validate_belief_forcing(w_obj)
             validate_hearing(w_obj)
+            validate_event_locations(w_obj)
             validate_object_locations(w_obj)
             validate_placing_fairness(w_obj)
             serialized_worlds[w_obj.scenario_id] = _serialize_world(w_obj)
@@ -627,6 +629,7 @@ def write_sealed_dataset(
                 validate_occlusion(w_obj)
                 validate_belief_forcing(w_obj)
                 validate_hearing(w_obj)
+                validate_event_locations(w_obj)
                 validate_object_locations(w_obj)
                 validate_placing_fairness(w_obj)
                 serialized_all_worlds[w_obj.scenario_id] = _serialize_world(w_obj)
@@ -753,6 +756,7 @@ def verify_sealed_part(public_dir: Path, sealed_dir: Path) -> None:
                 validate_occlusion(w_obj)
                 validate_belief_forcing(w_obj)
                 validate_hearing(w_obj)
+                validate_event_locations(w_obj)
                 validate_object_locations(w_obj)
                 validate_placing_fairness(w_obj)
             except ValueError as exc:
