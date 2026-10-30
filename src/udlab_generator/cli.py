@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from collections.abc import Callable, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 import os
@@ -23,10 +23,13 @@ from udlab_generator.render import (
     DEFAULT_WRITER_MAX_NUM_CTX,
     DEFAULT_WRITER_MODEL_PIN,
     DEFAULT_WRITER_NUM_PREDICT,
+    DEFAULT_WRITER_THINK,
+    DEFAULT_WRITER_THINK_NUM_PREDICT,
     GENERATIONS_FILENAME,
     NUM_CTX_MARGIN_TOKENS,
     NUM_CTX_STEP_TOKENS,
     GenerationCallRecord,
+    MaxNumCtxRefusalError,
     MockWriter,
     OllamaHttpTransport,
     OllamaWriter,
@@ -100,6 +103,8 @@ def verify_written_dataset(output_dir: Path) -> dict[str, object]:
     1. Runs canonical `verify_sealed_part`, prose checks (a)-(d), independent B2 derivation
        from the stated rule sentence alone, and all independent recounts (`P, K, B1, B2, X, D, S, U`).
     2. Runs `--probe-only` (`run_probe_only`) on the written `sealed_store/keys.sealed.jsonl`.
+    3. Validates `generations.jsonl` existence, record count (`>= num_rows`), pinned `manifest_digest`,
+       `done_reason == "stop"`, and `checks_passed == True` for every kept scenario rendering.
     """
     public_dir = output_dir / "part_public"
     sealed_dir = output_dir / "sealed_store"
@@ -108,13 +113,63 @@ def verify_written_dataset(output_dir: Path) -> dict[str, object]:
 
     recount_report = verify_written_dataset_recounts_and_prose(public_dir, sealed_dir)
     probe_only_result = run_probe_only(keys_sealed_path)
+    num_rows = int(probe_only_result["num_rows"])  # type: ignore[arg-type]
 
     generations_sha256: str | None = None
     generations_count = 0
-    if generations_path.is_file():
+    generations_valid = False
+    generations_errors: list[str] = []
+
+    if not generations_path.is_file():
+        generations_errors.append(f"Missing required {GENERATIONS_FILENAME} in {output_dir}.")
+    else:
         gen_bytes = generations_path.read_bytes()
         generations_sha256 = hashlib.sha256(gen_bytes).hexdigest()
-        generations_count = sum(1 for line in gen_bytes.decode("utf-8").splitlines() if line.strip())
+        gen_lines = [line for line in gen_bytes.decode("utf-8").splitlines() if line.strip()]
+        generations_count = len(gen_lines)
+        if generations_count < num_rows:
+            generations_errors.append(
+                f"generations_count ({generations_count}) is less than num_rows ({num_rows})."
+            )
+        kept_by_rendering: dict[tuple[str, int], dict[str, Any]] = {}
+        for line_idx, raw_line in enumerate(gen_lines, start=1):
+            try:
+                rec_obj = json.loads(raw_line)
+            except Exception as exc:
+                generations_errors.append(f"Invalid JSON on line {line_idx} of {GENERATIONS_FILENAME}: {exc}")
+                continue
+            if not isinstance(rec_obj, dict):
+                generations_errors.append(f"Non-object JSON on line {line_idx} of {GENERATIONS_FILENAME}.")
+                continue
+            if "think" not in rec_obj or not isinstance(rec_obj.get("think"), bool):
+                generations_errors.append(f"Missing boolean 'think' on line {line_idx} of {GENERATIONS_FILENAME}.")
+            sid = str(rec_obj.get("scenario_id") or "")
+            r_idx = rec_obj.get("rendering_index")
+            if sid and isinstance(r_idx, int) and not isinstance(r_idx, bool):
+                kept_by_rendering[(sid, r_idx)] = rec_obj
+
+        if len(kept_by_rendering) < num_rows:
+            generations_errors.append(
+                f"Only {len(kept_by_rendering)} distinct (scenario_id, rendering_index) calls in {GENERATIONS_FILENAME}, expected {num_rows}."
+            )
+        for (sid, r_idx), rec_obj in sorted(kept_by_rendering.items()):
+            got_digest = str(rec_obj.get("manifest_digest") or "")
+            pins_digest = str((rec_obj.get("pins") or {}).get("manifest_digest") or "")
+            if got_digest != DEFAULT_WRITER_MODEL_PIN.manifest_digest or (
+                pins_digest and pins_digest != DEFAULT_WRITER_MODEL_PIN.manifest_digest
+            ):
+                generations_errors.append(
+                    f"Call for ({sid}, r{r_idx}) has manifest_digest={got_digest!r}, expected {DEFAULT_WRITER_MODEL_PIN.manifest_digest!r}."
+                )
+            if rec_obj.get("done_reason") != "stop":
+                generations_errors.append(
+                    f"Call for ({sid}, r{r_idx}) has done_reason={rec_obj.get('done_reason')!r}, expected 'stop'."
+                )
+            if rec_obj.get("checks_passed", True) is not True or rec_obj.get("refusal_reasons"):
+                generations_errors.append(
+                    f"Call for ({sid}, r{r_idx}) did not pass prose checks (checks_passed={rec_obj.get('checks_passed')!r})."
+                )
+        generations_valid = len(generations_errors) == 0
 
     result: dict[str, object] = {
         "output_dir": str(output_dir),
@@ -122,10 +177,13 @@ def verify_written_dataset(output_dir: Path) -> dict[str, object]:
         "generations_path": str(generations_path) if generations_path.is_file() else None,
         "generations_sha256": generations_sha256,
         "generations_count": generations_count,
+        "generations_valid": generations_valid,
+        "generations_errors": generations_errors,
         "recount_verification": recount_report,
         "probe_only": probe_only_result,
         "passed": bool(
-            recount_report["independent_b2_verified"]
+            generations_valid
+            and recount_report["independent_b2_verified"]
             and recount_report["independent_recounts_verified"]
             and recount_report["prose_checks_passed"]
             and probe_only_result["probe_report"]["passed"]  # type: ignore[index]
@@ -146,8 +204,9 @@ def build_and_probe_dataset(
     output_dir: Path,
     writer_kind: str = "mock",
     vram_halt_mib: int = DEFAULT_VRAM_HALT_MIB,
-    num_predict: int = DEFAULT_WRITER_NUM_PREDICT,
+    num_predict: int | None = None,
     max_num_ctx: int = DEFAULT_WRITER_MAX_NUM_CTX,
+    think: bool = DEFAULT_WRITER_THINK,
     grant_id: str | None = None,
     resume: bool = False,
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
@@ -161,6 +220,23 @@ def build_and_probe_dataset(
     """Generate `count` scenarios, render via `mock` or `ollama` writer with checkpointing, seal, verify, and probe."""
     if writer_kind not in ("mock", "ollama"):
         raise ValueError(f"writer_kind must be 'mock' or 'ollama', got {writer_kind!r}.")
+    if max_num_ctx > DEFAULT_WRITER_MAX_NUM_CTX:
+        raise MaxNumCtxRefusalError(
+            f"REFUSED (MAX_NUM_CTX_CAP): max_num_ctx={max_num_ctx} exceeds the hard VRAM ceiling limit "
+            f"{DEFAULT_WRITER_MAX_NUM_CTX}."
+        )
+    resolved_think = bool(think)
+    resolved_num_predict = (
+        int(num_predict)
+        if num_predict is not None
+        else (DEFAULT_WRITER_THINK_NUM_PREDICT if resolved_think else DEFAULT_WRITER_NUM_PREDICT)
+    )
+    effective_writer_pin = replace(
+        DEFAULT_WRITER_MODEL_PIN,
+        num_predict=resolved_num_predict,
+        max_num_ctx=int(max_num_ctx),
+        think=resolved_think,
+    )
 
     configs = make_balanced_configs(count, base_seed=base_seed)
     worlds = [generate_world(cfg) for cfg in configs]
@@ -181,7 +257,7 @@ def build_and_probe_dataset(
         base_seed=base_seed,
         private_seed_hex=initial_private_seed,
         writer_kind=writer_kind,
-        writer_pin=DEFAULT_WRITER_MODEL_PIN,
+        writer_pin=effective_writer_pin,
     )
 
     if resume:
@@ -210,10 +286,11 @@ def build_and_probe_dataset(
             else (http_transport is None)
         )
         ollama_writer = OllamaWriter(
-            model_pin=DEFAULT_WRITER_MODEL_PIN,
+            model_pin=effective_writer_pin,
             base_url=ollama_base_url,
-            num_predict=num_predict,
+            num_predict=resolved_num_predict,
             max_num_ctx=max_num_ctx,
+            think=resolved_think,
             vram_halt_mib=vram_halt_mib,
             grant_id=grant_id,
             http_transport=http_transport,
@@ -271,12 +348,23 @@ def build_and_probe_dataset(
                     json.dumps(messages, sort_keys=True, separators=(",", ":")).encode("utf-8")
                 ).hexdigest()
                 p_est = estimate_prompt_tokens(messages)
-                n_ctx = compute_num_ctx(
-                    p_est,
-                    num_predict,
-                    margin=NUM_CTX_MARGIN_TOKENS,
-                    step=NUM_CTX_STEP_TOKENS,
-                )
+                if resolved_think and p_est + resolved_num_predict <= max_num_ctx:
+                    n_ctx = min(
+                        max_num_ctx,
+                        compute_num_ctx(
+                            p_est,
+                            resolved_num_predict,
+                            margin=NUM_CTX_MARGIN_TOKENS,
+                            step=NUM_CTX_STEP_TOKENS,
+                        ),
+                    )
+                else:
+                    n_ctx = compute_num_ctx(
+                        p_est,
+                        resolved_num_predict,
+                        margin=NUM_CTX_MARGIN_TOKENS,
+                        step=NUM_CTX_STEP_TOKENS,
+                    )
                 rec = GenerationCallRecord(
                     call_id=call_id,
                     call_index=call_index,
@@ -284,25 +372,27 @@ def build_and_probe_dataset(
                     rendering_index=r_idx,
                     focal_agent=rend.focal_agent,
                     operation="render_scenario_mock",
-                    model=DEFAULT_WRITER_MODEL_PIN.ollama_tag,
-                    manifest_digest=DEFAULT_WRITER_MODEL_PIN.manifest_digest,
-                    model_layer_digest=DEFAULT_WRITER_MODEL_PIN.model_layer_digest,
-                    licence_id=DEFAULT_WRITER_MODEL_PIN.licence_id,
+                    model=effective_writer_pin.ollama_tag,
+                    manifest_digest=effective_writer_pin.manifest_digest,
+                    model_layer_digest=effective_writer_pin.model_layer_digest,
+                    licence_id=effective_writer_pin.licence_id,
                     prompt_sha256=prompt_sha,
                     prompt_tokens_estimate=p_est,
                     prompt_eval_count=p_est,
                     eval_count=len(rend.prose.split()),
                     thinking_words=0,
-                    num_predict=num_predict,
+                    num_predict=resolved_num_predict,
                     num_ctx=n_ctx,
                     max_num_ctx=max_num_ctx,
-                    think=DEFAULT_WRITER_MODEL_PIN.think,
+                    think=resolved_think,
                     temperature=0.0,
                     done_reason="stop",
                     seconds=round(elapsed / 2.0, 6),
                     vram_peak_mib=0,
                     vram_halt_mib=vram_halt_mib,
                     grant_id="cpu-mock",
+                    checks_passed=True,
+                    refusal_reasons=(),
                 )
                 all_mock_calls.append(rec)
                 scen_calls.append(rec)
@@ -319,11 +409,28 @@ def build_and_probe_dataset(
         effective_grant_id = "cpu-mock"
         server_info = None
 
+    generations_bytes = generations_path.read_bytes() if generations_path.is_file() else b""
+    generations_sha256 = hashlib.sha256(generations_bytes).hexdigest()
+
+    writer_provenance: dict[str, Any] = {
+        "writer": writer_kind,
+        "writer_pin": effective_writer_pin.to_dict(),
+        "think": resolved_think,
+        "num_predict": resolved_num_predict,
+        "max_num_ctx": max_num_ctx,
+        "vram_halt_mib": vram_halt_mib,
+        "grant_id": effective_grant_id,
+        "generations_file": GENERATIONS_FILENAME,
+        "generations_sha256": generations_sha256,
+        "checkpoint_chain_head_sha256": checkpoint.chain_head_sha256,
+    }
+
     receipt = write_sealed_dataset(
         rendered_pairs=rendered_pairs,
         public_dir=public_dir,
         sealed_dir=sealed_dir,
         private_seed_hex=resolved_private_seed,
+        writer_provenance=writer_provenance,
     )
     recount_verification = verify_written_dataset_recounts_and_prose(public_dir, sealed_dir)
 
@@ -337,12 +444,9 @@ def build_and_probe_dataset(
     diversity_report = count_template_diversity(worlds)
     d_distribution = _summarize_d_key_patterns(sealed_rows)
 
-    generations_bytes = generations_path.read_bytes() if generations_path.is_file() else b""
-    generations_sha256 = hashlib.sha256(generations_bytes).hexdigest()
-
     summary: dict[str, object] = {
         "writer": writer_kind,
-        "writer_pin": DEFAULT_WRITER_MODEL_PIN.to_dict(),
+        "writer_pin": effective_writer_pin.to_dict(),
         "grant_id": effective_grant_id,
         "vram_halt_mib": vram_halt_mib,
         "vram_peak_mib": peak_vram_mib,
@@ -410,14 +514,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--num-predict",
         type=int,
-        default=DEFAULT_WRITER_NUM_PREDICT,
-        help=f"Total num_predict budget per writer call (default: {DEFAULT_WRITER_NUM_PREDICT}).",
+        default=None,
+        help=f"Total num_predict budget per writer call (default: {DEFAULT_WRITER_NUM_PREDICT} without --think, {DEFAULT_WRITER_THINK_NUM_PREDICT} with --think).",
     )
     parser.add_argument(
         "--max-num-ctx",
         type=int,
         default=DEFAULT_WRITER_MAX_NUM_CTX,
-        help=f"Maximum allowed num_ctx for writer calls (default: {DEFAULT_WRITER_MAX_NUM_CTX}).",
+        help=f"Maximum allowed num_ctx for writer calls (default and hard cap: {DEFAULT_WRITER_MAX_NUM_CTX}).",
+    )
+    parser.add_argument(
+        "--think",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_WRITER_THINK,
+        help="Enable thinking mode for the writer pass (default: off / think=False).",
     )
     parser.add_argument(
         "--grant-id",
@@ -466,6 +576,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         vram_halt_mib=args.vram_halt_mib,
         num_predict=args.num_predict,
         max_num_ctx=args.max_num_ctx,
+        think=bool(args.think),
         grant_id=args.grant_id,
         resume=args.resume,
     )

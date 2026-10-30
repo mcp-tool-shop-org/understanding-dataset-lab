@@ -92,7 +92,9 @@ PINNED_WRITER_LICENCE_LAYER_DIGEST: str = (
 )
 PINNED_WRITER_LICENCE_ID: str = "qwen3.6-35b-a3b-licence"
 DEFAULT_WRITER_NUM_PREDICT: int = 4096
+DEFAULT_WRITER_THINK_NUM_PREDICT: int = 5120
 DEFAULT_WRITER_MAX_NUM_CTX: int = 9216
+DEFAULT_WRITER_THINK: bool = False
 DEFAULT_VRAM_HALT_MIB: int = 26_000
 NUM_CTX_MARGIN_TOKENS: int = 256
 NUM_CTX_STEP_TOKENS: int = 1024
@@ -116,7 +118,7 @@ class PinnedWriterModelSpec:
     licence_id: str = PINNED_WRITER_LICENCE_ID
     max_num_ctx: int = DEFAULT_WRITER_MAX_NUM_CTX
     num_predict: int = DEFAULT_WRITER_NUM_PREDICT
-    think: bool = True
+    think: bool = DEFAULT_WRITER_THINK
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -335,55 +337,174 @@ _ACTION_VERBS_BY_KIND: dict[str, tuple[str, ...]] = {
     "enter": ("walked", "entered", "stepped", "came", "arrived", "went", "moved", "returned"),
     "leave": ("exited", "left", "departed", "walked", "headed", "went", "stepped"),
     "move": ("moved", "stepped", "placed", "put", "shifted", "transferred", "adjusted", "turned", "pulled", "set"),
-    "see": ("observed", "looked", "saw", "spotted", "noticed", "inspected", "checked", "viewed", "watched"),
+    "see": ("observed", "looked", "saw", "spotted", "noticed", "inspected", "checked", "viewed", "watched", "glanced"),
     "say": ("said", "stated", "spoke", "announced", "uttered", "claimed", "reported", "told"),
     "message": ("sent", "messaged", "texted", "transmitted", "notified", "wrote"),
 }
 
 
-def _sentence_matches_event(sentence: str, ev: Event, noise_threshold: int) -> bool:
-    """Return True if `sentence` states `ev` with its actor, action, object, place, and room."""
-    if _is_setup_sentence(sentence):
+def _actor_precedes_verb_as_subject(
+    s_low: str,
+    actor: str,
+    action_verbs: Sequence[str],
+    all_parties: Sequence[str],
+) -> bool:
+    """Return True if `actor` appears as the subject immediately preceding an action verb in `s_low`."""
+    if not action_verbs:
+        return bool(re.search(rf"\b{re.escape(actor.lower())}\b", s_low))
+    verb_alt = "|".join(re.escape(v) for v in action_verbs)
+    actor_esc = re.escape(actor.lower())
+    for m_act in re.finditer(rf"\b{actor_esc}\b", s_low):
+        # Ignore possessive occurrences such as "From Ana's station,"
+        after_actor = s_low[m_act.end() :]
+        if after_actor.startswith("'s") or after_actor.startswith("’s"):
+            continue
+        m_verb = re.search(rf"\b(?:{verb_alt})\b", after_actor)
+        if m_verb is None:
+            continue
+        between = after_actor[: m_verb.start()]
+        # No other party name (or second occurrence of actor) may intervene as the closer subject before the verb
+        intervening_party = any(
+            re.search(rf"\b{re.escape(p.lower())}\b", between)
+            for p in all_parties
+        )
+        if intervening_party:
+            continue
+        return True
+    return False
+
+
+def _ordered_from_to_positions(
+    s_low: str,
+    from_loc: str,
+    to_loc: str,
+    *,
+    require_from_prep: bool = True,
+) -> bool:
+    """Return True if `from_loc` appears in the source phrase strictly before `to_loc` in the destination phrase."""
+    from_esc = re.escape(from_loc.lower())
+    to_esc = re.escape(to_loc.lower())
+    if require_from_prep:
+        from_matches = list(
+            re.finditer(rf"\b(?:from|out of|exited|left|departed)\s+(?:the\s+)?{from_esc}\b", s_low)
+        )
+    else:
+        from_matches = list(re.finditer(rf"\b{from_esc}\b", s_low))
+    if not from_matches:
         return False
+
+    to_matches = list(
+        re.finditer(
+            rf"\b(?:to|into|toward|towards|for|onto|in|at|behind|around|entered|arrived\s+in)\s+(?:the\s+)?{to_esc}\b",
+            s_low,
+        )
+    )
+    if not to_matches:
+        return False
+
+    if re.search(rf"\b(?:entered|arrived\s+in)\s+(?:the\s+)?{to_esc}\b.*\bfrom\s+(?:the\s+)?{from_esc}\b", s_low):
+        return True
+
+    for fm in from_matches:
+        for tm in to_matches:
+            if fm.end() <= tm.start():
+                return True
+    return False
+
+
+def _sentence_matches_event(
+    sentence: str,
+    ev: Event,
+    noise_threshold: int,
+    world: World | None = None,
+) -> bool:
+    """Return True if `sentence` states `ev` with role-bound actor, action, object, ordered from/to, and room."""
     s_low = sentence.lower()
-    if not re.search(rf"\b{re.escape(ev.actor.lower())}\b", s_low):
+    all_parties: Sequence[str] = (
+        tuple(world.agents) + tuple(world.absent_parties)
+        if world is not None
+        else (ev.actor, *([ev.recipient] if ev.recipient else []))
+    )
+    action_verbs = _ACTION_VERBS_BY_KIND.get(ev.kind, ())
+    if not _actor_precedes_verb_as_subject(s_low, ev.actor, action_verbs, all_parties):
         return False
+
     if ev.room.lower() not in s_low:
         return False
-    action_verbs = _ACTION_VERBS_BY_KIND.get(ev.kind, ())
-    if action_verbs and not any(re.search(rf"\b{re.escape(v)}\b", s_low) for v in action_verbs):
-        return False
+
+    # Reject if another room from world.rooms is asserted as the room of an intra-room action
+    if world is not None and ev.kind not in ("enter", "leave"):
+        other_rooms = [r for r in world.rooms if r.lower() != ev.room.lower()]
+        for o_room in other_rooms:
+            if o_room.lower() in s_low:
+                return False
+        if not re.search(rf"\b(?:in|from|inside|at|of)\s+(?:the\s+)?{re.escape(ev.room.lower())}\b", s_low):
+            return False
 
     if ev.kind == "enter":
-        return bool(ev.from_location and ev.from_location.lower() in s_low)
+        if not (ev.from_location and ev.to_location):
+            return False
+        if world is not None:
+            allowed_rooms = {ev.room.lower(), ev.from_location.lower(), ev.to_location.lower()}
+            for o_room in world.rooms:
+                if o_room.lower() not in allowed_rooms and o_room.lower() in s_low:
+                    return False
+        return _ordered_from_to_positions(
+            s_low,
+            ev.from_location,
+            ev.to_location,
+            require_from_prep=True,
+        )
 
     if ev.kind == "leave":
-        return bool(ev.to_location and ev.to_location.lower() in s_low)
+        if not (ev.from_location and ev.to_location):
+            return False
+        if world is not None:
+            allowed_rooms = {ev.room.lower(), ev.from_location.lower(), ev.to_location.lower()}
+            for o_room in world.rooms:
+                if o_room.lower() not in allowed_rooms and o_room.lower() in s_low:
+                    return False
+        return _ordered_from_to_positions(
+            s_low,
+            ev.from_location,
+            ev.to_location,
+            require_from_prep=False,
+        )
 
     if ev.kind == "move":
         if is_station_transition_event(ev):
-            return bool(
+            if not (
                 ev.target_object
                 and ev.target_object.lower() in s_low
                 and ev.from_location
-                and ev.from_location.lower() in s_low
                 and ev.to_location
-                and ev.to_location.lower() in s_low
+            ):
+                return False
+            return _ordered_from_to_positions(
+                s_low,
+                ev.from_location,
+                ev.to_location,
+                require_from_prep=True,
             )
         if not (
             ev.target_object
             and ev.target_object.lower() in s_low
             and ev.from_location
-            and ev.from_location.lower() in s_low
             and ev.to_location
-            and ev.to_location.lower() in s_low
+        ):
+            return False
+        if not _ordered_from_to_positions(
+            s_low,
+            ev.from_location,
+            ev.to_location,
+            require_from_prep=True,
         ):
             return False
         if ev.occluded and ev.occluder:
             if ev.occluder.lower() not in s_low or "blocked" not in s_low:
                 return False
         else:
-            if "open view" not in s_low:
+            if "in open view" not in s_low or "blocked" in s_low:
                 return False
         return True
 
@@ -396,7 +517,7 @@ def _sentence_matches_event(sentence: str, ev: Event, noise_threshold: int) -> b
                 and "blocked" in s_low
                 and FAR_SIDE_ALCOVE_STATION.lower() in s_low
             )
-        if "open view" not in s_low or "blocked" in s_low:
+        if "in open view" not in s_low or "blocked" in s_low:
             return False
         if ev.to_location and ev.to_location.lower() not in s_low:
             return False
@@ -410,7 +531,10 @@ def _sentence_matches_event(sentence: str, ev: Event, noise_threshold: int) -> b
         return True
 
     if ev.kind == "message":
-        if not (ev.recipient and re.search(rf"\b{re.escape(ev.recipient.lower())}\b", s_low)):
+        if not ev.recipient:
+            return False
+        recip_esc = re.escape(ev.recipient.lower())
+        if not re.search(rf"\b(?:to|for|messaged|texted|notified)\s+{recip_esc}\b", s_low):
             return False
         if ev.utterance and ev.utterance.lower() not in s_low:
             return False
@@ -618,8 +742,15 @@ def check_prose_render_fidelity(
                     )
 
     # 3. Verify every event in `world.events` is stated in exact relative order and no extra event sentences exist
-    all_sentences = _split_prose_sentences(prose)
-    event_sentences = [s for s in all_sentences if not _is_setup_sentence(s)]
+    #Paragraph 1 (`paragraphs[0]`) is structurally the setup paragraph; `paragraphs[1:]` are event paragraphs.
+    if len(paragraphs) < 2:
+        raise RenderCheckError(
+            "Render check (c) failed: prose must separate the setup paragraph from the event paragraph(s) with a blank line ('\\n\\n').",
+            check_id="c_fidelity_paragraph_split",
+        )
+    event_sentences: list[str] = []
+    for ev_para in paragraphs[1:]:
+        event_sentences.extend(_split_prose_sentences(ev_para))
 
     for sent in event_sentences:
         s_low = sent.lower()
@@ -634,7 +765,7 @@ def check_prose_render_fidelity(
     for ev_idx, ev in enumerate(world.events):
         found_idx: int | None = None
         for s_idx in range(search_start, len(event_sentences)):
-            if _sentence_matches_event(event_sentences[s_idx], ev, world.noise_threshold):
+            if _sentence_matches_event(event_sentences[s_idx], ev, world.noise_threshold, world=world):
                 found_idx = s_idx
                 break
         if found_idx is None:
@@ -644,7 +775,7 @@ def check_prose_render_fidelity(
                     i
                     for i in range(0, search_start)
                     if i not in matched_sentence_indices
-                    and _sentence_matches_event(event_sentences[i], ev, world.noise_threshold)
+                    and _sentence_matches_event(event_sentences[i], ev, world.noise_threshold, world=world)
                 ),
                 None,
             )
@@ -1120,7 +1251,57 @@ def kill_pid_tree(pid: int) -> None:
             pass
         return
 
+    # POSIX: process-group kill for owned child server session/group, plus recursive child cleanup
     sig_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
+    killpg_fn = getattr(os, "killpg", None)
+    getpgid_fn = getattr(os, "getpgid", None)
+    getpgrp_fn = getattr(os, "getpgrp", None)
+    own_pgrp = int(getpgrp_fn()) if callable(getpgrp_fn) else -1
+    if callable(killpg_fn):
+        pgid = pid
+        if callable(getpgid_fn):
+            try:
+                pgid = int(getpgid_fn(pid))
+            except OSError:  # pragma: no cover
+                pgid = pid
+        if pgid > 4 and pgid != own_pgrp:
+            try:
+                killpg_fn(pgid, sig_kill)
+            except OSError:  # pragma: no cover
+                pass
+        if pid != pgid and pid != own_pgrp:  # pragma: no cover
+            try:
+                killpg_fn(pid, sig_kill)
+            except OSError:
+                pass
+
+    child_pids: set[int] = set()  # pragma: no cover
+    proc_root = Path("/proc")  # pragma: no cover
+    if proc_root.is_dir():  # pragma: no cover
+        for stat_file in proc_root.glob("[0-9]*/stat"):  # pragma: no cover
+            try:  # pragma: no cover
+                raw_stat = stat_file.read_text(encoding="utf-8")  # pragma: no cover
+                after_comm = raw_stat.rsplit(")", 1)[1].split()  # pragma: no cover
+                if len(after_comm) >= 2 and int(after_comm[1]) == pid:  # pragma: no cover
+                    child_pids.add(int(stat_file.parent.name))  # pragma: no cover
+            except Exception:  # pragma: no cover
+                pass  # pragma: no cover
+    try:  # pragma: no cover
+        children = subprocess.run(
+            ["pgrep", "-P", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        for line in children.stdout.splitlines():  # pragma: no cover
+            if line.strip().isdigit():  # pragma: no cover
+                child_pids.add(int(line.strip()))  # pragma: no cover
+    except Exception:  # pragma: no cover
+        pass  # pragma: no cover
+    for cpid in sorted(child_pids):  # pragma: no cover
+        if cpid != pid:  # pragma: no cover
+            kill_pid_tree(cpid)  # pragma: no cover
     try:
         os.kill(pid, sig_kill)
     except OSError:
@@ -1148,9 +1329,10 @@ class OwnedOllamaServer:
     stopped_at: str | None = None
     version: str | None = None
     unloaded: bool = False
+    pid_killer: Callable[[int], None] = kill_pid_tree
 
     def stop(self) -> None:
-        """Stop the child `ollama serve` process and record its UTC stop timestamp."""
+        """Stop the child `ollama serve` process and its PID tree, recording its UTC stop timestamp."""
         if self.stopped_at is not None:
             return
         try:
@@ -1166,6 +1348,11 @@ class OwnedOllamaServer:
                         self.process.wait(timeout=3)
                     except Exception:
                         pass
+            if self.pid > 4:
+                try:
+                    self.pid_killer(self.pid)
+                except Exception:  # pragma: no cover
+                    pass
         finally:
             self.stopped_at = datetime.datetime.now(datetime.UTC).isoformat()
 
@@ -1225,6 +1412,7 @@ def start_owned_ollama_server(
     startup_timeout_s: float = 30.0,
     poll_interval_s: float = 0.05,
     ollama_models_dir: Path | str | None = None,
+    pid_killer: Callable[[int], None] = kill_pid_tree,
 ) -> OwnedOllamaServer:
     """Launch `ollama serve` as an owned child process on `127.0.0.1:<port>` and wait for `/api/version`."""
     resolved_port = int(port) if port is not None else _pick_free_localhost_port()
@@ -1272,6 +1460,7 @@ def start_owned_ollama_server(
         base_url=base_url,
         models_dir=models_dir,
         started_at=started_at,
+        pid_killer=pid_killer,
     )
     try:
         server.version = wait_for_ollama_version(
@@ -1317,6 +1506,8 @@ class GenerationCallRecord:
     vram_halt_mib: int
     grant_id: str
     top5_logprobs: tuple[dict[str, object], ...] = ()
+    checks_passed: bool = True
+    refusal_reasons: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -1358,6 +1549,8 @@ class GenerationCallRecord:
             "vram_halt_mib": self.vram_halt_mib,
             "grant_id": self.grant_id,
             "top5_logprobs": list(self.top5_logprobs),
+            "checks_passed": self.checks_passed,
+            "refusal_reasons": list(self.refusal_reasons),
         }
 
 
@@ -1462,17 +1655,24 @@ class GpuGuardMonitor:
             url: str,
             payload: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            if self._halted:
+            is_unload = (
+                method.upper() == "POST"
+                and url.endswith("/api/chat")
+                and payload is not None
+                and payload.get("keep_alive") == 0
+                and not payload.get("messages")
+            )
+            if self._halted and not is_unload:
                 self._trigger_halt(self._peak_vram_mib)
             require_loopback_ollama_url(url)
             if url.endswith("/api/pull"):
                 raise ValueError(
                     f"REFUSED (PULL_FORBIDDEN): Auto-pull is forbidden ({method} {url}); refuse when the pinned writer digest is missing."
                 )
-            if method.upper() == "POST" and url.endswith("/api/chat"):
+            if method.upper() == "POST" and url.endswith("/api/chat") and not is_unload:
                 self.check_vram()
             resp = inner(method, url, payload)
-            if method.upper() == "POST" and url.endswith("/api/chat") and payload is not None:
+            if method.upper() == "POST" and url.endswith("/api/chat") and payload is not None and not is_unload:
                 if payload.get("keep_alive") != 0 and payload.get("messages"):
                     self.check_vram()
             return resp
@@ -1551,6 +1751,7 @@ class WriterCheckpointManager:
         return {
             **self._public_header(),
             "private_seed_hex": self.private_seed_hex,
+            "writer_pin": self.writer_pin.to_dict(),
         }
 
     def _write_both_atomically(self) -> None:
@@ -1807,6 +2008,8 @@ class WriterCheckpointManager:
                         vram_halt_mib=int(c_dict["vram_halt_mib"]),
                         grant_id=str(c_dict["grant_id"]),
                         top5_logprobs=tuple(c_dict.get("top5_logprobs") or ()),
+                        checks_passed=bool(c_dict.get("checks_passed", True)),
+                        refusal_reasons=tuple(str(x) for x in (c_dict.get("refusal_reasons") or ())),
                     )
                 )
 
@@ -1841,8 +2044,9 @@ class OllamaWriter:
         *,
         model_pin: PinnedWriterModelSpec = DEFAULT_WRITER_MODEL_PIN,
         base_url: str = DEFAULT_OLLAMA_BASE_URL,
-        num_predict: int = DEFAULT_WRITER_NUM_PREDICT,
+        num_predict: int | None = None,
         max_num_ctx: int = DEFAULT_WRITER_MAX_NUM_CTX,
+        think: bool | None = None,
         vram_halt_mib: int = DEFAULT_VRAM_HALT_MIB,
         grant_id: str | None = None,
         http_transport: OllamaHttpTransport | None = None,
@@ -1850,18 +2054,35 @@ class OllamaWriter:
         halt_pid: int | None = None,
         pid_killer: Callable[[int], None] = kill_pid_tree,
         generations_path: Path | None = None,
-        start_owned_server: bool = False,
+        start_owned_server: bool | None = None,
         popen_factory: Callable[..., Any] | None = None,
         server_port: int | None = None,
         ollama_models_dir: Path | str | None = None,
     ) -> None:
-        if num_predict < 1:
-            raise ValueError(f"num_predict must be >= 1, got {num_predict}")
+        resolved_think = bool(model_pin.think if think is None else think)
+        resolved_num_predict = (
+            int(num_predict)
+            if num_predict is not None
+            else (DEFAULT_WRITER_THINK_NUM_PREDICT if resolved_think else DEFAULT_WRITER_NUM_PREDICT)
+        )
+        if resolved_num_predict < 1:
+            raise ValueError(f"num_predict must be >= 1, got {resolved_num_predict}")
         if max_num_ctx < NUM_CTX_STEP_TOKENS:
             raise ValueError(f"max_num_ctx must be >= {NUM_CTX_STEP_TOKENS}, got {max_num_ctx}")
-        self._model_pin = model_pin
-        self._num_predict = int(num_predict)
+        if max_num_ctx > DEFAULT_WRITER_MAX_NUM_CTX:
+            raise MaxNumCtxRefusalError(
+                f"REFUSED (MAX_NUM_CTX_CAP): max_num_ctx={max_num_ctx} exceeds the hard VRAM ceiling limit "
+                f"{DEFAULT_WRITER_MAX_NUM_CTX}."
+            )
+        self._model_pin = replace(
+            model_pin,
+            num_predict=resolved_num_predict,
+            max_num_ctx=int(max_num_ctx),
+            think=resolved_think,
+        )
+        self._num_predict = resolved_num_predict
         self._max_num_ctx = int(max_num_ctx)
+        self._think = resolved_think
         self._prompt_template = load_writer_prompt_template()
 
         is_real_transport = http_transport is None or http_transport is default_ollama_http_transport
@@ -1874,13 +2095,19 @@ class OllamaWriter:
         self._grant_id = resolved_grant or "test-transport-no-gpu"
 
         raw_transport = http_transport if http_transport is not None else default_ollama_http_transport
+        should_own_server = (
+            bool(start_owned_server)
+            if start_owned_server is not None
+            else (http_transport is None)
+        )
         self._owned_server: OwnedOllamaServer | None = None
-        if start_owned_server:
+        if should_own_server:
             self._owned_server = start_owned_ollama_server(
                 http_transport=raw_transport,
                 popen_factory=popen_factory,
                 port=server_port,
                 ollama_models_dir=ollama_models_dir,
+                pid_killer=pid_killer,
             )
             active_url = self._owned_server.base_url
             resolved_halt_pid = self._owned_server.pid if halt_pid is None else halt_pid
@@ -1888,25 +2115,30 @@ class OllamaWriter:
             active_url = require_loopback_ollama_url(base_url)
             resolved_halt_pid = halt_pid
 
-        self._base_url = require_loopback_ollama_url(active_url)
-        resolved_vram_probe = (
-            vram_probe
-            if vram_probe is not None
-            else (query_gpu_vram_peak_mib if is_real_transport else (lambda: 0))
-        )
-        self._gpu_guard = GpuGuardMonitor(
-            grant_id=self._grant_id,
-            vram_halt_mib=vram_halt_mib,
-            vram_probe=resolved_vram_probe,
-            halt_pid=resolved_halt_pid,
-            pid_killer=pid_killer,
-        )
-        self._transport: OllamaHttpTransport = self._gpu_guard.wrap_transport(raw_transport)
-        self._generations_path = generations_path
-        self._verified_local_digest = False
-        self._call_records: list[GenerationCallRecord] = []
-        self._unload_records: list[OllamaUnloadRecord] = []
-        self._refusals: list[ProseRefusalRecord] = []
+        try:
+            self._base_url = require_loopback_ollama_url(active_url)
+            resolved_vram_probe = (
+                vram_probe
+                if vram_probe is not None
+                else (query_gpu_vram_peak_mib if is_real_transport else (lambda: 0))
+            )
+            self._gpu_guard = GpuGuardMonitor(
+                grant_id=self._grant_id,
+                vram_halt_mib=vram_halt_mib,
+                vram_probe=resolved_vram_probe,
+                halt_pid=resolved_halt_pid,
+                pid_killer=pid_killer,
+            )
+            self._transport: OllamaHttpTransport = self._gpu_guard.wrap_transport(raw_transport)
+            self._generations_path = generations_path
+            self._verified_local_digest = False
+            self._call_records: list[GenerationCallRecord] = []
+            self._unload_records: list[OllamaUnloadRecord] = []
+            self._refusals: list[ProseRefusalRecord] = []
+        except Exception:
+            if self._owned_server is not None:
+                self._owned_server.stop()
+            raise
 
     @property
     def model_pin(self) -> PinnedWriterModelSpec:
@@ -1931,6 +2163,10 @@ class OllamaWriter:
     @property
     def max_num_ctx(self) -> int:
         return self._max_num_ctx
+
+    @property
+    def think(self) -> bool:
+        return self._think
 
     @property
     def vram_halt_mib(self) -> int:
@@ -1988,6 +2224,7 @@ class OllamaWriter:
     def _chat_render(
         self,
         *,
+        world: World,
         scenario_id: str,
         rendering_index: int,
         focal_agent: str,
@@ -2002,16 +2239,27 @@ class OllamaWriter:
         ]
         prompt_sha = _sha256_bytes(_canonical_json_line(messages).encode("utf-8"))
         prompt_tokens_estimate = estimate_prompt_tokens(messages)
-        num_ctx = compute_num_ctx(
-            prompt_tokens_estimate,
-            self._num_predict,
-            margin=NUM_CTX_MARGIN_TOKENS,
-            step=NUM_CTX_STEP_TOKENS,
-        )
+        if self._think and prompt_tokens_estimate + self._num_predict <= self._max_num_ctx:
+            num_ctx = min(
+                self._max_num_ctx,
+                compute_num_ctx(
+                    prompt_tokens_estimate,
+                    self._num_predict,
+                    margin=NUM_CTX_MARGIN_TOKENS,
+                    step=NUM_CTX_STEP_TOKENS,
+                ),
+            )
+        else:
+            num_ctx = compute_num_ctx(
+                prompt_tokens_estimate,
+                self._num_predict,
+                margin=NUM_CTX_MARGIN_TOKENS,
+                step=NUM_CTX_STEP_TOKENS,
+            )
         call_index = len(self._call_records) + 1
         call_id = f"{scenario_id}:r{rendering_index}:call_{call_index:04d}"
 
-        if num_ctx > self._max_num_ctx:
+        if num_ctx > self._max_num_ctx or (prompt_tokens_estimate + self._num_predict > self._max_num_ctx):
             reason_msg = (
                 f"Writer call '{call_id}' requires num_ctx={num_ctx} "
                 f"(prompt_tokens_estimate={prompt_tokens_estimate} + num_predict={self._num_predict} + "
@@ -2036,13 +2284,15 @@ class OllamaWriter:
                 num_predict=self._num_predict,
                 num_ctx=num_ctx,
                 max_num_ctx=self._max_num_ctx,
-                think=self._model_pin.think,
+                think=self._think,
                 temperature=0.0,
                 done_reason="max_num_ctx_exceeded",
                 seconds=0.0,
                 vram_peak_mib=self._gpu_guard.peak_vram_mib,
                 vram_halt_mib=self._gpu_guard.vram_halt_mib,
                 grant_id=self._grant_id,
+                checks_passed=False,
+                refusal_reasons=(f"max_num_ctx_exceeded: {reason_msg}",),
             )
             self._append_generation_record(rec)
             self._refusals.append(
@@ -2060,7 +2310,7 @@ class OllamaWriter:
         payload: dict[str, Any] = {
             "model": self.ollama_tag,
             "messages": messages,
-            "think": self._model_pin.think,
+            "think": self._think,
             "stream": False,
             "options": {
                 "temperature": 0,
@@ -2099,6 +2349,98 @@ class OllamaWriter:
             else ()
         )
 
+        if done_reason == "length":
+            reason_msg = (
+                f"Writer call '{call_id}' stopped with done_reason='length' "
+                f"(num_predict={self._num_predict}, eval_count={eval_count})."
+            )
+            rec = GenerationCallRecord(
+                call_id=call_id,
+                call_index=call_index,
+                scenario_id=scenario_id,
+                rendering_index=rendering_index,
+                focal_agent=focal_agent,
+                operation="render_scenario",
+                model=self.ollama_tag,
+                manifest_digest=self.manifest_digest,
+                model_layer_digest=self._model_pin.model_layer_digest,
+                licence_id=self._model_pin.licence_id,
+                prompt_sha256=prompt_sha,
+                prompt_tokens_estimate=prompt_tokens_estimate,
+                prompt_eval_count=prompt_eval_count,
+                eval_count=eval_count,
+                thinking_words=thinking_words,
+                num_predict=self._num_predict,
+                num_ctx=num_ctx,
+                max_num_ctx=self._max_num_ctx,
+                think=self._think,
+                temperature=0.0,
+                done_reason=done_reason,
+                seconds=wall_s,
+                vram_peak_mib=self._gpu_guard.peak_vram_mib,
+                vram_halt_mib=self._gpu_guard.vram_halt_mib,
+                grant_id=self._grant_id,
+                top5_logprobs=top5_logprobs,
+                checks_passed=False,
+                refusal_reasons=(f"length_stop: {reason_msg}",),
+            )
+            self._append_generation_record(rec)
+            self._refusals.append(
+                ProseRefusalRecord(
+                    scenario_id=scenario_id,
+                    rendering_index=rendering_index,
+                    focal_agent=focal_agent,
+                    check_id="length_stop",
+                    reason=reason_msg,
+                )
+            )
+            raise LengthStopRefusalError(reason_msg)
+
+        try:
+            check_rendered_prose(content, world, focal_agent=focal_agent)
+        except RenderCheckError as exc:
+            rec = GenerationCallRecord(
+                call_id=call_id,
+                call_index=call_index,
+                scenario_id=scenario_id,
+                rendering_index=rendering_index,
+                focal_agent=focal_agent,
+                operation="render_scenario",
+                model=self.ollama_tag,
+                manifest_digest=self.manifest_digest,
+                model_layer_digest=self._model_pin.model_layer_digest,
+                licence_id=self._model_pin.licence_id,
+                prompt_sha256=prompt_sha,
+                prompt_tokens_estimate=prompt_tokens_estimate,
+                prompt_eval_count=prompt_eval_count,
+                eval_count=eval_count,
+                thinking_words=thinking_words,
+                num_predict=self._num_predict,
+                num_ctx=num_ctx,
+                max_num_ctx=self._max_num_ctx,
+                think=self._think,
+                temperature=0.0,
+                done_reason=done_reason,
+                seconds=wall_s,
+                vram_peak_mib=self._gpu_guard.peak_vram_mib,
+                vram_halt_mib=self._gpu_guard.vram_halt_mib,
+                grant_id=self._grant_id,
+                top5_logprobs=top5_logprobs,
+                checks_passed=False,
+                refusal_reasons=(f"{exc.check_id}: {exc}",),
+            )
+            self._append_generation_record(rec)
+            self._refusals.append(
+                ProseRefusalRecord(
+                    scenario_id=scenario_id,
+                    rendering_index=rendering_index,
+                    focal_agent=focal_agent,
+                    check_id=exc.check_id,
+                    reason=str(exc),
+                )
+            )
+            raise
+
         rec = GenerationCallRecord(
             call_id=call_id,
             call_index=call_index,
@@ -2118,7 +2460,7 @@ class OllamaWriter:
             num_predict=self._num_predict,
             num_ctx=num_ctx,
             max_num_ctx=self._max_num_ctx,
-            think=self._model_pin.think,
+            think=self._think,
             temperature=0.0,
             done_reason=done_reason,
             seconds=wall_s,
@@ -2126,25 +2468,10 @@ class OllamaWriter:
             vram_halt_mib=self._gpu_guard.vram_halt_mib,
             grant_id=self._grant_id,
             top5_logprobs=top5_logprobs,
+            checks_passed=True,
+            refusal_reasons=(),
         )
         self._append_generation_record(rec)
-
-        if done_reason == "length":
-            reason_msg = (
-                f"Writer call '{call_id}' stopped with done_reason='length' "
-                f"(num_predict={self._num_predict}, eval_count={eval_count})."
-            )
-            self._refusals.append(
-                ProseRefusalRecord(
-                    scenario_id=scenario_id,
-                    rendering_index=rendering_index,
-                    focal_agent=focal_agent,
-                    check_id="length_stop",
-                    reason=reason_msg,
-                )
-            )
-            raise LengthStopRefusalError(reason_msg)
-
         return content
 
     def render_scenario_pair(self, world: World) -> tuple[RenderedScenario, RenderedScenario]:
@@ -2156,44 +2483,19 @@ class OllamaWriter:
         prompt_1 = format_writer_prompt(world, focal_1, self._prompt_template)
 
         prose_0 = self._chat_render(
+            world=world,
             scenario_id=world.scenario_id,
             rendering_index=0,
             focal_agent=focal_0,
             prompt_text=prompt_0,
         )
-        try:
-            check_rendered_prose(prose_0, world, focal_agent=focal_0)
-        except RenderCheckError as exc:
-            self._refusals.append(
-                ProseRefusalRecord(
-                    scenario_id=world.scenario_id,
-                    rendering_index=0,
-                    focal_agent=focal_0,
-                    check_id=exc.check_id,
-                    reason=str(exc),
-                )
-            )
-            raise
-
         prose_1 = self._chat_render(
+            world=world,
             scenario_id=world.scenario_id,
             rendering_index=1,
             focal_agent=focal_1,
             prompt_text=prompt_1,
         )
-        try:
-            check_rendered_prose(prose_1, world, focal_agent=focal_1)
-        except RenderCheckError as exc:
-            self._refusals.append(
-                ProseRefusalRecord(
-                    scenario_id=world.scenario_id,
-                    rendering_index=1,
-                    focal_agent=focal_1,
-                    check_id=exc.check_id,
-                    reason=str(exc),
-                )
-            )
-            raise
 
         keys_0 = compute_scenario_keys(_reconstruct_world_from_writer_prompt(world, prompt_0))
         keys_1 = compute_scenario_keys(_reconstruct_world_from_writer_prompt(world, prompt_1))

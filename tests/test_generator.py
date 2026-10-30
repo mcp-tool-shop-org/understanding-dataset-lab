@@ -2227,4 +2227,404 @@ def test_26_verify_written_cli_and_ten_scenario_mock_build(tmp_path: Path) -> No
     assert verify_doc["probe_only"]["probe_report"]["passed"] is True
 
 
+def test_27_prose_fidelity_swapped_actor_and_recipient_refused() -> None:
+    """Test 27 (Change 3.i): Swapping actor and recipient (or actor and bystander) in an event sentence must be refused by check_rendered_prose."""
+    w = generate_world(make_balanced_configs(2, base_seed=20261030)[0])
+    fa = w.agents[0]
+    clean_prose = render_world_template(w, fa)
+    setup_p, events_p = clean_prose.split("\n\n")
+    from udlab_generator.render import _split_prose_sentences
+
+    ev_sents = _split_prose_sentences(events_p)
+
+    # 1. Message event: swap sender (Cara) and recipient (Gia) while keeping both names in the sentence
+    msg_idx = next(i for i, ev in enumerate(w.events) if ev.kind == "message")
+    msg_ev = w.events[msg_idx]
+    swapped_msg_sent = (
+        f"Next, from the {msg_ev.room}, {msg_ev.recipient} sent a direct text message to {msg_ev.actor}: "
+        f'"{msg_ev.utterance}"'
+    )
+    bad_msg_sents = list(ev_sents)
+    bad_msg_sents[msg_idx] = swapped_msg_sent
+    with pytest.raises(RenderCheckError, match="missing or altered event") as exc_msg:
+        check_rendered_prose(setup_p + "\n\n" + " ".join(bad_msg_sents), w, focal_agent=fa)
+    assert exc_msg.value.check_id == "c_fidelity_missing_event"
+
+    # 2. Move event: mention true actor in a subordinate clause while another in-scenario agent acts as subject
+    move_idx = next(
+        i for i, ev in enumerate(w.events) if ev.kind == "move" and ev.target_object == w.primary_object
+    )
+    move_ev = w.events[move_idx]
+    other_ag = next(a for a in w.agents if a != move_ev.actor)
+    swapped_move_sent = (
+        f"Next, in the {move_ev.room}, while {move_ev.actor} watched nearby, {other_ag} moved the "
+        f"{move_ev.target_object} from the {move_ev.from_location} to the {move_ev.to_location} in open view at the container bay."
+    )
+    bad_move_sents = list(ev_sents)
+    bad_move_sents[move_idx] = swapped_move_sent
+    with pytest.raises(RenderCheckError, match="missing or altered event") as exc_mv:
+        check_rendered_prose(setup_p + "\n\n" + " ".join(bad_move_sents), w, focal_agent=fa)
+    assert exc_mv.value.check_id == "c_fidelity_missing_event"
+
+
+def test_28_prose_fidelity_reversed_from_to_refused() -> None:
+    """Test 28 (Change 3.ii): Reversing from_location and to_location in a move, enter, or leave sentence must be refused."""
+    w = generate_world(make_balanced_configs(2, base_seed=20261030)[0])
+    fa = w.agents[0]
+    clean_prose = render_world_template(w, fa)
+    setup_p, events_p = clean_prose.split("\n\n")
+    from udlab_generator.render import _split_prose_sentences
+
+    ev_sents = _split_prose_sentences(events_p)
+
+    # 1. Object move with reversed from_location / to_location
+    move_idx = next(
+        i for i, ev in enumerate(w.events) if ev.kind == "move" and ev.target_object == w.primary_object
+    )
+    move_ev = w.events[move_idx]
+    rev_move_sent = (
+        f"Next, in the {move_ev.room}, {move_ev.actor} moved the {move_ev.target_object} "
+        f"from the {move_ev.to_location} to the {move_ev.from_location} in open view at the container bay."
+    )
+    bad_sents_1 = list(ev_sents)
+    bad_sents_1[move_idx] = rev_move_sent
+    with pytest.raises(RenderCheckError, match="missing or altered event") as exc_1:
+        check_rendered_prose(setup_p + "\n\n" + " ".join(bad_sents_1), w, focal_agent=fa)
+    assert exc_1.value.check_id == "c_fidelity_missing_event"
+
+    # 2. Enter event with reversed from_location / to_location
+    enter_idx = next(i for i, ev in enumerate(w.events) if ev.kind == "enter")
+    enter_ev = w.events[enter_idx]
+    rev_enter_sent = (
+        f"Next, {enter_ev.actor} walked through the doorway from the {enter_ev.to_location} into the {enter_ev.from_location}."
+    )
+    bad_sents_2 = list(ev_sents)
+    bad_sents_2[enter_idx] = rev_enter_sent
+    with pytest.raises(RenderCheckError, match="missing or altered event") as exc_2:
+        check_rendered_prose(setup_p + "\n\n" + " ".join(bad_sents_2), w, focal_agent=fa)
+    assert exc_2.value.check_id == "c_fidelity_missing_event"
+
+
+def test_29_prose_fidelity_wrong_room_refused() -> None:
+    """Test 29 (Change 3.iii): Naming another room of the scenario as the room of an intra-room event (even if ev.room appears incidentally) must be refused."""
+    w = generate_world(make_balanced_configs(2, base_seed=20261030)[0])
+    fa = w.agents[0]
+    clean_prose = render_world_template(w, fa)
+    setup_p, events_p = clean_prose.split("\n\n")
+    from udlab_generator.render import _split_prose_sentences
+
+    ev_sents = _split_prose_sentences(events_p)
+    move_idx = next(
+        i for i, ev in enumerate(w.events) if ev.kind == "move" and ev.target_object == w.primary_object
+    )
+    move_ev = w.events[move_idx]
+    wrong_room = next(r for r in w.rooms if r != move_ev.room)
+
+    # Even though move_ev.room is mentioned in a trailing phrase ("near the sorting room"),
+    # the sentence places the action in `wrong_room`.
+    wrong_room_sent = (
+        f"Next, in the {wrong_room} near the {move_ev.room}, {move_ev.actor} moved the {move_ev.target_object} "
+        f"from the {move_ev.from_location} to the {move_ev.to_location} in open view at the container bay."
+    )
+    bad_sents = list(ev_sents)
+    bad_sents[move_idx] = wrong_room_sent
+    with pytest.raises(RenderCheckError, match="missing or altered event") as exc_wr:
+        check_rendered_prose(setup_p + "\n\n" + " ".join(bad_sents), w, focal_agent=fa)
+    assert exc_wr.value.check_id == "c_fidelity_missing_event"
+
+
+def test_30_prose_fidelity_unlogged_event_starting_at_the_start_refused() -> None:
+    """Test 30 (Change 3.iv): An unlogged event sentence starting 'At the start,' in the events paragraph must not bypass check_prose_render_fidelity."""
+    w = generate_world(make_balanced_configs(2, base_seed=20261030)[0])
+    fa = w.agents[0]
+    clean_prose = render_world_template(w, fa)
+
+    sneaky_unlogged = (
+        f"{clean_prose} At the start, in the {w.rooms[0]}, {fa} moved the {w.objects[0]} "
+        f"from the {w.containers_by_room[w.rooms[0]][0]} to the {w.containers_by_room[w.rooms[0]][1]} in open view."
+    )
+    with pytest.raises(RenderCheckError, match="unlogged event sentence") as exc_unlogged:
+        check_rendered_prose(sneaky_unlogged, w, focal_agent=fa)
+    assert exc_unlogged.value.check_id == "c_fidelity_unlogged_event"
+
+
+def test_31_handwritten_realistic_natural_prose_passes() -> None:
+    """Test 31 (Change 3.v): Realistic natural prose for one scenario (scen_0000, seed 20261030), written by hand, must pass check_rendered_prose."""
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    assert w.scenario_id == "scen_0000"
+    fa = w.agents[0]  # Eva
+
+    handwritten_setup = (
+        "In the archival registry, the narrative follows Eva across four interconnected rooms: "
+        "the vault room contains the oak drawer and the steel cabinet at its container bay, where a frosted partition "
+        "stands between the far-side alcove and the container bay; "
+        "the reading room contains the slate tray and the cedar shelf at its container bay, divided from the far-side alcove "
+        "by a tall bookstack; "
+        "the bindery room contains the linen bin and the copper rack in the container bay, separated from the far-side alcove "
+        "by a canvas screen; "
+        "and the sorting room contains the maple cubby and the iron safe in the container bay, with a rolling pillar "
+        "between the far-side alcove and the container bay so that anyone at the container bay sees the containers in open view "
+        "while anyone in the far-side alcove has their view blocked. "
+        "Open doorways connect the rooms along the hall: the vault room connects to the reading room, the reading room connects to the bindery room, "
+        "and the bindery room connects to the sorting room, with a doorway hearing threshold of 50 dB. "
+        "Each agent assumes an object remains where that agent last saw it in open view or heard a witness state it was placed, "
+        "and assumes another agent looks where they last saw or communicated that agent perceiving it. "
+        "Initially, Eva starts in the bindery room, Dan starts in the bindery room, and Cara starts in the bindery room, "
+        "while Gia remains absent off-site. "
+        "Their active objectives: Eva plans to complete the quarterly audit packet; Dan plans to verify the municipal deed transfer; "
+        "and Cara plans to catalog the incoming charter folio. "
+        "Gia is off-site and depends on the location of the brass ledger for tomorrow's courier handoff."
+    )
+
+    handwritten_events = (
+        "In the bindery room, Eva checked the index reel inside the linen bin in open view. "
+        "Dan then left the bindery room for the sorting room. "
+        "Moments later, Dan entered the sorting room from the bindery room. "
+        "Cara also departed the bindery room toward the sorting room. "
+        "Cara entered the sorting room from the bindery room right after Dan. "
+        "While in the sorting room, Cara inspected the maple cubby at the container bay in open view. "
+        "In the sorting room, Cara transferred the brass ledger from the intake bench into the iron safe in open view. "
+        "Back in the bindery room, Eva exited toward the sorting room. "
+        "Eva arrived in the sorting room from the bindery room. "
+        "Inside the sorting room, Cara shifted the brass ledger from the iron safe to the maple cubby in open view. "
+        "In the sorting room, Eva noticed the ventilation grille in the far-side alcove in open view. "
+        "Cara then left the sorting room heading back to the bindery room. "
+        "Cara walked from the sorting room into the bindery room. "
+        "Continuing through the bindery room, Cara exited toward the reading room. "
+        "Cara entered the reading room from the bindery room. "
+        "Meanwhile, in the sorting room, Dan stepped from the container bay behind the rolling pillar into the far-side alcove. "
+        "From the far-side alcove in the sorting room, Dan looked toward the iron safe, but the rolling pillar blocked his view. "
+        "Still in the far-side alcove of the sorting room, Dan looked toward the maple cubby, yet the rolling pillar blocked the sightline. "
+        "Over in the reading room, Cara spotted the index reel resting in the slate tray in open view. "
+        "In the sorting room, Eva departed for the bindery room. "
+        "Eva came from the sorting room into the bindery room. "
+        "Inside the reading room, Cara placed the seal stamp from the slate tray onto the cedar shelf in open view. "
+        'Speaking in the reading room at 60 dB, Cara announced: "The seal stamp is stored in the cedar shelf." '
+        "In the bindery room, Eva looked at the humidity dial in the far-side alcove in open view. "
+        'From the reading room, Cara texted a message to Gia: "Update for Gia: the brass ledger is stored at the maple cubby." '
+        "In the bindery room, Eva saw the unsigned transfer slip on the countertop in the bindery room in open view. "
+        "In the sorting room, Dan turned the overhead louver from latch position A to latch position B in open view. "
+        'In the sorting room at 20 dB, Dan stated: "I adjusted the overhead louver to clear binding dust from the bench." '
+        "From the far-side alcove in the sorting room, Dan glanced toward the iron safe, though the rolling pillar blocked the container bay. "
+        'Finally, in the sorting room at 20 dB, Dan claimed: "I am certain the brass ledger was moved into the copper rack."'
+    )
+
+    handwritten_prose = f"{handwritten_setup}\n\n{handwritten_events}"
+    assert handwritten_prose != render_world_template(w, fa)
+    assert check_rendered_prose(handwritten_prose, w, focal_agent=fa) == ()
+
+
+def test_32_change1_fifty_random_private_seeds_pass_sealing(tmp_path: Path) -> None:
+    """Test 32 (Change 1): 50 random private_seed_hex values at --count 10 pass write_sealed_dataset + verify_sealed_part with zero SealingError."""
+    import hashlib
+
+    configs_10 = make_balanced_configs(10, base_seed=20261030)
+    mw = MockWriter()
+    pairs_10 = [mw.render_scenario_pair(generate_world(c)) for c in configs_10]
+    pub_10 = tmp_path / "c1_pub"
+    seal_10 = tmp_path / "c1_seal"
+    salts_used: list[int] = []
+    for i in range(50):
+        seed_i = hashlib.sha256(f"change1_seed_{i}".encode("utf-8")).hexdigest()
+        receipt_i = write_sealed_dataset(pairs_10, pub_10, seal_10, private_seed_hex=seed_i)
+        verify_sealed_part(pub_10, seal_10)
+        meta_i = json.loads(receipt_i.sealing_meta_path.read_text(encoding="utf-8"))
+        salts_used.append(int(meta_i.get("shuffle_salt_index", -1)))
+    assert all(s >= 0 for s in salts_used), "shuffle_salt_index must be recorded in sealing.sealed.json"
+    assert any(s > 0 for s in salts_used), "At least one of the 50 seeds must have needed a non-zero resample salt."
+
+
+def test_33_changes_2_4_5_6_think_refusals_cleanup_and_verify(tmp_path: Path) -> None:
+    """Test 33 (Changes 2, 4, 5, 6):
+    - Change 2: Default think=False, num_predict=4096, max_num_ctx=9216; --think allows num_predict=5120 inside 9216; >9216 refused; think recorded in generations.jsonl and sealed provenance.
+    - Change 4: Prose-check and length_stop refusals recorded with checks_passed=False and refusal_reasons in generations.jsonl on disk.
+    - Change 5: Owned server default when http_transport is None, keep_alive=0 allowed after VRAM halt, kill_pid_tree called on stop(), and init failure cleans up server.
+    - Change 6: --verify-written fails if generations.jsonl is missing, short, has bad digest, or has done_reason != 'stop'.
+    """
+    from udlab_generator.cli import build_and_probe_dataset, verify_written_dataset
+    import udlab_generator.render as ug_render
+    from udlab_generator.render import (
+        DEFAULT_WRITER_MAX_NUM_CTX,
+        DEFAULT_WRITER_MODEL_PIN,
+        DEFAULT_WRITER_NUM_PREDICT,
+        MaxNumCtxRefusalError,
+        OllamaWriter,
+    )
+
+    configs_10 = make_balanced_configs(10, base_seed=20261030)
+
+    # --- Change 2: Option A defaults (think=False, num_predict=4096, max_num_ctx=9216) and --think flag ---
+    assert getattr(ug_render, "DEFAULT_WRITER_THINK", None) is False
+    assert DEFAULT_WRITER_NUM_PREDICT == 4096
+    assert DEFAULT_WRITER_MAX_NUM_CTX == 9216
+    assert getattr(ug_render, "DEFAULT_WRITER_THINK_NUM_PREDICT", None) == 5120
+    assert DEFAULT_WRITER_MODEL_PIN.think is False
+
+    # Raising max_num_ctx above 9216 is always refused
+    with pytest.raises(MaxNumCtxRefusalError, match="9216"):
+        OllamaWriter(
+            max_num_ctx=10240,
+            grant_id="test-grant",
+            http_transport=lambda m, u, b: {},
+        )
+    with pytest.raises(MaxNumCtxRefusalError, match="9216"):
+        build_and_probe_dataset(
+            count=2,
+            output_dir=tmp_path / "bad_ctx",
+            writer_kind="mock",
+            max_num_ctx=10240,
+        )
+
+    # With --think on, num_predict=5120 fits within 9216
+    w0 = generate_world(configs_10[0])
+    pinned_digest = DEFAULT_WRITER_MODEL_PIN.manifest_digest
+    seen_chat_payloads: list[dict] = []
+
+    def _recording_transport(method: str, url: str, body: dict | None = None) -> dict:
+        if method == "GET" and url.endswith("/api/tags"):
+            return {"models": [{"name": "qwen3.6:35b", "digest": pinned_digest}]}
+        if method == "POST" and url.endswith("/api/chat"):
+            payload = dict(body or {})
+            if payload.get("keep_alive") == 0:
+                return {"model": "qwen3.6:35b", "done": True, "done_reason": "unload"}
+            seen_chat_payloads.append(payload)
+            prompt_content = payload["messages"][-1]["content"]
+            focal = prompt_content.split("Focal Agent: ", 1)[1].splitlines()[0].strip()
+            return {
+                "model": "qwen3.6:35b",
+                "message": {"role": "assistant", "content": render_world_template(w0, focal), "thinking": "ok"},
+                "done": True,
+                "done_reason": "stop",
+                "eval_count": 400,
+                "prompt_eval_count": 1600,
+            }
+        raise AssertionError(f"Unexpected {method} {url}")
+
+    think_writer = OllamaWriter(
+        think=True,
+        grant_id="test-grant",
+        http_transport=_recording_transport,
+    )
+    assert think_writer.think is True
+    assert think_writer.num_predict == 5120
+    assert think_writer.max_num_ctx == 9216
+    think_writer.render_scenario_pair(w0)
+    assert seen_chat_payloads[-1]["think"] is True
+    assert seen_chat_payloads[-1]["options"]["num_predict"] == 5120
+    assert seen_chat_payloads[-1]["options"]["num_ctx"] == 9216
+
+    # --- Change 4: Prose-check and length_stop refusals persisted in generations.jsonl ---
+    bad_prose_gen = tmp_path / "bad_prose_generations.jsonl"
+
+    def _bad_prose_transport(method: str, url: str, body: dict | None = None) -> dict:
+        if method == "GET" and url.endswith("/api/tags"):
+            return {"models": [{"name": "qwen3.6:35b", "digest": pinned_digest}]}
+        if method == "POST" and url.endswith("/api/chat"):
+            return {
+                "model": "qwen3.6:35b",
+                "message": {"role": "assistant", "content": "Eva furtively hid the ledger [F1]."},
+                "done": True,
+                "done_reason": "stop",
+                "eval_count": 12,
+                "prompt_eval_count": 1600,
+            }
+        raise AssertionError(f"Unexpected {method} {url}")
+
+    bad_prose_writer = OllamaWriter(
+        grant_id="test-grant",
+        http_transport=_bad_prose_transport,
+        generations_path=bad_prose_gen,
+    )
+    with pytest.raises(RenderCheckError):
+        bad_prose_writer.render_scenario_pair(w0)
+    persisted_bad = [json.loads(line) for line in bad_prose_gen.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(persisted_bad) == 1
+    assert persisted_bad[0]["checks_passed"] is False
+    assert len(persisted_bad[0]["refusal_reasons"]) == 1
+    assert "b_banned_adverbs" in persisted_bad[0]["refusal_reasons"][0]
+
+    # --- Change 5: Server unload after VRAM halt + PID-tree kill on stop() + init error cleanup ---
+    unloaded_after_halt = False
+    killed_pids_c5: list[int] = []
+
+    class _DummyProc:
+        pid = 54321
+        returncode = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def _halt_unload_transport(method: str, url: str, body: dict | None = None) -> dict:
+        nonlocal unloaded_after_halt
+        if method == "GET" and url.endswith("/api/version"):
+            return {"version": "0.6.2"}
+        if method == "GET" and url.endswith("/api/tags"):
+            return {"models": [{"name": "qwen3.6:35b", "digest": pinned_digest}]}
+        if method == "POST" and url.endswith("/api/chat"):
+            payload = dict(body or {})
+            if payload.get("keep_alive") == 0:
+                unloaded_after_halt = True
+                return {"model": "qwen3.6:35b", "done": True, "done_reason": "unload"}
+            return {"model": "qwen3.6:35b", "message": {"content": "x"}, "done": True}
+        raise AssertionError(f"Unexpected {method} {url}")
+
+    halt_w = OllamaWriter(
+        grant_id="test-grant",
+        vram_halt_mib=26000,
+        vram_probe=lambda: 26500,
+        pid_killer=lambda p: killed_pids_c5.append(p),
+        http_transport=_halt_unload_transport,
+        start_owned_server=True,
+        popen_factory=lambda *a, **kw: _DummyProc(),
+        server_port=11498,
+    )
+    with pytest.raises(RuntimeError, match="VRAM_HALT_EXCEEDED"):
+        halt_w.render_scenario_pair(w0)
+    halt_w.close()
+    assert unloaded_after_halt is True, "keep_alive: 0 unload must succeed during close() even after a VRAM halt."
+    assert 54321 in killed_pids_c5
+
+    # Init error after server launch must stop the owned server
+    init_killed_pids: list[int] = []
+    with pytest.raises(ValueError, match="vram_halt_mib must be positive"):
+        OllamaWriter(
+            grant_id="test-grant",
+            vram_halt_mib=0,
+            pid_killer=lambda p: init_killed_pids.append(p),
+            http_transport=_halt_unload_transport,
+            start_owned_server=True,
+            popen_factory=lambda *a, **kw: _DummyProc(),
+            server_port=11497,
+        )
+    assert 54321 in init_killed_pids
+
+    # --- Change 6: Validate generations.jsonl in --verify-written ---
+    out_c6 = tmp_path / "c6_run"
+    assert cli_main(["--write", "--writer", "mock", "--count", "10", "--out-dir", str(out_c6)]) == 0
+    sealing_doc = json.loads((out_c6 / "sealed_store" / "sealing.sealed.json").read_text(encoding="utf-8"))
+    assert sealing_doc["writer_provenance"]["think"] is False
+    assert cli_main(["--verify-written", str(out_c6)]) == 0
+
+    # Corrupting done_reason or deleting generations.jsonl must fail --verify-written
+    gen_p = out_c6 / "generations.jsonl"
+    orig_gen_text = gen_p.read_text(encoding="utf-8")
+    gen_p.write_text(orig_gen_text.replace('"done_reason":"stop"', '"done_reason":"length"', 1), encoding="utf-8")
+    assert cli_main(["--verify-written", str(out_c6)]) == 1
+    assert verify_written_dataset(out_c6)["passed"] is False
+
+    gen_p.unlink()
+    assert cli_main(["--verify-written", str(out_c6)]) == 1
+    assert verify_written_dataset(out_c6)["passed"] is False
+
+    gen_p.write_text(orig_gen_text, encoding="utf-8")
+    assert cli_main(["--verify-written", str(out_c6)]) == 0
+
+
+
 
