@@ -470,7 +470,16 @@ _NEGATION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ADJACENT_ROOMS_COULD_NOT_HEAR_RE = re.compile(r"\badjacent\s+rooms\s+could\s+not\s+hear\b", re.IGNORECASE)
-_COULD_NOT_SEE_RE = re.compile(r"\bcould\s+not\s+see\b", re.IGNORECASE)
+# Card ue (fix round ui): both "could not see" regexes are built from `OCCLUDED_SEE_COULD_NOT_SEE`, the same
+# constant the prompt clause renders. `_OCCLUDED_SEE_COULD_NOT_PREFIX_RE` is the negation prefix that licenses
+# the bare sighting verb (the constant's last word) in `_actor_precedes_verb_as_subject`.
+_COULD_NOT_SEE_RE = re.compile(
+    r"\b" + r"\s+".join(re.escape(w) for w in OCCLUDED_SEE_COULD_NOT_SEE.split()) + r"\b", re.IGNORECASE
+)
+_OCCLUDED_SEE_COULD_NOT_PREFIX_RE = re.compile(
+    r"\b" + r"\s+".join(re.escape(w) for w in OCCLUDED_SEE_COULD_NOT_SEE.split()[:-1]) + r"\s+$"
+)
+_OCCLUDED_SEE_BARE_VERB: str = OCCLUDED_SEE_COULD_NOT_SEE.split()[-1]
 _FRONTED_TIME_PLACE_NEG_RE = re.compile(
     r"\b(?:not\s+long\s+(?:after(?:wards?)?|before)(?:\s+(?:arriving|entering|leaving|moving|speaking|stepping|walking|coming|returning|that)(?:\s+(?:in|into|at|from|to)\s+[a-z0-9_ -]+)?)?\s*,"
     r"|not\s+far\s+(?:from|away|off)(?:\s+[a-z0-9_-]+){0,6}\s*,"
@@ -540,6 +549,30 @@ _ACTION_VERBS_BY_KIND: dict[str, tuple[str, ...]] = {
     "say": ("said", "stated", "spoke", "announced", "uttered", "claimed", "reported", "told"),
     "message": ("sent", "messaged", "texted", "transmitted", "notified", "wrote"),
 }
+
+
+def verify_station_and_occlusion_constants() -> None:
+    """Card ue (fix round ui): the two constants that looked prompt-only are what the checker enforces.
+    `STATION_MOVE_VERB` must be a move verb the actor-as-subject gate accepts, and the could-not regexes must be
+    the ones built from `OCCLUDED_SEE_COULD_NOT_SEE`, whose last word must be a sighting verb. Run at import and
+    by `verify_prompt_and_checker_requirements_aligned`."""
+    if STATION_MOVE_VERB not in _ACTION_VERBS_BY_KIND["move"]:
+        raise ValueError(f"STATION_MOVE_VERB {STATION_MOVE_VERB!r} is not in _ACTION_VERBS_BY_KIND['move'].")
+    words = OCCLUDED_SEE_COULD_NOT_SEE.split()
+    if len(words) < 2 or words[-1] not in SIGHTING_VERBS or words[-1] != _OCCLUDED_SEE_BARE_VERB:
+        raise ValueError(f"OCCLUDED_SEE_COULD_NOT_SEE {OCCLUDED_SEE_COULD_NOT_SEE!r} must end in a sighting verb.")
+    if _COULD_NOT_SEE_RE.fullmatch(OCCLUDED_SEE_COULD_NOT_SEE) is None or (
+        _OCCLUDED_SEE_COULD_NOT_PREFIX_RE.search(" ".join(words[:-1]) + " ") is None
+    ):
+        raise ValueError(
+            f"The could-not regexes are not built from OCCLUDED_SEE_COULD_NOT_SEE {OCCLUDED_SEE_COULD_NOT_SEE!r}."
+        )
+    if OCCLUDED_SEE_COULD_NOT_SEE not in BLOCKING_PHRASES:
+        raise ValueError(f"OCCLUDED_SEE_COULD_NOT_SEE {OCCLUDED_SEE_COULD_NOT_SEE!r} is not a BLOCKING_PHRASES entry.")
+
+
+verify_station_and_occlusion_constants()
+
 _FOLDED_LEAVE_ENTER_VERBS: tuple[str, ...] = tuple(
     dict.fromkeys(_ACTION_VERBS_BY_KIND["enter"] + _ACTION_VERBS_BY_KIND["leave"])
 )
@@ -1010,6 +1043,7 @@ def verify_prompt_and_checker_requirements_aligned(
         )
     # Card ue: the station-change and occluded-see clauses the prompt carries must be the ones rendered from
     # the checker's constants, and every form the checker accepts or requires must appear in that rule.
+    verify_station_and_occlusion_constants()
     event_order_text = next(r.rule_text for r in parsed_prompt_reqs if r.check_id == "c_fidelity_event_order")
     for clause in (format_station_change_clause(), format_occluded_see_clause()):
         if clause not in event_order_text:
@@ -1528,9 +1562,9 @@ def _actor_precedes_verb_as_subject(
             continue
         for m_verb in re.finditer(rf"\b(?:{verb_alt})\b", after_actor):
             between = after_actor[: m_verb.start()]
-            # Allow bare "see" as a sighting verb ONLY after "could not" on an occluded see
-            if m_verb.group(0).lower() == "see":
-                if re.search(r"\bcould\s+not\s+$", between) is None:
+            # Allow the bare sighting verb ("see") ONLY after the OCCLUDED_SEE_COULD_NOT_SEE prefix on an occluded see
+            if m_verb.group(0).lower() == _OCCLUDED_SEE_BARE_VERB:
+                if _OCCLUDED_SEE_COULD_NOT_PREFIX_RE.search(between) is None:
                     continue
                 if ev is not None and not (ev.kind == "see" and ev.occluded and ev.occluder):
                     continue
@@ -1919,14 +1953,16 @@ def _sentence_states_occluder_blocked_actor_sight(s_low: str, ev: Event) -> bool
 
 
 def _sentence_asserts_sighting_of_target(frame_low: str, ev: Event, all_parties: Sequence[str]) -> bool:
-    """Card ue: True if the actor is the subject of a verb that asserts a sighting (`saw`, `observed`, ...) followed
-    by the target object. On an occluded see this is a false perceptual claim and is refused."""
+    """Card ue: True if the actor is the subject of a verb that asserts a sighting (`saw`, `observed`, ...) whose
+    object is the target (`saw [the|a|his|...] <target>`). On an occluded see this is a false perceptual claim and
+    is refused. The target elsewhere after the verb does not count (fix round ui): `noticed that the <occluder>
+    blocked <actor>'s sight of the <target>` and `saw nothing of the <target>` are not sightings of the target."""
     if not ev.target_object:
         return False
     tgt_esc = re.escape(ev.target_object.lower())
     for verb in OCCLUDED_SEE_REFUSED_SIGHTING_VERBS:
         if _actor_precedes_verb_as_subject(frame_low, ev.actor, (verb,), all_parties, ev=ev) and re.search(
-            rf"\b{re.escape(verb)}\b[^.;]*\b{tgt_esc}\b", frame_low
+            rf"\b{re.escape(verb)}\s+(?:(?:the|a|an|his|her|their|its)\s+)?{tgt_esc}\b", frame_low
         ):
             return True
     return False

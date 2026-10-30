@@ -8405,9 +8405,11 @@ def test_87_card_ue_station_change_and_occluded_see_prompt_and_checker(monkeypat
     """
     import udlab_generator.render as ug_render
     from udlab_generator.render import (
+        NEGATION_PHRASES,
         OCCLUDED_SEE_BLOCKED_PHRASES,
         OCCLUDED_SEE_COULD_NOT_SEE,
         ProseRequirementSpec,
+        SIGHTING_VERBS,
         STATION_MOVE_DIRECTION_WORDS,
         _sentence_asserts_sighting_of_target,
         _sentence_matches_event,
@@ -8478,6 +8480,22 @@ def test_87_card_ue_station_change_and_occluded_see_prompt_and_checker(monkeypat
     for false_sighting in false_sightings:
         assert _sentence_asserts_sighting_of_target(false_sighting.lower(), os_a, parties), false_sighting
         assert not m(false_sighting, os_a), false_sighting
+    # Fix round ui, item 2: the sighting verb must take the container as its object. A sighting verb whose object
+    # is something else (the fact that the occluder blocked the actor's sight; "nothing of" the container) is not
+    # a sighting of the container, and these correct sentences pass.
+    noticed_that = f"Next, in the {room}, {a} noticed that the {occ} blocked {a}'s sight of the {tgt_a} from the far-side alcove."
+    saw_nothing = f"Next, in the {room}, {a} saw nothing of the {tgt_a} from the far-side alcove, blocked by the {occ}."
+    for correct_see in (noticed_that, saw_nothing):
+        assert not _sentence_asserts_sighting_of_target(correct_see.lower(), os_a, parties), correct_see
+    assert m(noticed_that, os_a)
+    # "saw nothing of" is no longer a false sighting, but 'nothing' is a NEGATION_PHRASES entry and the spec allows
+    # no negation in an event sentence except 'could not see' on an occluded see, so the pre-existing negation
+    # guard still refuses it. Changing that rule is outside this card.
+    from udlab_generator.render import _has_forbidden_event_negation
+
+    assert "nothing" in NEGATION_PHRASES
+    assert _has_forbidden_event_negation(saw_nothing.lower(), os_a, parties, action_verbs=SIGHTING_VERBS)
+    assert not m(saw_nothing, os_a)
     # An attempt verb with the blocked clause is still the occluded see (the actor looked, but did not see).
     for attempt_verb in ("looked toward", "watched", "glanced at"):
         attempt = f"Next, in the {room}, from the far-side alcove, {a} {attempt_verb} the {tgt_a}, but the {occ} blocked the view."
@@ -8605,6 +8623,44 @@ def test_87_card_ue_station_change_and_occluded_see_prompt_and_checker(monkeypat
     with pytest.raises(ValueError, match="checker-derived clause"):
         verify_prompt_and_checker_requirements_aligned(stripped_prompt)
     monkeypatch.undo()
+
+    # Fix round ui, item 1: STATION_MOVE_VERB and OCCLUDED_SEE_COULD_NOT_SEE are enforced by the checker, not only
+    # rendered: the could-not regexes are built from the constant and the station verb must be a move verb the
+    # subject gate accepts. Diverging either constant fails the constants check (run at import and by the
+    # alignment check).
+    from udlab_generator.render import (
+        _COULD_NOT_SEE_RE,
+        _OCCLUDED_SEE_COULD_NOT_PREFIX_RE,
+        verify_station_and_occlusion_constants,
+    )
+
+    verify_station_and_occlusion_constants()
+    assert ug_render.STATION_MOVE_VERB in ug_render._ACTION_VERBS_BY_KIND["move"]
+    assert _COULD_NOT_SEE_RE.fullmatch(ug_render.OCCLUDED_SEE_COULD_NOT_SEE)
+    assert _OCCLUDED_SEE_COULD_NOT_PREFIX_RE.search("ben could not ")
+    assert m(
+        f"Next, in the {room}, {a} {ug_render.OCCLUDED_SEE_COULD_NOT_SEE} the {tgt_b} from the far-side alcove, "
+        f"blocked by the {occ}.",
+        os_b,
+    )
+    assert m(f"Next, in the {room}, {a} {ug_render.STATION_MOVE_VERB} behind the {occ} to the far-side alcove.", sm)
+    monkeypatch.setattr(ug_render, "STATION_MOVE_VERB", "slipped")
+    with pytest.raises(ValueError, match="STATION_MOVE_VERB"):
+        verify_station_and_occlusion_constants()
+    with pytest.raises(ValueError, match="STATION_MOVE_VERB"):
+        verify_prompt_and_checker_requirements_aligned()
+    monkeypatch.undo()
+    monkeypatch.setattr(ug_render, "OCCLUDED_SEE_COULD_NOT_SEE", "could not spot")
+    with pytest.raises(ValueError, match="OCCLUDED_SEE_COULD_NOT_SEE"):
+        verify_station_and_occlusion_constants()
+    with pytest.raises(ValueError, match="OCCLUDED_SEE_COULD_NOT_SEE"):
+        verify_prompt_and_checker_requirements_aligned()
+    monkeypatch.undo()
+    monkeypatch.setattr(ug_render, "OCCLUDED_SEE_COULD_NOT_SEE", "failed to see")
+    with pytest.raises(ValueError, match="could-not regexes"):
+        verify_station_and_occlusion_constants()
+    monkeypatch.undo()
+    verify_station_and_occlusion_constants()
 
     # 9. Coverage of the seven station-move emission sites in `world.py` (Publisher condition 4). The sites are
     # selected by the (B1, B2) cell: (False, True) emits bay->alcove, alcove->bay, bay->alcove (three sites);
