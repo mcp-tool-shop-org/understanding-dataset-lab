@@ -226,6 +226,37 @@ BLOCKING_PHRASES: tuple[str, ...] = (
     "blocking sight",
 )
 
+NEGATION_PHRASES: tuple[str, ...] = (
+    "not",
+    "n't",
+    "never",
+    "no longer",
+    "no one",
+    "nobody",
+    "nothing",
+    "failed to",
+    "without",
+    "neither",
+    "nor",
+    "unable to",
+    "could not",
+    "cannot",
+    "did not",
+    "didn't",
+)
+
+_NEGATION_PATTERN = re.compile(
+    r"(?:"
+    + "|".join(
+        re.escape(p) if p.startswith("'") or p.startswith("n'") else rf"\b{re.escape(p)}\b"
+        for p in NEGATION_PHRASES
+    )
+    + r")",
+    re.IGNORECASE,
+)
+_ADJACENT_ROOMS_COULD_NOT_HEAR_RE = re.compile(r"\badjacent\s+rooms\s+could\s+not\s+hear\b", re.IGNORECASE)
+_COULD_NOT_SEE_RE = re.compile(r"\bcould\s+not\s+see\b", re.IGNORECASE)
+
 SETUP_CHECKLIST_ORDER: str = (
     "rooms -> containers per room -> fixtures per room -> occluders -> doorways -> "
     "starting rooms -> goals -> stake -> belief rule -> hearing threshold"
@@ -265,14 +296,19 @@ def format_blocking_phrases_summary() -> str:
     return ", ".join(f"'{p}'" for p in BLOCKING_PHRASES)
 
 
+def format_negation_phrases_summary() -> str:
+    """Format `NEGATION_PHRASES` into a deterministic prompt string."""
+    return ", ".join(NEGATION_PHRASES)
+
+
 WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ProseRequirementSpec(
         "c_fidelity_paragraph_split",
-        f'Output two paragraphs separated by "\\n\\n": Paragraph 1 is setup ({SETUP_CHECKLIST_ORDER}); Paragraph 2 is events.',
+        f'Output two paragraphs separated by "\\n\\n": Paragraph 1 setup ({SETUP_CHECKLIST_ORDER}); Paragraph 2 events.',
     ),
     ProseRequirementSpec(
         "c_fidelity_focal_agent",
-        "Name focal_agent in setup, framing transitions around focal_agent without omitting any event.",
+        "Name focal_agent in setup, framing transitions around focal_agent without omitting events.",
     ),
     ProseRequirementSpec(
         "c_fidelity_room_setup",
@@ -280,27 +316,27 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ),
     ProseRequirementSpec(
         "c_fidelity_containers",
-        "Name both containers of every room from containers_by_room in setup.",
+        "Name both containers of each room in setup.",
     ),
     ProseRequirementSpec(
         "c_fidelity_fixtures",
-        "Name each room's fixture from fixtures_by_room in setup.",
+        "Name each room's fixture in setup.",
     ),
     ProseRequirementSpec(
         "c_fidelity_occluder",
-        "Name each room's occluder from occluders_by_room in setup, between 'far-side alcove' and 'container bay' blocking sight from 'far-side alcove' while 'container bay' sees containers in open view.",
+        "Name each room's occluder in setup, between 'far-side alcove' and 'container bay' blocking sight from 'far-side alcove' while 'container bay' sees containers in open view.",
     ),
     ProseRequirementSpec(
         "c_fidelity_stations",
-        "Name both stations ('container bay' and 'far-side alcove') in setup.",
+        "Name 'container bay' and 'far-side alcove' in setup.",
     ),
     ProseRequirementSpec(
         "c_fidelity_doorways",
-        "For each doorway [room_a, room_b], name both rooms in one setup sentence (natural phrasing, never an exact phrase).",
+        "For each doorway [room_a, room_b], name both rooms in one setup sentence (natural phrasing).",
     ),
     ProseRequirementSpec(
         "c_fidelity_initial_room",
-        "For each agent in agents, name the agent and starting room (initial_agent_rooms[agent]) in one setup sentence (grouped agents pass).",
+        "For each agent, name agent and initial_agent_rooms[agent] in one setup sentence (grouped pass).",
     ),
     ProseRequirementSpec(
         "c_fidelity_goal",
@@ -308,7 +344,7 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ),
     ProseRequirementSpec(
         "c_fidelity_absent_party",
-        "Name every absent party from absent_parties in setup.",
+        "Name every absent party in setup.",
     ),
     ProseRequirementSpec(
         "c_fidelity_stake_edge",
@@ -316,52 +352,53 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ),
     ProseRequirementSpec(
         "d_rule_sentence",
-        f'Include the belief-persistence rule byte-identically once in setup: "{BELIEF_PERSISTENCE_RULE}"',
+        f'Include belief-persistence rule once in setup: "{BELIEF_PERSISTENCE_RULE}"',
     ),
     ProseRequirementSpec(
         "d_hearing_threshold",
-        "State doorway hearing threshold in dB and 'doorway' in setup (say >= threshold dB carries one doorway; quieter stays in room).",
+        "State doorway hearing threshold in dB and 'doorway' in setup (>= threshold dB carries one doorway; quieter stays).",
     ),
     ProseRequirementSpec(
         "c_fidelity_event_order",
-        "Write one sentence per event in order: name actor (no pronouns) before action verb ("
+        "Write one sentence per event in order (event sentences state what happened, without negation: "
+        f"{format_negation_phrases_summary()}); "
+        "actor (no pronouns) precedes verb ("
         f"{format_action_verbs_by_kind_summary()}"
-        ") with no party between actor and verb; name event room ('in/from/inside/at/of [the] <room>', no other room on intra-room events); "
-        "state from_location before to_location on enter/leave/move (or 'entered/arrived in <to> ... from <from>' on enter), where from-locations on enter/move use 'from'/'out of' and to-locations on enter/leave/move use 'to'/'into'/'toward'/'at'/'in'/'onto'; "
-        "on see, name target_object, and when occluded=false and to_location is a container also place target_object at to_location ('container bay' is never required as to_location); "
-        "on unoccluded object move/see, contain no blocking language ("
+        ") with no intervening party; name room ('in/from/inside/at/of [the] <room>', no other room on intra-room); "
+        "from_location before to_location on enter/leave/move (or 'entered/arrived in <to> ... from <from>' on enter), where from-locations on enter/move use 'from'/'out of' and to-locations on enter/leave/move use 'to'/'into'/'toward'/'at'/'in'/'onto'; "
+        "on see, name target_object, and if unoccluded at a container place it at to_location ('container bay' optional); "
+        "on unoccluded move/see, no blocking phrases ("
         f"{format_blocking_phrases_summary()}"
-        "; 'in open view' optional), and when occluded=true state room occluder + 'blocked'/'blocking sight' (+ 'far-side alcove' on occluded see); "
-        "on say, state '<noise_level> dB' and quote utterance verbatim; "
-        "on message, state 'to/for/messaged/texted/notified <recipient>' and quote utterance verbatim; end say/message sentences with quoted speech.",
+        "; 'in open view' optional); on occluded, state occluder + 'blocked'/'blocking sight' (+ 'far-side alcove' on occluded see, where 'could not see' is allowed); "
+        "on say, '<noise_level> dB' + verbatim quote; on message, 'to/for/messaged/texted/notified <recipient>' + verbatim quote.",
     ),
     ProseRequirementSpec(
         "c_fidelity_missing_event",
-        "Include every logged event as its own sentence without omitting or merging.",
+        "Include every logged event without omitting or merging.",
     ),
     ProseRequirementSpec(
         "c_fidelity_unlogged_event",
-        "Include no extra unlogged sentences in the event paragraph.",
+        "Include no extra unlogged event sentences.",
     ),
     ProseRequirementSpec(
         "c_fidelity_contradictory_occlusion",
-        "Never state both 'in open view' and 'blocked' in one sentence.",
+        "Never combine 'in open view' and 'blocked' in one sentence.",
     ),
     ProseRequirementSpec(
         "c_fidelity_unlogged_party",
-        "Never mention any party not in agents or absent_parties.",
+        "Never name a party outside agents and absent_parties.",
     ),
     ProseRequirementSpec(
         "c_fidelity_unlogged_entity",
-        "Never mention any entity or phrase from another domain.",
+        "Never name an entity from another domain.",
     ),
     ProseRequirementSpec(
         "c_fidelity_unlogged_motive",
-        "Never assert an unlogged motive when stated_reason is absent.",
+        "Never state an unlogged motive when stated_reason is absent.",
     ),
     ProseRequirementSpec(
         "c_fidelity_unlogged_placer",
-        "Never attribute placement/movement of the unsigned note when no move event is logged.",
+        "Never attribute placement/movement of the unsigned note when unlogged.",
     ),
     ProseRequirementSpec(
         "a_no_markers_bracket",
@@ -852,6 +889,14 @@ def _ordered_from_to_positions(
     return False
 
 
+def _has_forbidden_event_negation(frame_low: str, ev: Event) -> bool:
+    """Return True if `frame_low` contains any negation from `NEGATION_PHRASES` outside the allowed occluded-see blocking clause."""
+    cleaned = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", frame_low)
+    if ev.kind == "see" and ev.occluded and ev.occluder:
+        cleaned = _COULD_NOT_SEE_RE.sub("", cleaned)
+    return _NEGATION_PATTERN.search(cleaned) is not None
+
+
 def _sentence_matches_event(
     sentence: str,
     ev: Event,
@@ -862,6 +907,8 @@ def _sentence_matches_event(
     s_low = sentence.lower()
     s_unquoted_low = re.sub(r'"[^"]*"|“[^”]*”', '""', s_low)
     frame_low = s_unquoted_low if ev.kind in ("say", "message") else s_low
+    if _has_forbidden_event_negation(frame_low, ev):
+        return False
     all_parties: Sequence[str] = (
         tuple(world.agents) + tuple(world.absent_parties)
         if world is not None

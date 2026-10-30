@@ -4104,6 +4104,178 @@ def test_49_max_retries_1_records_refusal_and_saves_both_texts(tmp_path: Path) -
     ]
 
 
+@pytest.mark.parametrize(
+    ("kind", "ev_idx", "neg_sent"),
+    [
+        (
+            "see",
+            0,
+            "Eva never saw the index reel in the linen bin in the bindery room.",
+        ),
+        (
+            "leave",
+            1,
+            "Dan never left the bindery room and headed toward the sorting room.",
+        ),
+        (
+            "enter",
+            2,
+            "Dan never entered the sorting room from the bindery room.",
+        ),
+        (
+            "move",
+            6,
+            "In the sorting room, Cara never relocated the brass ledger from the intake bench into the iron safe in open view.",
+        ),
+        (
+            "say",
+            22,
+            'In the reading room, Cara never announced at 60 dB: "The seal stamp is stored in the cedar shelf."',
+        ),
+        (
+            "message",
+            24,
+            'In the reading room, Cara never texted to Gia: "Update for Gia: the brass ledger is stored at the maple cubby."',
+        ),
+    ],
+    ids=["see", "leave", "enter", "move", "say", "message"],
+)
+def test_50a_negated_sentence_refused_per_event_kind(kind: str, ev_idx: int, neg_sent: str) -> None:
+    """Test 50a (Card ss Req 2): One negated sentence per event kind that appears in scen_0000
+    (see, move, leave, enter, say, message), each refused with a named check id (`c_fidelity_missing_event`).
+    """
+    from udlab_generator.render import _sentence_matches_event
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]  # Eva
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    setup_with_fixtures = (
+        f"{sj_setup} Fixtures per room: a wall barometer in the vault room, a wall clock in the reading room, "
+        f"a humidity dial in the bindery room, and a ventilation grille in the sorting room."
+    )
+
+    ev = w.events[ev_idx]
+    assert ev.kind == kind
+    assert not _sentence_matches_event(neg_sent, ev, w.noise_threshold, world=w), (
+        f"Negated {kind!r} sentence must not match event #{ev_idx + 1}: {neg_sent!r}"
+    )
+    bad_sents = list(sj_sents)
+    bad_sents[ev_idx] = neg_sent
+    with pytest.raises(RenderCheckError) as exc_neg:
+        check_rendered_prose(
+            f"{setup_with_fixtures}\n\n{' '.join(bad_sents)}",
+            w,
+            focal_agent=fa,
+        )
+    assert exc_neg.value.check_id == "c_fidelity_missing_event", (
+        f"Negated {kind!r} sentence must fail with c_fidelity_missing_event, got {exc_neg.value.check_id!r}"
+    )
+
+
+def test_50b_negation_list_prompt_and_pass_cases() -> None:
+    """Test 50b (Card ss Req 1 & 2):
+    - One negation list in code (`NEGATION_PHRASES`), rendered into the prompt's generated constraints block
+      ("event sentences state what happened, without negation"), and used by the checker for every event kind.
+    - Covers at least: not, n't, never, no longer, no one, nobody, nothing, failed to, without, neither, nor,
+      unable to, could not, cannot, did not, didn't.
+    - The occluded 'could not see ... behind the <occluder>' sentence still passes.
+    - The earlier pass case ('Eva observed the index reel in the linen bin in the bindery room.') still passes.
+    """
+    import udlab_generator.render as ug_render
+    from udlab_generator.render import _sentence_matches_event
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]  # Eva
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    setup_with_fixtures = (
+        f"{sj_setup} Fixtures per room: a wall barometer in the vault room, a wall clock in the reading room, "
+        f"a humidity dial in the bindery room, and a ventilation grille in the sorting room."
+    )
+
+    # 1. Verify all 6 event kinds appear in scen_0000:
+    scen_0000_kinds = {ev.kind for ev in w.events}
+    assert scen_0000_kinds == {"see", "move", "leave", "enter", "say", "message"}
+
+    # 2. Verify earlier pass case ("Eva observed the index reel in the linen bin in the bindery room.") still passes:
+    ev_1 = w.events[0]
+    refusal_1_pass_sent = "Eva observed the index reel in the linen bin in the bindery room."
+    assert _sentence_matches_event(refusal_1_pass_sent, ev_1, w.noise_threshold, world=w)
+    assert (
+        check_rendered_prose(
+            f"{setup_with_fixtures}\n\n{' '.join([refusal_1_pass_sent, *sj_sents[1:]])}",
+            w,
+            focal_agent=fa,
+        )
+        == ()
+    )
+
+    # 3. Verify occluded "could not see ... behind the <occluder>" sentence still passes:
+    ev_17 = w.events[16]
+    assert ev_17.kind == "see" and ev_17.occluded and ev_17.occluder == "rolling pillar"
+    occluded_could_not_see_sent = (
+        "In the sorting room, from the far-side alcove, Dan looked toward the iron safe, "
+        "but could not see the iron safe behind the rolling pillar, which blocked the view."
+    )
+    assert _sentence_matches_event(occluded_could_not_see_sent, ev_17, w.noise_threshold, world=w)
+    sents_occ_pass = list(sj_sents)
+    sents_occ_pass[16] = occluded_could_not_see_sent
+    assert (
+        check_rendered_prose(
+            f"{setup_with_fixtures}\n\n{' '.join(sents_occ_pass)}",
+            w,
+            focal_agent=fa,
+        )
+        == ()
+    )
+
+    # 4. Verify one negation list in code (`NEGATION_PHRASES`), covering all required items and rendered into prompt constraints:
+    required_negation_items = (
+        "not",
+        "n't",
+        "never",
+        "no longer",
+        "no one",
+        "nobody",
+        "nothing",
+        "failed to",
+        "without",
+        "neither",
+        "nor",
+        "unable to",
+        "could not",
+        "cannot",
+        "did not",
+        "didn't",
+    )
+    negation_phrases = getattr(ug_render, "NEGATION_PHRASES", None)
+    assert isinstance(negation_phrases, tuple), "NEGATION_PHRASES must be a tuple in render.py"
+    for item in required_negation_items:
+        assert item in negation_phrases, f"Required negation phrase {item!r} missing from NEGATION_PHRASES"
+
+    prompt_text = format_writer_prompt(w, fa)
+    assert "event sentences state what happened, without negation" in prompt_text
+    for item in negation_phrases:
+        assert item in prompt_text, f"Negation item {item!r} missing from rendered writer prompt"
+    ug_render.verify_prompt_and_checker_requirements_aligned(prompt_text)
+
+    # Also verify each negation item in NEGATION_PHRASES is rejected across every event kind in scen_0000:
+    sample_events_by_kind: tuple[tuple[int, str], ...] = (
+        (0, "In the bindery room, Eva {neg} observed the index reel in the linen bin."),
+        (1, "Dan {neg} left the bindery room and headed toward the sorting room."),
+        (2, "Dan {neg} entered the sorting room from the bindery room."),
+        (6, "In the sorting room, Cara {neg} relocated the brass ledger from the intake bench into the iron safe."),
+        (22, 'In the reading room, Cara {neg} announced at 60 dB: "The seal stamp is stored in the cedar shelf."'),
+        (24, 'In the reading room, Cara {neg} texted to Gia: "Update for Gia: the brass ledger is stored at the maple cubby."'),
+    )
+    for item in negation_phrases:
+        for ev_idx, tmpl in sample_events_by_kind:
+            sent_neg = tmpl.format(neg=item)
+            assert not _sentence_matches_event(sent_neg, w.events[ev_idx], w.noise_threshold, world=w), (
+                f"Negation item {item!r} must be rejected on {w.events[ev_idx].kind} event"
+            )
+
+
+
 
 
 
