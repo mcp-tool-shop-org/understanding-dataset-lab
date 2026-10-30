@@ -2523,9 +2523,31 @@ def test_33_changes_2_4_5_6_think_refusals_cleanup_and_verify(tmp_path: Path) ->
     assert think_writer.think is True
     assert think_writer.num_predict == 5120
     assert think_writer.max_num_ctx == 9216
-    think_writer.render_scenario_pair(w0)
+    # Card ue: a think call fits only when prompt_tokens_estimate + 5120 <= 9216, i.e. a prompt of at most 4096
+    # tokens. At dfcbe6a that held for 1 of the 10 balanced worlds (this one, by 21 tokens); the station-change
+    # and occluded-see clauses add about 190 tokens, so it now holds for none, and the over-budget think call is
+    # refused as max_num_ctx_exceeded (the defaults are unchanged). The think payload is exercised below with an
+    # explicit num_predict that fits.
+    from udlab_generator.render import estimate_prompt_tokens
+
+    w0_prompt_tokens = estimate_prompt_tokens(
+        [{"role": "user", "content": format_writer_prompt(w0, w0.agents[0])}]
+    )
+    assert w0_prompt_tokens + DEFAULT_WRITER_NUM_PREDICT <= DEFAULT_WRITER_MAX_NUM_CTX
+    assert w0_prompt_tokens + think_writer.num_predict > think_writer.max_num_ctx
+    with pytest.raises(MaxNumCtxRefusalError, match="9216"):
+        think_writer.render_scenario_pair(w0)
+    assert not seen_chat_payloads
+    think_writer_fit = OllamaWriter(
+        think=True,
+        num_predict=DEFAULT_WRITER_NUM_PREDICT,
+        grant_id="test-grant",
+        http_transport=_recording_transport,
+    )
+    assert think_writer_fit.think is True and think_writer_fit.max_num_ctx == 9216
+    think_writer_fit.render_scenario_pair(w0)
     assert seen_chat_payloads[-1]["think"] is True
-    assert seen_chat_payloads[-1]["options"]["num_predict"] == 5120
+    assert seen_chat_payloads[-1]["options"]["num_predict"] == DEFAULT_WRITER_NUM_PREDICT
     assert seen_chat_payloads[-1]["options"]["num_ctx"] == 9216
 
     # --- Change 4: Prose-check and length_stop refusals persisted in generations.jsonl ---
@@ -8369,3 +8391,262 @@ def test_86_card_ua_folded_enter_never_consumes_the_next_sentence() -> None:
             check_rendered_prose(prose_of(wrong_room), w, focal_agent=fa)
         assert exc_wrong.value.check_id == "c_fidelity_event_order"
         assert exc_wrong.value.event_index == 6
+
+
+def test_87_card_ue_station_change_and_occluded_see_prompt_and_checker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test 87 (Card ue): a station change is the actor stepping behind/around the room's occluder (never moving
+    it), and an occluded see is the occluder blocking the actor's sight (never the actor seeing). The prompt
+    clauses and the checker's accepted forms come from the same constants, and the alignment check covers them.
+    Card ua's advisory: an adverb between a move verb and its object is still a move, never an enter.
+
+    Built on seed 20261033 (events 7, 11, 13: Ben steps behind / back around / behind the frosted partition in
+    the vault room; 34-35: Ben's occluded sees of the oak drawer and the steel cabinet from the far-side alcove;
+    4-6: Eva's leave, enter and move of the brass ledger). All sentences are synthetic.
+    """
+    import udlab_generator.render as ug_render
+    from udlab_generator.render import (
+        OCCLUDED_SEE_BLOCKED_PHRASES,
+        OCCLUDED_SEE_COULD_NOT_SEE,
+        ProseRequirementSpec,
+        STATION_MOVE_DIRECTION_WORDS,
+        _sentence_asserts_sighting_of_target,
+        _sentence_matches_event,
+        _sentence_states_non_arrival_action,
+        _sentence_states_occluder_blocked_actor_sight,
+        _split_prose_sentences,
+        format_occluded_see_clause,
+        format_repair_retry_line,
+        format_station_change_clause,
+        get_station_and_occlusion_checker_forms,
+        render_writer_prompt_constraints,
+        verify_prompt_and_checker_requirements_aligned,
+    )
+    from udlab_generator.world import is_station_transition_event
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261033)[0])
+    fa = w.agents[0]
+    setup_para, events_para = render_world_template(w, fa).split("\n\n")
+    sents = _split_prose_sentences(events_para)
+    assert len(sents) == len(w.events) == 36
+    sm, back, sm2 = w.events[6], w.events[10], w.events[12]
+    assert all(is_station_transition_event(e) for e in (sm, back, sm2))
+    assert sm.actor == back.actor == sm2.actor == "Ben" and sm.room == "vault room"
+    assert (sm.from_location, sm.to_location) == ("container bay", "far-side alcove")
+    assert (back.from_location, back.to_location) == ("far-side alcove", "container bay")
+    os_a, os_b = w.events[33], w.events[34]
+    assert os_a.kind == os_b.kind == "see" and os_a.occluded and os_b.occluded
+    assert os_a.actor == os_b.actor == "Ben" and os_a.occluder == os_b.occluder == sm.target_object
+    a, occ, room = sm.actor, sm.target_object, sm.room
+    tgt_a, tgt_b = os_a.target_object, os_b.target_object
+    parties = tuple(w.agents) + tuple(w.absent_parties)
+
+    def m(sentence: str, ev: Event) -> bool:
+        return _sentence_matches_event(sentence, ev, w.noise_threshold, world=w)
+
+    def prose_of(event_sents: list[str]) -> str:
+        return f"{setup_para}\n\n{' '.join(event_sents)}"
+
+    # Must refuse 1: the occluder as the direct object of a move verb, no "behind"/"around" (the furniture form).
+    literal_forms = [
+        f"Next, in the {room}, {a} moved the {occ} from the container bay to the far-side alcove.",
+        f"Next, in the {room}, {a} shifted the {occ} from the container bay to the far-side alcove.",
+        f"Next, in the {room}, {a} moved quickly the {occ} from the container bay to the far-side alcove.",
+    ]
+    for literal in literal_forms:
+        assert not m(literal, sm), literal
+    assert not m(f"Next, in the {room}, {a} moved the {occ} from the far-side alcove to the container bay.", back)
+    # A direction word does not rescue the occluder as the object of the move verb.
+    assert not m(f"Next, in the {room}, {a} moved the {occ} behind him to the far-side alcove.", sm)
+    # The right station is required.
+    assert not m(f"Next, in the {room}, {a} stepped behind the {occ} to the container bay.", sm)
+    assert not m(f"Next, in the {room}, {a} stepped to the far-side alcove.", sm)
+
+    # Must refuse 2: the agentless blocked form (perceptual records are per actor).
+    agentless = f"Next, in the {room}, the {occ} blocked sight of the {tgt_a} from the far-side alcove."
+    assert not m(agentless, os_a)
+    assert not _sentence_states_occluder_blocked_actor_sight(agentless.lower(), os_a)
+    assert not m(f"Next, in the {room}, the {occ} blocked the view of the {tgt_a} from the far-side alcove.", os_a)
+
+    # Must refuse 3: the actor saw / observed the container on an occluded see, with and without "behind the occluder".
+    false_sightings = [
+        f"Next, in the {room}, {a} saw the {tgt_a} behind the {occ} from the far-side alcove, which blocked the view.",
+        f"Next, in the {room}, {a} saw the {tgt_a} from the far-side alcove.",
+        f"Next, in the {room}, {a} observed the {tgt_a} behind the {occ}, which blocked sight from the far-side alcove.",
+        f"Next, in the {room}, {a} observed the {tgt_a} from the far-side alcove.",
+        f"Next, in the {room}, from the far-side alcove, {a} noticed the {tgt_a}, though the {occ} blocked part of the view.",
+    ]
+    for false_sighting in false_sightings:
+        assert _sentence_asserts_sighting_of_target(false_sighting.lower(), os_a, parties), false_sighting
+        assert not m(false_sighting, os_a), false_sighting
+    # An attempt verb with the blocked clause is still the occluded see (the actor looked, but did not see).
+    for attempt_verb in ("looked toward", "watched", "glanced at"):
+        attempt = f"Next, in the {room}, from the far-side alcove, {a} {attempt_verb} the {tgt_a}, but the {occ} blocked the view."
+        assert not _sentence_asserts_sighting_of_target(attempt.lower(), os_a, parties), attempt
+        assert m(attempt, os_a), attempt
+
+    # Must pass 4: the possessive form (sight / view / line of sight).
+    possessive = f"Next, in the {room}, the {occ} blocked {a}'s sight of the {tgt_a} from the far-side alcove."
+    assert _sentence_states_occluder_blocked_actor_sight(possessive.lower(), os_a)
+    assert m(possessive, os_a)
+    assert m(f"Next, in the {room}, the {occ} blocked {a}'s view of the {tgt_a} from the far-side alcove.", os_a)
+    assert m(f"Next, in the {room}, from the far-side alcove the {occ} blocked {a}'s line of sight of the {tgt_a}.", os_a)
+    # Another actor's possessive does not state this actor's see.
+    other = next(p for p in w.agents if p != a)
+    assert not m(f"Next, in the {room}, the {occ} blocked {other}'s sight of the {tgt_a} from the far-side alcove.", os_a)
+
+    # Must pass 5: stepped behind the occluder to the far-side alcove, and the return stepped back around it.
+    stepped_behind = f"Next, in the {room}, {a} stepped behind the {occ} to the far-side alcove."
+    back_around = f"Next, in the {room}, {a} stepped back around the {occ} to the container bay."
+    assert m(stepped_behind, sm) and m(stepped_behind, sm2)
+    assert m(back_around, back)
+    assert m(f"Next, in the {room}, {a} stepped from the container bay behind the {occ} into the far-side alcove.", sm)
+    assert not m(back_around, sm) and not m(stepped_behind, back)
+    # The station-change form is a move, never an arrival (so an enter can never consume it).
+    assert _sentence_states_non_arrival_action(stepped_behind.lower(), w, parties)
+    assert _sentence_states_non_arrival_action(back_around.lower(), w, parties)
+
+    # Must pass 6: could not see, blocked by the occluder.
+    could_not_see = f"Next, in the {room}, {a} could not see the {tgt_b} from the far-side alcove, blocked by the {occ}."
+    assert m(could_not_see, os_b)
+
+    # The template renders the new forms and passes its own checks; the full prose with every new form passes too.
+    assert check_rendered_prose(prose_of(sents), w, focal_agent=fa) == ()
+    for idx in (6, 10, 12):
+        assert m(sents[idx], w.events[idx])
+    for idx in (33, 34):
+        # The template: the actor looked, and the occluder blocked the actor's line of sight (per actor; the
+        # container named once so mention parity holds).
+        assert m(sents[idx], w.events[idx])
+        assert f"blocked {a}'s line of sight" in sents[idx]
+        assert sents[idx].count(w.events[idx].target_object) == 1
+    new_forms = list(sents)
+    new_forms[6], new_forms[10], new_forms[12] = stepped_behind, back_around, stepped_behind
+    new_forms[33], new_forms[34] = possessive, could_not_see
+    assert check_rendered_prose(prose_of(new_forms), w, focal_agent=fa) == ()
+
+    # The furniture form at every station move refuses on the first station move; the repair line names the
+    # stepping forms (Publisher condition 5 applied to station moves).
+    furniture = list(sents)
+    furniture[6] = literal_forms[0]
+    furniture[10] = f"Next, in the {room}, {a} moved the {occ} from the far-side alcove to the container bay."
+    furniture[12] = literal_forms[0]
+    with pytest.raises(RenderCheckError) as exc_sm:
+        check_rendered_prose(prose_of(furniture), w, focal_agent=fa)
+    assert exc_sm.value.check_id == "c_fidelity_missing_event"
+    assert (exc_sm.value.event_index, exc_sm.value.event_kind) == (7, "move")
+    assert exc_sm.value.event_variant == "station_move"
+    for form in ("multi_turn", "single_turn"):
+        line = format_repair_retry_line(exc_sm.value, retry_form=form)
+        assert "stepped behind" in line and "around" in line and "did not move the occluder" in line
+
+    # The agentless form refuses the occluded see; the repair line names "blocked" and "could not see"
+    # (Publisher condition 5). The false sighting refuses as well.
+    for bad_see in (agentless, false_sightings[0]):
+        bad = list(sents)
+        bad[33] = bad_see
+        with pytest.raises(RenderCheckError) as exc_os:
+            check_rendered_prose(prose_of(bad), w, focal_agent=fa)
+        assert exc_os.value.check_id == "c_fidelity_missing_event"
+        assert (exc_os.value.event_index, exc_os.value.event_kind) == (34, "see")
+        assert exc_os.value.event_variant == "occluded_see"
+        for form in ("multi_turn", "single_turn"):
+            line = format_repair_retry_line(exc_os.value, retry_form=form)
+            assert OCCLUDED_SEE_BLOCKED_PHRASES[0] in line and OCCLUDED_SEE_COULD_NOT_SEE in line
+            assert "never that the actor saw or observed it" in line
+
+    # (C) Card ua's advisory: an adverb between the move verb and its object is still a move, never an enter.
+    ev4, ev5, ev6 = w.events[3], w.events[4], w.events[5]
+    assert (ev4.kind, ev5.kind, ev6.kind) == ("leave", "enter", "move") and ev6.actor == "Eva"
+    folded_eva_vault = f"Next, {ev5.actor} walked from the {ev5.from_location} into the {ev5.to_location}."
+    adverb_move = (
+        f"Next, {ev6.actor} moved quickly the {ev6.target_object} from the {ev6.from_location} "
+        f"to the {ev6.to_location} in the {ev6.room}."
+    )
+    assert _sentence_states_non_arrival_action(adverb_move.lower(), w, parties)
+    assert m(adverb_move, ev6)
+    assert not m(adverb_move, ev5)
+    assert not _sentence_matches_event(
+        adverb_move, ev5, w.noise_threshold, world=w, prev_sentence=folded_eva_vault, prev_event=ev4
+    )
+    assert check_rendered_prose(prose_of(sents[:3] + [folded_eva_vault, adverb_move] + sents[6:]), w, focal_agent=fa) == ()
+
+    # 7. The prompt clauses and the checker forms come from one source: the alignment check, extended.
+    assert verify_prompt_and_checker_requirements_aligned() == ug_render.WRITER_PROSE_REQUIREMENTS
+    formatted = format_writer_prompt(w, fa)
+    station_clause, see_clause = format_station_change_clause(), format_occluded_see_clause()
+    assert station_clause in formatted and see_clause in formatted
+    event_order_rule = ug_render.WRITER_PROSE_REQUIREMENTS_BY_ID["c_fidelity_event_order"].rule_text
+    assert station_clause in event_order_rule and see_clause in event_order_rule
+    for form in get_station_and_occlusion_checker_forms():
+        assert form in event_order_rule, form
+    assert set(STATION_MOVE_DIRECTION_WORDS) <= set(get_station_and_occlusion_checker_forms())
+    assert "stepped behind the <occluder> to the far-side alcove" in station_clause
+    assert "stepped back around the <occluder> to the container bay" in station_clause
+    assert "never that the actor moved the <occluder>" in station_clause
+    assert "blocked <actor>'s sight of the <container> from the far-side alcove" in see_clause
+    assert "could not see the <container> from the far-side alcove, blocked by the <occluder>" in see_clause
+    assert "never that the actor saw or observed it" in see_clause
+    # A prompt whose event-order rule lacks a clause is refused, by the requirements comparison ...
+    with pytest.raises(ValueError):
+        verify_prompt_and_checker_requirements_aligned(
+            load_writer_prompt_template().replace(f"{station_clause}; ", "")
+        )
+    # ... and, if the shared spec itself dropped the clause, by the extended check.
+    stripped = tuple(
+        ProseRequirementSpec(r.check_id, r.rule_text.replace(f"{see_clause}; ", ""), r.required_in_setup)
+        if r.check_id == "c_fidelity_event_order"
+        else r
+        for r in ug_render.WRITER_PROSE_REQUIREMENTS
+    )
+    monkeypatch.setattr(ug_render, "WRITER_PROSE_REQUIREMENTS", stripped)
+    stripped_prompt = ug_render.WRITER_PROMPT_PATH.read_text(encoding="utf-8").replace(
+        ug_render.HARD_CONSTRAINTS_PLACEHOLDER, render_writer_prompt_constraints(stripped)
+    )
+    with pytest.raises(ValueError, match="checker-derived clause"):
+        verify_prompt_and_checker_requirements_aligned(stripped_prompt)
+    monkeypatch.undo()
+
+    # 9. Coverage of the seven station-move emission sites in `world.py` (Publisher condition 4). The sites are
+    # selected by the (B1, B2) cell: (False, True) emits bay->alcove, alcove->bay, bay->alcove (three sites);
+    # (True, False) emits the same sequence from three other sites; (False, False) and (True, True) emit one
+    # bay->alcove each ((False, False) shares its site with (True, False)). One world per cell reaches all seven.
+    expected_by_cell = {
+        (False, True): [("container bay", "far-side alcove"), ("far-side alcove", "container bay"), ("container bay", "far-side alcove")],
+        (True, False): [("container bay", "far-side alcove"), ("far-side alcove", "container bay"), ("container bay", "far-side alcove")],
+        (False, False): [("container bay", "far-side alcove")],
+        (True, True): [("container bay", "far-side alcove")],
+    }
+    cells_seen: dict[tuple[bool, bool], int] = {}
+    for cfg in make_balanced_configs(16, base_seed=20261033):
+        cell = (cfg.b1_true_belief, cfg.b2_true_belief)
+        if cell in cells_seen:
+            continue
+        wc = generate_world(cfg)
+        station_moves = [ev for ev in wc.events if is_station_transition_event(ev)]
+        assert [(ev.from_location, ev.to_location) for ev in station_moves] == expected_by_cell[cell], cell
+        assert len({ev.actor for ev in station_moves}) == 1 and len({ev.target_object for ev in station_moves}) == 1
+        fc = wc.agents[0]
+        setup_c, events_c = render_world_template(wc, fc).split("\n\n")
+        sents_c = _split_prose_sentences(events_c)
+        assert len(sents_c) == len(wc.events)
+        assert check_rendered_prose(f"{setup_c}\n\n{' '.join(sents_c)}", wc, focal_agent=fc) == ()
+        literal_c = list(sents_c)
+        first_sm_idx: int | None = None
+        for i, ev in enumerate(wc.events):
+            if is_station_transition_event(ev):
+                assert _sentence_matches_event(sents_c[i], ev, wc.noise_threshold, world=wc), (cell, i)
+                literal_c[i] = (
+                    f"Next, in the {ev.room}, {ev.actor} moved the {ev.target_object} "
+                    f"from the {ev.from_location} to the {ev.to_location}."
+                )
+                assert not _sentence_matches_event(literal_c[i], ev, wc.noise_threshold, world=wc), (cell, i)
+                if first_sm_idx is None:
+                    first_sm_idx = i
+        assert first_sm_idx is not None
+        with pytest.raises(RenderCheckError) as exc_c:
+            check_rendered_prose(f"{setup_c}\n\n{' '.join(literal_c)}", wc, focal_agent=fc)
+        assert exc_c.value.check_id == "c_fidelity_missing_event"
+        assert exc_c.value.event_index == first_sm_idx + 1 and exc_c.value.event_variant == "station_move"
+        cells_seen[cell] = len(station_moves)
+    assert sorted(cells_seen) == sorted(expected_by_cell)
+    assert sum(cells_seen.values()) == 8  # eight station-move events over the four cells, from seven sites

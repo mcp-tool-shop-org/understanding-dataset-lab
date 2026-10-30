@@ -193,6 +193,7 @@ class RenderCheckError(ValueError):
         failing_sentence_offset: int | None = None,
         failing_sentence_length: int | None = None,
         failure_kind: str = "altered",
+        event_variant: str | None = None,
     ) -> None:
         if failure_kind not in VALID_FAILURE_KINDS:
             raise ValueError(f"failure_kind must be one of {sorted(VALID_FAILURE_KINDS)}, got {failure_kind!r}")
@@ -204,6 +205,9 @@ class RenderCheckError(ValueError):
         self.failing_sentence = failing_sentence
         self.event_index = event_index
         self.event_kind = event_kind
+        # Card ue: `station_move` or `occluded_see` when the failing event is one of those forms, so the
+        # repair line can name the required wording; not sealed and not recorded.
+        self.event_variant = event_variant
         self.failing_sentence_sha256 = failing_sentence_sha256
         self.failing_sentence_offset = failing_sentence_offset
         self.failing_sentence_length = failing_sentence_length
@@ -409,6 +413,23 @@ BLOCKING_PHRASES: tuple[str, ...] = (
     "obscured",
     "blocking sight",
 )
+
+# Card ue: the station-change and occluded-see forms. These constants are the single source for both the
+# prompt clauses in `WRITER_PROSE_REQUIREMENTS` (`c_fidelity_event_order`, via `format_station_change_clause`
+# and `format_occluded_see_clause`) and the checker's station-move and occluded-see branches in
+# `_sentence_matches_event`; `verify_prompt_and_checker_requirements_aligned` checks that every one of them
+# is rendered into the prompt.
+STATION_MOVE_DIRECTION_WORDS: tuple[str, ...] = ("behind", "around")
+STATION_MOVE_VERB: str = "stepped"
+OCCLUDED_SEE_BLOCKED_PHRASES: tuple[str, ...] = ("blocked", "blocking sight")
+OCCLUDED_SEE_COULD_NOT_SEE: str = "could not see"
+OCCLUDED_SEE_SIGHT_NOUNS: tuple[str, ...] = ("sight", "view", "line of sight")
+# Sighting verbs that assert the actor perceived the target. On an occluded see (the actor looked and could NOT
+# see the container) a sentence with the actor as subject of one of these, followed by the container, is a false
+# perceptual claim and is refused. The other sighting verbs (`looked`, `watched`, `glanced`, `checked`, ...) can
+# introduce the attempt that the occluder blocked.
+OCCLUDED_SEE_REFUSED_SIGHTING_VERBS: tuple[str, ...] = ("saw", "observed", "spotted", "noticed")
+assert set(OCCLUDED_SEE_REFUSED_SIGHTING_VERBS) <= set(SIGHTING_VERBS)
 
 NEGATION_PHRASES: tuple[str, ...] = (
     "not",
@@ -619,6 +640,47 @@ def format_blocking_phrases_summary() -> str:
     return ", ".join(f"'{p}'" for p in BLOCKING_PHRASES)
 
 
+def format_station_change_clause() -> str:
+    """Card ue: the station-change clause of `c_fidelity_event_order`, rendered from the same constants the
+    checker's station-move branch enforces (`STATION_MOVE_DIRECTION_WORDS`, `STATION_MOVE_VERB`, the stations)."""
+    behind, around = STATION_MOVE_DIRECTION_WORDS
+    verb = STATION_MOVE_VERB
+    return (
+        f"a move of the room's occluder between {CONTAINER_BAY_STATION} and {FAR_SIDE_ALCOVE_STATION} means the actor "
+        f"{verb} {behind} (or back {around}) the <occluder>; write '<actor> {verb} {behind} the <occluder> to the "
+        f"{FAR_SIDE_ALCOVE_STATION}' (or '<actor> {verb} back {around} the <occluder> to the {CONTAINER_BAY_STATION}'), "
+        f"never that the actor moved the <occluder>"
+    )
+
+
+def format_occluded_see_clause() -> str:
+    """Card ue: the occluded-see clause of `c_fidelity_event_order`, rendered from the same constants the
+    checker's occluded-see branch enforces (`OCCLUDED_SEE_BLOCKED_PHRASES`, `OCCLUDED_SEE_COULD_NOT_SEE`,
+    `OCCLUDED_SEE_SIGHT_NOUNS`, the far-side alcove)."""
+    blocked = OCCLUDED_SEE_BLOCKED_PHRASES[0]
+    sight = OCCLUDED_SEE_SIGHT_NOUNS[0]
+    return (
+        f"on occluded see, write that the <occluder> {blocked} <actor>'s {sight} of the <container> from the "
+        f"{FAR_SIDE_ALCOVE_STATION}, or '<actor> {OCCLUDED_SEE_COULD_NOT_SEE} the <container> from the "
+        f"{FAR_SIDE_ALCOVE_STATION}, {blocked} by the <occluder>'; never that the actor saw or observed it"
+    )
+
+
+def get_station_and_occlusion_checker_forms() -> tuple[str, ...]:
+    """Card ue: every wording the checker's station-move and occluded-see branches accept or require, each of
+    which the prompt's `c_fidelity_event_order` rule must render (checked by
+    `verify_prompt_and_checker_requirements_aligned`)."""
+    return (
+        *STATION_MOVE_DIRECTION_WORDS,
+        STATION_MOVE_VERB,
+        CONTAINER_BAY_STATION,
+        FAR_SIDE_ALCOVE_STATION,
+        *OCCLUDED_SEE_BLOCKED_PHRASES,
+        OCCLUDED_SEE_COULD_NOT_SEE,
+        OCCLUDED_SEE_SIGHT_NOUNS[0],
+    )
+
+
 def format_negation_phrases_summary() -> str:
     """Format `NEGATION_PHRASES` into a deterministic prompt string."""
     return ", ".join(NEGATION_PHRASES)
@@ -767,6 +829,8 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
         "on unoccluded move/see, no blocking phrases ("
         f"{format_blocking_phrases_summary()}"
         "; 'in open view' optional); on occluded, state occluder + 'blocked'/'blocking sight' (+ 'far-side alcove' on occluded see, where 'could not see' is allowed); "
+        f"{format_station_change_clause()}; "
+        f"{format_occluded_see_clause()}; "
         "on say, '<noise_level> dB' + verbatim quote; on message, 'to/for/messaged/texted/notified <recipient>' + verbatim quote.",
     ),
     ProseRequirementSpec(
@@ -944,6 +1008,19 @@ def verify_prompt_and_checker_requirements_aligned(
         raise ValueError(
             f"_REPAIR_TARGET_BY_CHECK_ID keys diverge from WRITER_PROSE_REQUIREMENTS: {sorted(set(_REPAIR_TARGET_BY_CHECK_ID.keys()) ^ shared_id_set)}"
         )
+    # Card ue: the station-change and occluded-see clauses the prompt carries must be the ones rendered from
+    # the checker's constants, and every form the checker accepts or requires must appear in that rule.
+    event_order_text = next(r.rule_text for r in parsed_prompt_reqs if r.check_id == "c_fidelity_event_order")
+    for clause in (format_station_change_clause(), format_occluded_see_clause()):
+        if clause not in event_order_text:
+            raise ValueError(
+                f"Writer prompt c_fidelity_event_order rule lacks the checker-derived clause: {clause!r}"
+            )
+    for form in get_station_and_occlusion_checker_forms():
+        if form not in event_order_text:
+            raise ValueError(
+                f"Writer prompt c_fidelity_event_order rule lacks the checker form {form!r}"
+            )
     return parsed_prompt_reqs
 
 
@@ -955,6 +1032,7 @@ def _raise_prose_check_error(
     event_index: int | None = None,
     event_kind: str | None = None,
     failure_kind: str = "altered",
+    event_variant: str | None = None,
 ) -> NoReturn:
     """Raise `RenderCheckError` after verifying `check_id` is registered in `WRITER_PROSE_REQUIREMENTS`."""
     if check_id not in WRITER_PROSE_REQUIREMENTS_BY_ID:
@@ -966,8 +1044,39 @@ def _raise_prose_check_error(
         event_index=event_index,
         event_kind=event_kind,
         failure_kind=failure_kind,
+        event_variant=event_variant,
     )
 
+
+def _event_variant(ev: Event) -> str | None:
+    """Card ue: `station_move` for a station transition, `occluded_see` for an occluded see, else None."""
+    if is_station_transition_event(ev):
+        return "station_move"
+    if ev.kind == "see" and ev.occluded and ev.occluder:
+        return "occluded_see"
+    return None
+
+
+def _format_repair_hints_by_event_variant() -> dict[str, str]:
+    """Card ue: repair-line hints for a refused station move or occluded see, from the checker's constants."""
+    behind, around = STATION_MOVE_DIRECTION_WORDS
+    verb = STATION_MOVE_VERB
+    blocked = OCCLUDED_SEE_BLOCKED_PHRASES[0]
+    return {
+        "station_move": (
+            f"names the actor as subject who '{verb} {behind}' the occluder to the {FAR_SIDE_ALCOVE_STATION} "
+            f"(or '{verb} back {around}' the occluder to the {CONTAINER_BAY_STATION}), and the room; "
+            "the actor changed station and did not move the occluder"
+        ),
+        "occluded_see": (
+            f"names the actor, the target object, the occluder, the room and the {FAR_SIDE_ALCOVE_STATION}, "
+            f"with '{blocked}' (the occluder {blocked} the actor's {OCCLUDED_SEE_SIGHT_NOUNS[0]} of it) or "
+            f"'{OCCLUDED_SEE_COULD_NOT_SEE}'; never that the actor saw or observed it"
+        ),
+    }
+
+
+_REPAIR_HINT_BY_EVENT_VARIANT: dict[str, str] = _format_repair_hints_by_event_variant()
 
 _REPAIR_HINT_BY_EVENT_KIND: dict[str, str] = {
     "enter": "names the room the actor came from and the room entered, with the actor as subject",
@@ -1027,7 +1136,9 @@ def format_repair_retry_line(
         raise ValueError(f"failure_kind must be one of {sorted(VALID_FAILURE_KINDS)}, got {resolved_kind!r}")
     is_single_turn = retry_form == "single_turn"
     if exc.event_index is not None and exc.event_kind is not None:
-        hint = _REPAIR_HINT_BY_EVENT_KIND.get(
+        hint = _REPAIR_HINT_BY_EVENT_VARIANT.get(
+            getattr(exc, "event_variant", None) or "",
+        ) or _REPAIR_HINT_BY_EVENT_KIND.get(
             exc.event_kind,
             "states the logged event with its actor, verb, locations, and room",
         )
@@ -1714,12 +1825,22 @@ def _sentence_states_non_arrival_action(
             named_things.update(x.lower() for x in (dom.note_item, dom.side_mechanism))
     move_verb_alt = "|".join(re.escape(v) for v in _ACTION_VERBS_BY_KIND["move"])
     thing_alt = "|".join(re.escape(t) for t in sorted(named_things, key=len, reverse=True))
+    # Card ue (C): an optional `-ly` adverb may sit between the move verb and its object (`moved quickly the <thing>`).
     move_verb_applied_to_thing = bool(
         re.search(
-            rf"\b(?:{move_verb_alt})\s+(?:(?:from|out of)\s+)?(?:(?:the|a|an|his|her|their|its)\s+)?(?:{thing_alt})\b",
+            rf"\b(?:{move_verb_alt})\s+(?:[a-z]+ly\s+)?(?:(?:from|out of)\s+)?(?:(?:the|a|an|his|her|their|its)\s+)?(?:{thing_alt})\b",
             s_low,
         )
     )
+    # Card ue: the station-change form (`stepped behind/around the <occluder> to the <station>`) is a move, not an arrival.
+    if world is not None and not move_verb_applied_to_thing:
+        occluder_alt = "|".join(re.escape(o.lower()) for o in world.occluders_by_room.values())
+        direction_alt = "|".join(STATION_MOVE_DIRECTION_WORDS)
+        station_alt = "|".join(re.escape(s) for s in (CONTAINER_BAY_STATION.lower(), FAR_SIDE_ALCOVE_STATION.lower()))
+        if occluder_alt and re.search(
+            rf"\b(?:{direction_alt})\s+{_ARTICLE_OPT_RE}(?:{occluder_alt})\b.*\b(?:{station_alt})\b", s_low
+        ):
+            move_verb_applied_to_thing = True
     for party in all_parties:
         if _actor_precedes_verb_as_subject(s_low, party, SIGHTING_VERBS, all_parties):
             return True
@@ -1729,6 +1850,83 @@ def _sentence_states_non_arrival_action(
             return True
         if move_verb_applied_to_thing and _actor_precedes_verb_as_subject(
             s_low, party, _ACTION_VERBS_BY_KIND["move"], all_parties
+        ):
+            return True
+    return False
+
+
+def _occluder_is_direct_object_of_move_verb(s_low: str, occluder: str) -> bool:
+    """Card ue: True if `s_low` applies a move verb to the occluder itself (`moved [quickly] the <occluder>`), the
+    literal furniture reading of a station change, which is never what the event means."""
+    move_verb_alt = "|".join(re.escape(v) for v in _ACTION_VERBS_BY_KIND["move"])
+    occ_esc = re.escape(occluder.lower())
+    return (
+        re.search(
+            rf"\b(?:{move_verb_alt})\s+(?:[a-z]+ly\s+)?(?:(?:the|a|an|his|her|their|its)\s+)?{occ_esc}\b",
+            s_low,
+        )
+        is not None
+    )
+
+
+def _sentence_matches_station_move(s_low: str, ev: Event) -> bool:
+    """Card ue: True if `s_low` states the station change `ev` as the actor stepping `behind`/`around` the occluder
+    to the destination station (the actor-as-subject gate on a move verb has already passed). The occluder as the
+    direct object of a move verb is refused; the direction word must precede the occluder; the destination station
+    must follow a destination preposition; the source station, if given with `from`/`out of`, precedes it; the
+    source station is never the destination."""
+    if not (ev.target_object and ev.from_location and ev.to_location):
+        return False
+    if _occluder_is_direct_object_of_move_verb(s_low, ev.target_object):
+        return False
+    occ_esc = re.escape(ev.target_object.lower())
+    direction_alt = "|".join(STATION_MOVE_DIRECTION_WORDS)
+    if re.search(rf"\b(?:{direction_alt})\s+{_ARTICLE_OPT_RE}{occ_esc}\b", s_low) is None:
+        return False
+    to_esc = re.escape(ev.to_location.lower())
+    from_esc = re.escape(ev.from_location.lower())
+    m_to = re.search(rf"\b(?:to|into|toward|towards|onto|at|in)\s+{_ARTICLE_OPT_RE}{to_esc}\b", s_low)
+    if m_to is None:
+        return False
+    if re.search(rf"\b(?:to|into|toward|towards|onto)\s+{_ARTICLE_OPT_RE}{from_esc}\b", s_low) is not None:
+        return False
+    m_from = re.search(rf"\b(?:from|out of)\s+{_ARTICLE_OPT_RE}{from_esc}\b", s_low)
+    if m_from is not None and m_from.end() > m_to.start():
+        return False
+    return True
+
+
+def _sentence_states_occluder_blocked_actor_sight(s_low: str, ev: Event) -> bool:
+    """Card ue: True if `s_low` states the occluded see `ev` in the possessive form, `the <occluder> blocked
+    <actor>'s sight|view|line of sight of the <container> from the far-side alcove`. The agentless form (`blocked
+    sight of ...` with no actor) is not accepted: perceptual records are per actor."""
+    if not (ev.kind == "see" and ev.occluded and ev.occluder and ev.target_object):
+        return False
+    occ_esc = re.escape(ev.occluder.lower())
+    actor_esc = re.escape(ev.actor.lower())
+    tgt_esc = re.escape(ev.target_object.lower())
+    noun_alt = "|".join(re.escape(n) for n in OCCLUDED_SEE_SIGHT_NOUNS)
+    block_alt = "|".join(sorted({re.escape(p.split()[0]) for p in OCCLUDED_SEE_BLOCKED_PHRASES}))
+    if FAR_SIDE_ALCOVE_STATION.lower() not in s_low:
+        return False
+    return (
+        re.search(
+            rf"\b{occ_esc}\b[^.;]*?\b(?:{block_alt})\s+{actor_esc}(?:'s|’s)\s+(?:{noun_alt})\s+of\s+{_ARTICLE_OPT_RE}{tgt_esc}\b",
+            s_low,
+        )
+        is not None
+    )
+
+
+def _sentence_asserts_sighting_of_target(frame_low: str, ev: Event, all_parties: Sequence[str]) -> bool:
+    """Card ue: True if the actor is the subject of a verb that asserts a sighting (`saw`, `observed`, ...) followed
+    by the target object. On an occluded see this is a false perceptual claim and is refused."""
+    if not ev.target_object:
+        return False
+    tgt_esc = re.escape(ev.target_object.lower())
+    for verb in OCCLUDED_SEE_REFUSED_SIGHTING_VERBS:
+        if _actor_precedes_verb_as_subject(frame_low, ev.actor, (verb,), all_parties, ev=ev) and re.search(
+            rf"\b{re.escape(verb)}\b[^.;]*\b{tgt_esc}\b", frame_low
         ):
             return True
     return False
@@ -1867,7 +2065,12 @@ def _sentence_matches_event(
     )
     if _has_forbidden_event_negation(frame_low, ev, all_parties, action_verbs=action_verbs):
         return False
-    if not _actor_precedes_verb_as_subject(frame_low, ev.actor, action_verbs, all_parties, ev=ev):
+    # Card ue: the possessive occluded-see form has the actor in possessive position, not as the subject of a
+    # sighting verb (`the <occluder> blocked <actor>'s sight of the <container> from the far-side alcove`).
+    possessive_occluded_see = _sentence_states_occluder_blocked_actor_sight(s_low, ev)
+    if not possessive_occluded_see and not _actor_precedes_verb_as_subject(
+        frame_low, ev.actor, action_verbs, all_parties, ev=ev
+    ):
         return False
 
     if ev.target_object:
@@ -1985,19 +2188,8 @@ def _sentence_matches_event(
 
     if ev.kind == "move":
         if is_station_transition_event(ev):
-            if not (
-                ev.target_object
-                and ev.target_object.lower() in s_low
-                and ev.from_location
-                and ev.to_location
-            ):
-                return False
-            return _ordered_from_to_positions(
-                s_low,
-                ev.from_location,
-                ev.to_location,
-                require_from_prep=True,
-            )
+            # Card ue: the actor stepped behind/around the occluder to the other station; the occluder did not move.
+            return _sentence_matches_station_move(s_low, ev)
         if not (
             ev.target_object
             and ev.target_object.lower() in s_low
@@ -2023,14 +2215,19 @@ def _sentence_matches_event(
         return True
 
     if ev.kind == "see":
-        if not _actor_precedes_verb_as_subject(frame_low, ev.actor, SIGHTING_VERBS, all_parties, ev=ev):
+        if ev.occluded and ev.occluder and _sentence_asserts_sighting_of_target(frame_low, ev, all_parties):
+            # Card ue: the actor looked and could NOT see the container; `saw`/`observed` it is a false sighting.
+            return False
+        if not possessive_occluded_see and not _actor_precedes_verb_as_subject(
+            frame_low, ev.actor, SIGHTING_VERBS, all_parties, ev=ev
+        ):
             return False
         if not (ev.target_object and ev.target_object.lower() in s_low):
             return False
         if ev.occluded and ev.occluder:
             return (
                 ev.occluder.lower() in s_low
-                and ("blocked" in s_low or "blocking sight" in s_low)
+                and any(p in s_low for p in OCCLUDED_SEE_BLOCKED_PHRASES)
                 and FAR_SIDE_ALCOVE_STATION.lower() in s_low
             )
         if any(bp in s_low for bp in BLOCKING_PHRASES):
@@ -2668,6 +2865,7 @@ def check_prose_render_fidelity(
                     event_index=ev_idx + 1,
                     event_kind=ev.kind,
                     failure_kind="altered",
+                    event_variant=_event_variant(ev),
                 )
             cand_sent = (
                 event_sentences[search_start]
@@ -2696,6 +2894,7 @@ def check_prose_render_fidelity(
                 event_index=ev_idx + 1,
                 event_kind=ev.kind,
                 failure_kind=missing_ev_kind,
+                event_variant=_event_variant(ev),
             )
         matched_sentence_indices.append(found_idx)
         search_start = found_idx + 1
@@ -2752,12 +2951,12 @@ def _render_event_sentence(event: Event, focal_agent: str, noise_threshold: int)
 
     if event.kind == "move":
         if is_station_transition_event(event):
-            direction_prep = (
-                "behind" if event.to_location == FAR_SIDE_ALCOVE_STATION else "around"
-            )
+            # Card ue: the actor changes station; the occluder does not move. Same forms as the prompt clause.
+            behind, around = STATION_MOVE_DIRECTION_WORDS
+            direction_prep = behind if event.to_location == FAR_SIDE_ALCOVE_STATION else f"back {around}"
             return (
-                f"{prefix}, in the {event.room}, {event.actor} stepped from the {event.from_location} "
-                f"{direction_prep} the {event.target_object} into the {event.to_location}."
+                f"{prefix}, in the {event.room}, {event.actor} {STATION_MOVE_VERB} from the {event.from_location} "
+                f"{direction_prep} the {event.target_object} to the {event.to_location}."
             )
         occ_clause = (
             f" behind the {event.occluder}, which blocked the line of sight for other occupants in the {event.room}"
@@ -2773,10 +2972,13 @@ def _render_event_sentence(event: Event, focal_agent: str, noise_threshold: int)
 
     if event.kind == "see":
         if event.occluded and event.occluder:
+            # Card ue: the actor looked and could not see; the blocked clause is per actor (possessive), and the
+            # target is named once so container mention parity holds.
             return (
                 f"{prefix}, in the {event.room}, from the {FAR_SIDE_ALCOVE_STATION} behind the {event.occluder}, "
                 f"{event.actor} looked toward the {event.target_object}, "
-                f"but the {event.occluder} blocked the line of sight."
+                f"but the {event.occluder} {OCCLUDED_SEE_BLOCKED_PHRASES[0]} {event.actor}'s "
+                f"{OCCLUDED_SEE_SIGHT_NOUNS[2]}."
             )
         loc_clause = (
             f" at the {event.to_location}"
@@ -3527,6 +3729,8 @@ def sanitize_render_check_error_for_stderr(
         failing_sentence_sha256=fail_sha,
         failing_sentence_offset=fail_off,
         failing_sentence_length=fail_len,
+        failure_kind=exc.failure_kind,
+        event_variant=getattr(exc, "event_variant", None),
     )
 
 
