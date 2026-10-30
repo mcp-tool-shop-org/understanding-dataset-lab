@@ -8255,7 +8255,89 @@ def test_85_card_tr_absent_event_repair_position_and_order_refusal(tmp_path: Pat
     assert gen_rows[3]["repair_line_sha256"] == hashlib.sha256(gen_rows[3]["repair_line"].encode("utf-8")).hexdigest()
 
 
+def test_86_card_ua_folded_enter_never_consumes_the_next_sentence() -> None:
+    """Test 86 (Card ua): a folded leave-and-enter sentence counts for both events, and the `enter` never takes
+    the sentence after it when that sentence states some other action (a move, a see, by the same actor or
+    another). The event after the enter is searched from the sentence after the folded one.
 
+    Built on seed 20261033 (events 4-5: Eva leaves the reading room for the vault room; 6: Eva moves the
+    brass ledger in the vault room; 16-17: Ana leaves the reading room for the vault room; 18: Eva moves the
+    brass ledger in the vault room; 22-23: Eva leaves the reading room for the bindery room; 24: Eva sees
+    the index reel there). All sentences are synthetic: the template rendering with the pair replaced.
+    """
+    from udlab_generator.render import _sentence_matches_event, _split_prose_sentences
 
+    w = generate_world(make_balanced_configs(1, base_seed=20261033)[0])
+    fa = w.agents[0]
+    setup_para, events_para = render_world_template(w, fa).split("\n\n")
+    sents = _split_prose_sentences(events_para)
+    assert len(sents) == len(w.events) == 36
+    ev4, ev5, ev6 = w.events[3], w.events[4], w.events[5]
+    assert (ev4.kind, ev5.kind, ev6.kind) == ("leave", "enter", "move")
+    assert ev4.actor == ev5.actor == ev6.actor == "Eva"
+    assert ev5.room == ev6.room == "vault room" and ev5.from_location == "reading room"
+    assert (w.events[15].kind, w.events[16].kind, w.events[17].kind) == ("leave", "enter", "move")
+    assert w.events[16].actor == "Ana" and w.events[17].actor == "Eva" and w.events[17].room == "vault room"
+    assert (w.events[21].kind, w.events[22].kind, w.events[23].kind) == ("leave", "enter", "see")
+    assert w.events[22].actor == w.events[23].actor == "Eva" and w.events[23].room == "bindery room"
 
+    def prose_of(event_sents: list[str]) -> str:
+        return f"{setup_para}\n\n{' '.join(event_sents)}"
 
+    folded_eva_vault = "Next, Eva walked from the reading room into the vault room."
+    folded_ana_vault = "Next, Ana walked from the reading room into the vault room."
+    folded_eva_bindery = "Next, Eva walked from the reading room into the bindery room."
+
+    # The move sentence after the folded one is never an enter sentence, with or without the leave context:
+    move_sent = sents[5]
+    assert _sentence_matches_event(move_sent, ev6, w.noise_threshold, world=w)
+    assert not _sentence_matches_event(move_sent, ev5, w.noise_threshold, world=w)
+    assert not _sentence_matches_event(
+        move_sent, ev5, w.noise_threshold, world=w, prev_sentence=folded_eva_vault, prev_event=ev4
+    )
+
+    # 1. Folded leave+enter, then the same actor's move in the arrival room: passes; the move keeps its sentence.
+    assert check_rendered_prose(prose_of(sents[:3] + [folded_eva_vault] + sents[5:]), w, focal_agent=fa) == ()
+    # The same with a leave-verb folded form ("left ... and went to ...").
+    assert (
+        check_rendered_prose(
+            prose_of(sents[:3] + ["Next, Eva left the reading room and went to the vault room."] + sents[5:]),
+            w,
+            focal_agent=fa,
+        )
+        == ()
+    )
+
+    # 2. Unfolded leave and enter sentences, then the same actor's move: one sentence per event, passes.
+    assert check_rendered_prose(prose_of(sents), w, focal_agent=fa) == ()
+    assert (
+        check_rendered_prose(prose_of(sents[:4] + ["Next, Eva entered the vault room."] + sents[5:]), w, focal_agent=fa)
+        == ()
+    )
+
+    # 3. Folded leave+enter, then a DIFFERENT actor's move in the arrival room: passes.
+    assert check_rendered_prose(prose_of(sents[:15] + [folded_ana_vault] + sents[17:]), w, focal_agent=fa) == ()
+
+    # 4. Folded leave+enter, then the same actor's see: passes.
+    assert check_rendered_prose(prose_of(sents[:21] + [folded_eva_bindery] + sents[23:]), w, focal_agent=fa) == ()
+
+    # 5. Negative control: folded leave+enter with the move sentence omitted refuses the move as absent.
+    with pytest.raises(RenderCheckError) as exc_absent:
+        check_rendered_prose(prose_of(sents[:3] + [folded_eva_vault] + sents[6:]), w, focal_agent=fa)
+    assert exc_absent.value.check_id == "c_fidelity_missing_event"
+    assert exc_absent.value.event_index == 6
+    assert exc_absent.value.event_kind == "move"
+    assert exc_absent.value.failure_kind == "absent"
+
+    # 6. Negative control: an unfolded pair whose entry sentence names the WRONG room still refuses.
+    # (The enter can only bind to Eva's later arrival sentence, so the move at event 6 is out of order.)
+    for wrong_room_entry in (
+        "Next, Eva walked through the doorway from the reading room into the bindery room.",
+        "Next, Eva entered the bindery room.",
+    ):
+        wrong_room = list(sents)
+        wrong_room[4] = wrong_room_entry
+        with pytest.raises(RenderCheckError) as exc_wrong:
+            check_rendered_prose(prose_of(wrong_room), w, focal_agent=fa)
+        assert exc_wrong.value.check_id == "c_fidelity_event_order"
+        assert exc_wrong.value.event_index == 6

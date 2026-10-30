@@ -1689,6 +1689,41 @@ def _sentence_is_arrival_half_of_leave_enter(
     return True
 
 
+def _sentence_states_non_arrival_action(
+    s_low: str,
+    world: World | None,
+    all_parties: Sequence[str],
+) -> bool:
+    """Return True if `s_low` states an action other than arriving or entering, by any party: a sighting, a
+    spoken line (`say` verb or a `<n> dB` level), a message, or a `move` verb applied to a named thing
+    (object, container, occluder, fixture, note item, side mechanism, or station). Such a sentence is never
+    an `enter` sentence, whoever its subject is, so an `enter` event can never consume it."""
+    if re.search(r"\b\d+\s*db\b", s_low):
+        return True
+    named_things: set[str] = {CONTAINER_BAY_STATION.lower(), FAR_SIDE_ALCOVE_STATION.lower()}
+    if world is not None:
+        named_things.update(o.lower() for o in world.objects)
+        named_things.update(c.lower() for pair in world.containers_by_room.values() for c in pair)
+        named_things.update(o.lower() for o in world.occluders_by_room.values())
+        named_things.update(f.lower() for f in world.fixtures_by_room.values())
+        dom = next((d for d in DOMAINS if d.name == world.domain_name), None)
+        if dom is not None:
+            named_things.update(x.lower() for x in (dom.note_item, dom.side_mechanism))
+    names_a_thing = any(thing in s_low for thing in named_things)
+    for party in all_parties:
+        if _actor_precedes_verb_as_subject(s_low, party, SIGHTING_VERBS, all_parties):
+            return True
+        if _actor_precedes_verb_as_subject(s_low, party, _ACTION_VERBS_BY_KIND["say"], all_parties):
+            return True
+        if _actor_precedes_verb_as_subject(s_low, party, _ACTION_VERBS_BY_KIND["message"], all_parties):
+            return True
+        if names_a_thing and _actor_precedes_verb_as_subject(
+            s_low, party, _ACTION_VERBS_BY_KIND["move"], all_parties
+        ):
+            return True
+    return False
+
+
 def _preceding_sentence_is_matching_leave(
     prev_sentence: str | None,
     prev_event: Event | None,
@@ -1867,6 +1902,11 @@ def _sentence_matches_event(
 
     if ev.kind == "enter":
         if not (ev.from_location and ev.to_location):
+            return False
+        # An enter sentence states an arrival. A sentence whose action is a move, a see, a say or a
+        # message (by this actor or another) is some other event's sentence, even when its verb
+        # ("moved", "stepped", ...) is also a movement verb and it names the arrival room.
+        if _sentence_states_non_arrival_action(s_low, world, all_parties):
             return False
         if world is not None:
             allowed_rooms = {ev.room.lower(), ev.from_location.lower(), ev.to_location.lower()}
@@ -2501,6 +2541,12 @@ def check_prose_render_fidelity(
             and search_start == matched_sentence_indices[-1] + 1
         ):
             s_prev = matched_sentence_indices[-1]
+            # Meaning of the sequence: when the writer gives the arrival its own sentence right after
+            # the leave sentence, that sentence is the enter (a folded leave sentence then counts once,
+            # for the leave). Otherwise a folded leave-and-enter sentence counts for both events, and
+            # the next event is searched from the sentence after it. `_sentence_matches_event` refuses
+            # an enter for any sentence whose action is not an arrival, so a move, see, say or message
+            # sentence in the arrival room is never taken here.
             if search_start < len(event_sentences) and _sentence_matches_event(
                 event_sentences[search_start],
                 ev,
