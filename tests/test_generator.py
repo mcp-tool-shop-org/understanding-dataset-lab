@@ -2348,13 +2348,11 @@ def test_30_prose_fidelity_unlogged_event_starting_at_the_start_refused() -> Non
     assert exc_unlogged.value.check_id == "c_fidelity_unlogged_event"
 
 
-def test_31_handwritten_realistic_natural_prose_passes() -> None:
-    """Test 31 (Change 3.v): Realistic natural prose for one scenario (scen_0000, seed 20261030), written by hand, must pass check_rendered_prose."""
-    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
-    assert w.scenario_id == "scen_0000"
-    fa = w.agents[0]  # Eva
-
-    handwritten_setup = (
+def _build_natural_model_prose_scen_0000() -> tuple[str, str]:
+    """Return `(natural_setup, natural_events)` as `qwen3.6:35b` would plausibly write when following the prompt:
+    grouped starting agents, natural doorway phrasing, verbatim goals/stakes, and attribution after quoted speech.
+    """
+    natural_setup = (
         "In the archival registry, the narrative follows Eva across four interconnected rooms: "
         "the vault room contains the oak drawer and the steel cabinet at its container bay, where a frosted partition "
         "stands between the far-side alcove and the container bay; "
@@ -2365,18 +2363,17 @@ def test_31_handwritten_realistic_natural_prose_passes() -> None:
         "and the sorting room contains the maple cubby and the iron safe in the container bay, with a rolling pillar "
         "between the far-side alcove and the container bay so that anyone at the container bay sees the containers in open view "
         "while anyone in the far-side alcove has their view blocked. "
-        "Open doorways connect the rooms along the hall: the vault room connects to the reading room, the reading room connects to the bindery room, "
-        "and the bindery room connects to the sorting room, with a doorway hearing threshold of 50 dB. "
+        "Open doorways link the vault room and the reading room, the reading room and the bindery room, "
+        "and the bindery room and the sorting room, with a doorway hearing threshold of 50 dB. "
         "Each agent assumes an object remains where that agent last saw it in open view or heard a witness state it was placed, "
         "and assumes another agent looks where they last saw or communicated that agent perceiving it. "
-        "Initially, Eva starts in the bindery room, Dan starts in the bindery room, and Cara starts in the bindery room, "
-        "while Gia remains absent off-site. "
-        "Their active objectives: Eva plans to complete the quarterly audit packet; Dan plans to verify the municipal deed transfer; "
+        "At the start, Eva, Dan, and Cara start in the bindery room, while Gia remains absent off-site. "
+        "Eva plans to complete the quarterly audit packet, Dan plans to verify the municipal deed transfer, "
         "and Cara plans to catalog the incoming charter folio. "
         "Gia is off-site and depends on the location of the brass ledger for tomorrow's courier handoff."
     )
 
-    handwritten_events = (
+    natural_events = (
         "In the bindery room, Eva checked the index reel inside the linen bin in open view. "
         "Dan then left the bindery room for the sorting room. "
         "Moments later, Dan entered the sorting room from the bindery room. "
@@ -2399,17 +2396,31 @@ def test_31_handwritten_realistic_natural_prose_passes() -> None:
         "In the sorting room, Eva departed for the bindery room. "
         "Eva came from the sorting room into the bindery room. "
         "Inside the reading room, Cara placed the seal stamp from the slate tray onto the cedar shelf in open view. "
-        'Speaking in the reading room at 60 dB, Cara announced: "The seal stamp is stored in the cedar shelf." '
+        '"The seal stamp is stored in the cedar shelf." Cara announced at 60 dB in the reading room. '
         "In the bindery room, Eva looked at the humidity dial in the far-side alcove in open view. "
-        'From the reading room, Cara texted a message to Gia: "Update for Gia: the brass ledger is stored at the maple cubby." '
+        '"Update for Gia: the brass ledger is stored at the maple cubby," Cara texted to Gia from the reading room. '
         "In the bindery room, Eva saw the unsigned transfer slip on the countertop in the bindery room in open view. "
         "In the sorting room, Dan turned the overhead louver from latch position A to latch position B in open view. "
-        'In the sorting room at 20 dB, Dan stated: "I adjusted the overhead louver to clear binding dust from the bench." '
+        '"I adjusted the overhead louver to clear binding dust from the bench." Dan stated at 20 dB in the sorting room. '
         "From the far-side alcove in the sorting room, Dan glanced toward the iron safe, though the rolling pillar blocked the container bay. "
-        'Finally, in the sorting room at 20 dB, Dan claimed: "I am certain the brass ledger was moved into the copper rack."'
+        '"I am certain the brass ledger was moved into the copper rack," Dan claimed at 20 dB in the sorting room.'
     )
+    return natural_setup, natural_events
 
+
+def test_31_handwritten_realistic_natural_prose_passes() -> None:
+    """Test 31 (Decision 4): Realistic natural prose as a model would plausibly produce when following the new prompt
+    (grouped starting agents, natural doorway phrasing, attribution after quoted speech) must pass check_rendered_prose.
+    """
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    assert w.scenario_id == "scen_0000"
+    fa = w.agents[0]  # Eva
+
+    handwritten_setup, handwritten_events = _build_natural_model_prose_scen_0000()
     handwritten_prose = f"{handwritten_setup}\n\n{handwritten_events}"
+    assert "connects to the" not in handwritten_setup
+    assert "Eva, Dan, and Cara start in the bindery room" in handwritten_setup
+    assert '"The seal stamp is stored in the cedar shelf." Cara announced' in handwritten_events
     assert handwritten_prose != render_world_template(w, fa)
     assert check_rendered_prose(handwritten_prose, w, focal_agent=fa) == ()
 
@@ -2624,6 +2635,266 @@ def test_33_changes_2_4_5_6_think_refusals_cleanup_and_verify(tmp_path: Path) ->
 
     gen_p.write_text(orig_gen_text, encoding="utf-8")
     assert cli_main(["--verify-written", str(out_c6)]) == 0
+
+
+def test_34_natural_prose_with_deliberate_wrong_room_fails() -> None:
+    """Test 34 (Decision 4): Second natural-prose test (grouped agents, natural doorway phrasing,
+    attribution after quote) with one deliberate fault (a wrong room on event #22) must fail.
+    """
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]
+    natural_setup, natural_events = _build_natural_model_prose_scen_0000()
+
+    faulty_events = natural_events.replace(
+        "Inside the reading room, Cara placed the seal stamp from the slate tray onto the cedar shelf in open view.",
+        "Inside the vault room, Cara placed the seal stamp from the slate tray onto the cedar shelf in open view.",
+        1,
+    )
+    assert faulty_events != natural_events
+    with pytest.raises(RenderCheckError, match=r"missing or altered event #22") as exc_info:
+        check_rendered_prose(f"{natural_setup}\n\n{faulty_events}", w, focal_agent=fa)
+    assert exc_info.value.check_id == "c_fidelity_missing_event"
+
+
+def test_35_phrasing_1_natural_doorway_sentences_pass() -> None:
+    """Test 35 (Decision 2 & 4, phrasing 1): Natural doorway phrasings mentioning both rooms of each edge
+    in one setup sentence (without 'connects to the') pass, while omitting an edge refuses with c_fidelity_doorways.
+    """
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]
+    natural_setup, natural_events = _build_natural_model_prose_scen_0000()
+
+    # Phrasing 1a from review §2(1): "doorways link the vault room, reading room, bindery room, and sorting room"
+    setup_1a = natural_setup.replace(
+        "Open doorways link the vault room and the reading room, the reading room and the bindery room, "
+        "and the bindery room and the sorting room, with a doorway hearing threshold of 50 dB.",
+        "Along the corridor, doorways link the vault room, reading room, bindery room, and sorting room, "
+        "with a doorway hearing threshold of 50 dB.",
+    )
+    assert "connects to the" not in setup_1a
+    assert check_rendered_prose(f"{setup_1a}\n\n{natural_events}", w, focal_agent=fa) == ()
+
+    # Phrasing 1b from review §2(1): separate sentences per doorway using natural verbs
+    setup_1b = natural_setup.replace(
+        "Open doorways link the vault room and the reading room, the reading room and the bindery room, "
+        "and the bindery room and the sorting room, with a doorway hearing threshold of 50 dB.",
+        "A doorway connects the vault room and the reading room (doorway hearing threshold 50 dB). "
+        "A second doorway links the reading room with the bindery room. "
+        "A third doorway opens between the bindery room and the sorting room.",
+    )
+    assert "connects to the" not in setup_1b
+    assert check_rendered_prose(f"{setup_1b}\n\n{natural_events}", w, focal_agent=fa) == ()
+
+    # Omitting one edge (bindery room <-> sorting room) from any setup sentence must still fail
+    setup_missing_edge = (
+        "In the archival registry, Eva works across four rooms: "
+        "the vault room contains the oak drawer and the steel cabinet at its container bay with a frosted partition "
+        "between the far-side alcove and the container bay. "
+        "The reading room contains the slate tray and the cedar shelf at its container bay with a tall bookstack "
+        "between the far-side alcove and the container bay. "
+        "The bindery room contains the linen bin and the copper rack at its container bay with a canvas screen "
+        "between the far-side alcove and the container bay. "
+        "The sorting room contains the maple cubby and the iron safe at its container bay with a rolling pillar "
+        "between the far-side alcove and the container bay. "
+        "A doorway links the vault room and the reading room, and another doorway links the reading room and the bindery room "
+        "(doorway hearing threshold 50 dB). "
+        "Each agent assumes an object remains where that agent last saw it in open view or heard a witness state it was placed, "
+        "and assumes another agent looks where they last saw or communicated that agent perceiving it. "
+        "At the start, Eva, Dan, and Cara start in the bindery room, while Gia is off-site. "
+        "Eva plans to complete the quarterly audit packet; Dan plans to verify the municipal deed transfer; "
+        "Cara plans to catalog the incoming charter folio. "
+        "Gia is off-site and depends on the location of the brass ledger for tomorrow's courier handoff."
+    )
+    with pytest.raises(RenderCheckError, match="doorway") as exc_dw:
+        check_rendered_prose(f"{setup_missing_edge}\n\n{natural_events}", w, focal_agent=fa)
+    assert exc_dw.value.check_id == "c_fidelity_doorways"
+
+
+def test_36_phrasing_2_grouped_and_natural_starting_rooms_pass() -> None:
+    """Test 36 (Decision 2 & 4, phrasing 2): Grouped starting-room phrasings ('Eva, Dan and Cara start in the bindery room',
+    'At the start, Eva, Dan, and Cara are all in the bindery room', 'Eva begins in the bindery room') pass when each agent
+    and their starting room appear in the same setup sentence.
+    """
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]
+    base_prose = render_world_template(w, fa)
+    natural_setup, natural_events = _build_natural_model_prose_scen_0000()
+
+    for grouped_clause in (
+        "At the start, Eva, Dan and Cara start in the bindery room.",
+        "At the start, Eva, Dan, and Cara are all in the bindery room.",
+        "At the start, Eva begins in the bindery room alongside Dan and Cara.",
+    ):
+        prose_variant = base_prose.replace(
+            "At the start, Eva starts in the bindery room, Dan starts in the bindery room, Cara starts in the bindery room.",
+            grouped_clause,
+        )
+        assert "eva starts in the bindery room" not in prose_variant.lower()
+        assert check_rendered_prose(prose_variant, w, focal_agent=fa) == ()
+
+    # Assign Cara to the wrong starting room in a separate sentence -> must fail with c_fidelity_initial_room
+    bad_init_setup = natural_setup.replace(
+        "At the start, Eva, Dan, and Cara start in the bindery room, while Gia remains absent off-site.",
+        "At the start, Eva and Dan start in the bindery room. Cara starts in the vault room, while Gia remains absent off-site.",
+    )
+    with pytest.raises(RenderCheckError, match="initial room 'bindery room' for agent 'Cara'") as exc_ir:
+        check_rendered_prose(f"{bad_init_setup}\n\n{natural_events}", w, focal_agent=fa)
+    assert exc_ir.value.check_id == "c_fidelity_initial_room"
+
+
+def test_37_phrasing_3_verbatim_goals_and_stakes_prompt_and_check() -> None:
+    """Test 37 (Decision 2 & 4, phrasing 3): The writer prompt explicitly instructs copying each goal_text and stake
+    description verbatim, natural setup prose carrying them verbatim passes, and paraphrasing either is refused.
+    """
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]
+    prompt_str = format_writer_prompt(w, fa)
+    assert "Copy each agent's goal_text (goals[agent].goal_text) verbatim" in prompt_str
+    assert "Copy each stake description (stake_edges[].description) verbatim" in prompt_str
+
+    natural_setup, natural_events = _build_natural_model_prose_scen_0000()
+    assert check_rendered_prose(f"{natural_setup}\n\n{natural_events}", w, focal_agent=fa) == ()
+
+    paraphrased_goal_setup = natural_setup.replace(
+        "Eva plans to complete the quarterly audit packet",
+        "Eva's objective is finishing the quarterly audit packet",
+    )
+    with pytest.raises(RenderCheckError, match="goal") as exc_g:
+        check_rendered_prose(f"{paraphrased_goal_setup}\n\n{natural_events}", w, focal_agent=fa)
+    assert exc_g.value.check_id == "c_fidelity_goal"
+
+    paraphrased_stake_setup = natural_setup.replace(
+        "Gia is off-site and depends on the location of the brass ledger for tomorrow's courier handoff.",
+        "Gia is away off-site and needs to know where the brass ledger is kept for tomorrow's courier.",
+    )
+    with pytest.raises(RenderCheckError, match="stake edge") as exc_s:
+        check_rendered_prose(f"{paraphrased_stake_setup}\n\n{natural_events}", w, focal_agent=fa)
+    assert exc_s.value.check_id == "c_fidelity_stake_edge"
+
+
+def test_38_phrasing_4_period_in_quoted_speech_with_post_quote_attribution_passes() -> None:
+    """Test 38 (Decision 3 & 4, phrasing 4): A period inside quoted speech with attribution after the quote
+    must not split the sentence in _split_prose_sentences or fail check_rendered_prose.
+    """
+    from udlab_generator.render import _split_prose_sentences
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]
+    natural_setup, natural_events = _build_natural_model_prose_scen_0000()
+
+    # Check _split_prose_sentences directly on post-quote attribution with internal periods
+    sample_para = (
+        '"The seal stamp is stored in the cedar shelf." Cara said at 60 dB in the reading room. '
+        '"Listen carefully. Update for Gia: the brass ledger is stored at the maple cubby." '
+        "Cara texted to Gia from the reading room."
+    )
+    sents = _split_prose_sentences(sample_para)
+    assert len(sents) == 2
+    assert sents[0] == '"The seal stamp is stored in the cedar shelf." Cara said at 60 dB in the reading room.'
+    assert (
+        sents[1]
+        == '"Listen carefully. Update for Gia: the brass ledger is stored at the maple cubby." Cara texted to Gia from the reading room.'
+    )
+
+    # Full scenario prose where all 4 say/message events have periods inside the quote and attribution after the quote
+    events_all_period_quotes = natural_events.replace(
+        '"Update for Gia: the brass ledger is stored at the maple cubby," Cara texted to Gia from the reading room.',
+        '"Update for Gia: the brass ledger is stored at the maple cubby." Cara texted to Gia from the reading room.',
+    ).replace(
+        '"I am certain the brass ledger was moved into the copper rack," Dan claimed at 20 dB in the sorting room.',
+        '"I am certain the brass ledger was moved into the copper rack." Dan claimed at 20 dB in the sorting room.',
+    )
+    assert len(_split_prose_sentences(events_all_period_quotes)) == len(w.events) == 30
+    assert check_rendered_prose(f"{natural_setup}\n\n{events_all_period_quotes}", w, focal_agent=fa) == ()
+
+
+def test_39_prompt_and_checker_requirements_list_aligned() -> None:
+    """Test 39 (Decision 1): Parse the writer prompt and the checker's requirement list and fail if they diverge."""
+    import udlab_generator.render as ug_render
+
+    parse_fn = getattr(ug_render, "parse_writer_prompt_requirements", None)
+    enforced_fn = getattr(ug_render, "get_checker_enforced_check_ids", None)
+    verify_fn = getattr(ug_render, "verify_prompt_and_checker_requirements_aligned", None)
+    shared_reqs = getattr(ug_render, "WRITER_PROSE_REQUIREMENTS", None)
+    assert callable(parse_fn) and callable(enforced_fn) and callable(verify_fn)
+    assert isinstance(shared_reqs, tuple) and len(shared_reqs) >= 25
+
+    raw_prompt = ug_render.WRITER_PROMPT_PATH.read_text(encoding="utf-8")
+    parsed_reqs = parse_fn(raw_prompt)
+    assert parsed_reqs == shared_reqs
+
+    enforced_ids = enforced_fn()
+    assert set(enforced_ids) == {r.check_id for r in shared_reqs}
+    assert verify_fn(raw_prompt) == shared_reqs
+
+    # Also verify formatted prompt parses identically
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    formatted = format_writer_prompt(w0, w0.agents[0])
+    assert parse_fn(formatted) == shared_reqs
+
+    # Diverging prompt (removing a requirement, altering rule text, or adding an untracked requirement) must fail
+    dropped_one = "\n".join(
+        line for line in raw_prompt.splitlines() if "(c_fidelity_doorways)" not in line
+    )
+    with pytest.raises(ValueError, match="diverge"):
+        verify_fn(dropped_one)
+
+    altered_text = raw_prompt.replace(
+        "Copy each agent's goal_text", "Paraphrase each agent's goal_text"
+    )
+    with pytest.raises(ValueError, match="diverge"):
+        verify_fn(altered_text)
+
+    extra_untracked = raw_prompt.replace(
+        "HARD CONSTRAINTS (MANDATORY):\n",
+        "HARD CONSTRAINTS (MANDATORY):\n- (untracked_extra_rule) Use exact template phrasing.\n",
+    )
+    with pytest.raises(ValueError, match="diverge"):
+        verify_fn(extra_untracked)
+
+
+def test_40_verify_written_checks_every_generations_record(tmp_path: Path) -> None:
+    """Test 40 (Decision 5): --verify-written checks every generations.jsonl record, not only the last per rendering."""
+    from udlab_generator.cli import verify_written_dataset
+
+    out_dir = tmp_path / "verify_all_gen_lines"
+    assert cli_main(["--write", "--writer", "mock", "--count", "10", "--out-dir", str(out_dir)]) == 0
+    assert cli_main(["--verify-written", str(out_dir)]) == 0
+
+    gen_path = out_dir / "generations.jsonl"
+    orig_lines = [line for line in gen_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(orig_lines) == 20
+
+    # Prepend an earlier refused record for (scen_0000, r0) while keeping the final 20 passing records intact
+    early_failed_rec = json.loads(orig_lines[0])
+    early_failed_rec["call_id"] = "scen_0000:r0:call_0000_failed"
+    early_failed_rec["checks_passed"] = False
+    early_failed_rec["refusal_reasons"] = ["c_fidelity_doorways: doorway missing"]
+    gen_path.write_text(
+        json.dumps(early_failed_rec, sort_keys=True) + "\n" + "\n".join(orig_lines) + "\n",
+        encoding="utf-8",
+    )
+
+    rep_1 = verify_written_dataset(out_dir)
+    assert rep_1["passed"] is False
+    assert rep_1["generations_valid"] is False
+    assert any("Line 1" in err and "did not pass prose checks" in err for err in rep_1["generations_errors"])
+    assert cli_main(["--verify-written", str(out_dir)]) == 1
+
+    # Prepend an earlier length_stop record for (scen_0000, r0) while keeping final 20 passing records intact
+    early_len_rec = json.loads(orig_lines[0])
+    early_len_rec["call_id"] = "scen_0000:r0:call_0000_length"
+    early_len_rec["done_reason"] = "length"
+    gen_path.write_text(
+        json.dumps(early_len_rec, sort_keys=True) + "\n" + "\n".join(orig_lines) + "\n",
+        encoding="utf-8",
+    )
+    rep_2 = verify_written_dataset(out_dir)
+    assert rep_2["passed"] is False
+    assert rep_2["generations_valid"] is False
+    assert any("Line 1" in err and "done_reason='length'" in err for err in rep_2["generations_errors"])
+    assert cli_main(["--verify-written", str(out_dir)]) == 1
+
 
 
 

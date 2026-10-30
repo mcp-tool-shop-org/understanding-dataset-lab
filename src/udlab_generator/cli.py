@@ -145,30 +145,34 @@ def verify_written_dataset(output_dir: Path) -> dict[str, object]:
                 generations_errors.append(f"Missing boolean 'think' on line {line_idx} of {GENERATIONS_FILENAME}.")
             sid = str(rec_obj.get("scenario_id") or "")
             r_idx = rec_obj.get("rendering_index")
-            if sid and isinstance(r_idx, int) and not isinstance(r_idx, bool):
+            if not sid or not isinstance(r_idx, int) or isinstance(r_idx, bool):
+                generations_errors.append(
+                    f"Missing or invalid (scenario_id, rendering_index) on line {line_idx} of {GENERATIONS_FILENAME}."
+                )
+            else:
                 kept_by_rendering[(sid, r_idx)] = rec_obj
 
-        if len(kept_by_rendering) < num_rows:
-            generations_errors.append(
-                f"Only {len(kept_by_rendering)} distinct (scenario_id, rendering_index) calls in {GENERATIONS_FILENAME}, expected {num_rows}."
-            )
-        for (sid, r_idx), rec_obj in sorted(kept_by_rendering.items()):
             got_digest = str(rec_obj.get("manifest_digest") or "")
             pins_digest = str((rec_obj.get("pins") or {}).get("manifest_digest") or "")
             if got_digest != DEFAULT_WRITER_MODEL_PIN.manifest_digest or (
                 pins_digest and pins_digest != DEFAULT_WRITER_MODEL_PIN.manifest_digest
             ):
                 generations_errors.append(
-                    f"Call for ({sid}, r{r_idx}) has manifest_digest={got_digest!r}, expected {DEFAULT_WRITER_MODEL_PIN.manifest_digest!r}."
+                    f"Line {line_idx} ({sid}, r{r_idx}) has manifest_digest={got_digest!r}, expected {DEFAULT_WRITER_MODEL_PIN.manifest_digest!r}."
                 )
             if rec_obj.get("done_reason") != "stop":
                 generations_errors.append(
-                    f"Call for ({sid}, r{r_idx}) has done_reason={rec_obj.get('done_reason')!r}, expected 'stop'."
+                    f"Line {line_idx} ({sid}, r{r_idx}) has done_reason={rec_obj.get('done_reason')!r}, expected 'stop'."
                 )
             if rec_obj.get("checks_passed", True) is not True or rec_obj.get("refusal_reasons"):
                 generations_errors.append(
-                    f"Call for ({sid}, r{r_idx}) did not pass prose checks (checks_passed={rec_obj.get('checks_passed')!r})."
+                    f"Line {line_idx} ({sid}, r{r_idx}) did not pass prose checks (checks_passed={rec_obj.get('checks_passed')!r}, refusal_reasons={rec_obj.get('refusal_reasons')!r})."
                 )
+
+        if len(kept_by_rendering) < num_rows:
+            generations_errors.append(
+                f"Only {len(kept_by_rendering)} distinct (scenario_id, rendering_index) calls in {GENERATIONS_FILENAME}, expected {num_rows}."
+            )
         generations_valid = len(generations_errors) == 0
 
     result: dict[str, object] = {

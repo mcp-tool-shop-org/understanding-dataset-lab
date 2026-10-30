@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 import datetime
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -15,7 +17,7 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import urlparse
 import urllib.error
 import urllib.request
@@ -182,8 +184,218 @@ class RenderedScenario:
     world: World | None = None
 
 
+@dataclass(frozen=True)
+class ProseRequirementSpec:
+    """One structural requirement shared by the writer prompt and `check_rendered_prose`."""
+
+    check_id: str
+    rule_text: str
+
+
+WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
+    ProseRequirementSpec(
+        "c_fidelity_paragraph_split",
+        r'Output two paragraphs separated by a blank line ("\n\n"): Paragraph 1 is the setup paragraph; Paragraph 2 is the event paragraph.',
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_focal_agent",
+        "Name the designated focal_agent in the setup paragraph, framing transitions relative to focal_agent without omitting any event.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_room_setup",
+        "Name every room from rooms in the setup paragraph.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_containers",
+        "Name both containers of every room from containers_by_room in the setup paragraph.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_occluder",
+        "Name each room's occluder from occluders_by_room in the setup paragraph, stating it stands between 'far-side alcove' and 'container bay' and blocks sight from 'far-side alcove' while 'container bay' sees containers in open view.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_stations",
+        "Name both room stations ('container bay' and 'far-side alcove') in the setup paragraph.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_doorways",
+        "For each doorway edge [room_a, room_b] in doorways, name both rooms in the same setup sentence (natural phrasing, never an exact phrase).",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_initial_room",
+        "For each agent in agents, name the agent and starting room (initial_agent_rooms[agent]) in the same setup sentence (grouped agents pass).",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_goal",
+        "Copy each agent's goal_text (goals[agent].goal_text) verbatim into the setup paragraph.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_absent_party",
+        "Name every absent party from absent_parties in the setup paragraph.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_stake_edge",
+        "Copy each stake description (stake_edges[].description) verbatim into the setup paragraph.",
+    ),
+    ProseRequirementSpec(
+        "d_rule_sentence",
+        f'Include the belief-persistence rule sentence byte-identically once in the setup paragraph: "{BELIEF_PERSISTENCE_RULE}"',
+    ),
+    ProseRequirementSpec(
+        "d_hearing_threshold",
+        "State the doorway hearing threshold in dB and 'doorway' in the setup paragraph (say >= threshold dB carries one doorway; quieter stays in room).",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_event_order",
+        "In the event paragraph, write one sentence per logged event in exact chronological order: name the actor explicitly (no pronouns) before the action verb with no other party name between actor and verb; name the event room in each sentence ('in/from/inside/at/of [the] <room>' and no other room on intra-room events); state from_location before to_location on enter/leave/move (or 'entered/arrived in <to> ... from <from>' on enter); state 'in open view' (never 'blocked') on unoccluded (occluded=false) object move/see, and name the room occluder plus 'blocked' (and 'far-side alcove' on occluded see) on occluded (occluded=true) move/see; on say, state '<noise_level> dB' and quote utterance verbatim (without narrator endorsement if is_bluff=true); on message, state 'to/for/messaged/texted/notified <recipient>' and quote utterance verbatim; end say/message sentences with the quoted speech.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_missing_event",
+        "Include every logged event in the event paragraph as its own sentence without omitting or merging events.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_unlogged_event",
+        "Include no extra unlogged sentences in the event paragraph beyond one sentence per logged event.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_contradictory_occlusion",
+        "Never state both 'in open view' and 'blocked' in the same event sentence.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_unlogged_party",
+        "Never mention any party name not listed in agents or absent_parties.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_unlogged_entity",
+        "Never mention any room, object, container, occluder, fixture, note item, mechanism, or motive from another domain.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_unlogged_motive",
+        "Never assert an unlogged motive when stated_reason is absent from the event log.",
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_unlogged_placer",
+        "Never attribute placement or movement of the unsigned note item to any party when no move event for that note is logged.",
+    ),
+    ProseRequirementSpec(
+        "a_no_markers_bracket",
+        "Do not emit any square-bracket markers ('[...]') in the prose.",
+    ),
+    ProseRequirementSpec(
+        "a_no_markers_fact_id",
+        "Do not emit internal fact identifiers (letter F followed by a digit) in the prose.",
+    ),
+    ProseRequirementSpec(
+        "a_no_markers_step_number",
+        "Do not emit explicit step numbers in 'step N' form in the prose.",
+    ),
+    ProseRequirementSpec(
+        "b_banned_adverbs",
+        "Never use any banned mental, emotional, or epistemic adverb: "
+        + ", ".join(BANNED_ADVERBS)
+        + ".",
+    ),
+)
+
+WRITER_PROSE_REQUIREMENTS_BY_ID: dict[str, ProseRequirementSpec] = {
+    req.check_id: req for req in WRITER_PROSE_REQUIREMENTS
+}
+
+_PROMPT_REQ_LINE_RE = re.compile(r"^-\s+\(([a-z0-9_]+)\)\s+(.+)$")
+
+
+def parse_writer_prompt_requirements(prompt_text: str) -> tuple[ProseRequirementSpec, ...]:
+    """Parse the mandatory requirement list from `prompt_text` and reject any untracked requirement lines."""
+    start_marker = "HARD CONSTRAINTS (MANDATORY):"
+    end_marker = "INPUT SPECIFICATION:"
+    start_idx = prompt_text.find(start_marker)
+    end_idx = prompt_text.find(end_marker)
+    if start_idx < 0 or end_idx < 0 or end_idx <= start_idx:
+        raise ValueError("Writer prompt is missing HARD CONSTRAINTS (MANDATORY) or INPUT SPECIFICATION section.")
+    section = prompt_text[start_idx + len(start_marker) : end_idx]
+    parsed: list[ProseRequirementSpec] = []
+    for raw_line in section.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _PROMPT_REQ_LINE_RE.match(line)
+        if m is None:
+            raise ValueError(
+                f"Unrecognized or untracked requirement line in writer prompt HARD CONSTRAINTS: {line!r}"
+            )
+        parsed.append(ProseRequirementSpec(check_id=m.group(1), rule_text=m.group(2)))
+    if not parsed:
+        raise ValueError("No structural requirements parsed from writer prompt.")
+    return tuple(parsed)
+
+
+def get_checker_enforced_check_ids() -> tuple[str, ...]:
+    """Extract every `check_id` enforced by `check_prose_no_markers`, `check_prose_banned_adverbs`, `check_prose_rule_and_hearing_threshold`, and `check_prose_render_fidelity`."""
+    checker_fns = (
+        check_prose_no_markers,
+        check_prose_banned_adverbs,
+        check_prose_rule_and_hearing_threshold,
+        check_prose_render_fidelity,
+    )
+    found: list[str] = []
+    for fn in checker_fns:
+        tree = ast.parse(inspect.getsource(fn))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func_name = (
+                    node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else ""
+                )
+                if func_name == "_raise_prose_check_error" and node.args:
+                    first_arg = node.args[0]
+                    if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                        if first_arg.value not in found:
+                            found.append(first_arg.value)
+                elif func_name == "RenderCheckError":
+                    for kw in node.keywords:
+                        if kw.arg == "check_id" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                            if kw.value.value not in found:
+                                found.append(kw.value.value)
+    return tuple(found)
+
+
+def verify_prompt_and_checker_requirements_aligned(
+    prompt_text: str | None = None,
+) -> tuple[ProseRequirementSpec, ...]:
+    """Verify that the writer prompt's parsed requirements, `WRITER_PROSE_REQUIREMENTS`, and the checker's enforced `check_id`s are identical."""
+    raw_text = (
+        prompt_text
+        if prompt_text is not None
+        else WRITER_PROMPT_PATH.read_text(encoding="utf-8")
+    )
+    parsed_prompt_reqs = parse_writer_prompt_requirements(raw_text)
+    if parsed_prompt_reqs != WRITER_PROSE_REQUIREMENTS:
+        prompt_ids = [r.check_id for r in parsed_prompt_reqs]
+        shared_ids = [r.check_id for r in WRITER_PROSE_REQUIREMENTS]
+        raise ValueError(
+            f"Writer prompt requirements diverge from WRITER_PROSE_REQUIREMENTS: prompt_ids={prompt_ids}, shared_ids={shared_ids}"
+        )
+    enforced_ids = set(get_checker_enforced_check_ids())
+    shared_id_set = {r.check_id for r in WRITER_PROSE_REQUIREMENTS}
+    if enforced_ids != shared_id_set:
+        raise ValueError(
+            f"Checker enforced check_ids diverge from WRITER_PROSE_REQUIREMENTS: only_in_checker={sorted(enforced_ids - shared_id_set)}, only_in_shared={sorted(shared_id_set - enforced_ids)}"
+        )
+    return parsed_prompt_reqs
+
+
+def _raise_prose_check_error(check_id: str, message: str) -> NoReturn:
+    """Raise `RenderCheckError` after verifying `check_id` is registered in `WRITER_PROSE_REQUIREMENTS`."""
+    if check_id not in WRITER_PROSE_REQUIREMENTS_BY_ID:
+        raise RuntimeError(f"Unregistered prose check_id {check_id!r} not in WRITER_PROSE_REQUIREMENTS.")
+    raise RenderCheckError(message, check_id=check_id)
+
+
 def load_writer_prompt_template(path: Path | None = None) -> str:
-    """Load the `qwen3.6:35b` writer prompt text file and verify banned-adverb and belief-rule coverage."""
+    """Load the `qwen3.6:35b` writer prompt text file and verify banned-adverb, belief-rule, and requirement alignment."""
     target = path or WRITER_PROMPT_PATH
     text = target.read_text(encoding="utf-8")
     missing = [w for w in BANNED_ADVERBS if w not in text.lower()]
@@ -194,6 +406,8 @@ def load_writer_prompt_template(path: Path | None = None) -> str:
         raise ValueError(
             f"Writer prompt template must contain BELIEF_PERSISTENCE_RULE byte-identically exactly once; found {rule_count}."
         )
+    if target == WRITER_PROMPT_PATH:
+        verify_prompt_and_checker_requirements_aligned(text)
     return text
 
 
@@ -312,8 +526,119 @@ def indefinite_article(phrase: str) -> str:
     return "a"
 
 
+_ACTION_VERBS_BY_KIND: dict[str, tuple[str, ...]] = {
+    "enter": ("walked", "entered", "stepped", "came", "arrived", "went", "moved", "returned"),
+    "leave": ("exited", "left", "departed", "walked", "headed", "went", "stepped"),
+    "move": ("moved", "stepped", "placed", "put", "shifted", "transferred", "adjusted", "turned", "pulled", "set"),
+    "see": ("observed", "looked", "saw", "spotted", "noticed", "inspected", "checked", "viewed", "watched", "glanced"),
+    "say": ("said", "stated", "spoke", "announced", "uttered", "claimed", "reported", "told"),
+    "message": ("sent", "messaged", "texted", "transmitted", "notified", "wrote"),
+}
+
+_SPEECH_AND_MESSAGE_VERBS_RE = re.compile(
+    r"\b(?:"
+    + "|".join(
+        re.escape(v)
+        for v in (_ACTION_VERBS_BY_KIND["say"] + _ACTION_VERBS_BY_KIND["message"])
+    )
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _clause_until_next_unquoted_sentence_end(text: str) -> str:
+    """Return the prefix of `text` up to the first sentence-ending `.!?` outside double quotes."""
+    in_q = False
+    out: list[str] = []
+    for i, ch in enumerate(text):
+        out.append(ch)
+        if ch in ('"', "“", "”"):
+            in_q = not in_q
+        elif not in_q and ch in (".", "!", "?"):
+            nxt = text[i + 1] if i + 1 < len(text) else ""
+            if not nxt or nxt.isspace():
+                break
+    return "".join(out)
+
+
 def _split_prose_sentences(prose: str) -> list[str]:
-    return [s.strip() for s in _SENTENCE_SPLIT_RE.split(prose) if s.strip()]
+    """Split `prose` into sentences without splitting on periods inside quoted speech when attribution follows."""
+    sentences: list[str] = []
+    current: list[str] = []
+    pre_quote_outside: list[str] = []
+    in_quote = False
+    idx = 0
+    n = len(prose)
+    while idx < n:
+        ch = prose[idx]
+        if ch in ('"', "“", "”"):
+            current.append(ch)
+            prev_ch = prose[idx - 1] if idx > 0 else ""
+            in_quote = not in_quote
+            if not in_quote and prev_ch in (".", "!", "?"):
+                after = prose[idx + 1 :]
+                if not after or after[0].isspace():
+                    rest = after.lstrip()
+                    if not rest:
+                        sent = "".join(current).strip()
+                        if sent:
+                            sentences.append(sent)
+                        current = []
+                        pre_quote_outside = []
+                        break
+                    pre_outside_str = "".join(pre_quote_outside)
+                    next_clause = _clause_until_next_unquoted_sentence_end(rest)
+                    attribution_follows = (
+                        rest[0].islower()
+                        or rest[0] in (",", ";", "—", "-")
+                        or (
+                            _SPEECH_AND_MESSAGE_VERBS_RE.search(pre_outside_str) is None
+                            and _SPEECH_AND_MESSAGE_VERBS_RE.search(next_clause) is not None
+                        )
+                    )
+                    if not attribution_follows:
+                        sent = "".join(current).strip()
+                        if sent:
+                            sentences.append(sent)
+                        current = []
+                        pre_quote_outside = []
+                        while idx + 1 < n and prose[idx + 1].isspace():
+                            idx += 1
+            idx += 1
+            continue
+
+        current.append(ch)
+        if not in_quote:
+            pre_quote_outside.append(ch)
+            if ch in (".", "!", "?"):
+                nxt = prose[idx + 1] if idx + 1 < n else ""
+                if nxt in ('"', "'", "”", "’"):
+                    if nxt in ("'", "’"):
+                        after_q = prose[idx + 2 :]
+                        if not after_q or after_q[0].isspace():
+                            current.append(nxt)
+                            idx += 1
+                            sent = "".join(current).strip()
+                            if sent:
+                                sentences.append(sent)
+                            current = []
+                            pre_quote_outside = []
+                            while idx + 1 < n and prose[idx + 1].isspace():
+                                idx += 1
+                elif not nxt or nxt.isspace():
+                    sent = "".join(current).strip()
+                    if sent:
+                        sentences.append(sent)
+                    current = []
+                    pre_quote_outside = []
+                    while idx + 1 < n and prose[idx + 1].isspace():
+                        idx += 1
+        idx += 1
+
+    tail = "".join(current).strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
 
 
 def _is_setup_sentence(sentence: str) -> bool:
@@ -331,16 +656,6 @@ def _is_setup_sentence(sentence: str) -> bool:
             "depends on the baseline",
         )
     )
-
-
-_ACTION_VERBS_BY_KIND: dict[str, tuple[str, ...]] = {
-    "enter": ("walked", "entered", "stepped", "came", "arrived", "went", "moved", "returned"),
-    "leave": ("exited", "left", "departed", "walked", "headed", "went", "stepped"),
-    "move": ("moved", "stepped", "placed", "put", "shifted", "transferred", "adjusted", "turned", "pulled", "set"),
-    "see": ("observed", "looked", "saw", "spotted", "noticed", "inspected", "checked", "viewed", "watched", "glanced"),
-    "say": ("said", "stated", "spoke", "announced", "uttered", "claimed", "reported", "told"),
-    "message": ("sent", "messaged", "texted", "transmitted", "notified", "wrote"),
-}
 
 
 def _actor_precedes_verb_as_subject(
@@ -420,25 +735,27 @@ def _sentence_matches_event(
 ) -> bool:
     """Return True if `sentence` states `ev` with role-bound actor, action, object, ordered from/to, and room."""
     s_low = sentence.lower()
+    s_unquoted_low = re.sub(r'"[^"]*"|“[^”]*”', '""', s_low)
+    frame_low = s_unquoted_low if ev.kind in ("say", "message") else s_low
     all_parties: Sequence[str] = (
         tuple(world.agents) + tuple(world.absent_parties)
         if world is not None
         else (ev.actor, *([ev.recipient] if ev.recipient else []))
     )
     action_verbs = _ACTION_VERBS_BY_KIND.get(ev.kind, ())
-    if not _actor_precedes_verb_as_subject(s_low, ev.actor, action_verbs, all_parties):
+    if not _actor_precedes_verb_as_subject(frame_low, ev.actor, action_verbs, all_parties):
         return False
 
-    if ev.room.lower() not in s_low:
+    if ev.room.lower() not in frame_low:
         return False
 
     # Reject if another room from world.rooms is asserted as the room of an intra-room action
     if world is not None and ev.kind not in ("enter", "leave"):
         other_rooms = [r for r in world.rooms if r.lower() != ev.room.lower()]
         for o_room in other_rooms:
-            if o_room.lower() in s_low:
+            if o_room.lower() in frame_low:
                 return False
-        if not re.search(rf"\b(?:in|from|inside|at|of)\s+(?:the\s+)?{re.escape(ev.room.lower())}\b", s_low):
+        if not re.search(rf"\b(?:in|from|inside|at|of)\s+(?:the\s+)?{re.escape(ev.room.lower())}\b", frame_low):
             return False
 
     if ev.kind == "enter":
@@ -524,20 +841,24 @@ def _sentence_matches_event(
         return True
 
     if ev.kind == "say":
-        if f"{ev.noise_level} db" not in s_low:
+        if f"{ev.noise_level} db" not in frame_low:
             return False
-        if ev.utterance and ev.utterance.lower() not in s_low:
-            return False
+        if ev.utterance:
+            utt_core = ev.utterance.rstrip(".!?").lower()
+            if utt_core not in s_low:
+                return False
         return True
 
     if ev.kind == "message":
         if not ev.recipient:
             return False
         recip_esc = re.escape(ev.recipient.lower())
-        if not re.search(rf"\b(?:to|for|messaged|texted|notified)\s+{recip_esc}\b", s_low):
+        if not re.search(rf"\b(?:to|for|messaged|texted|notified)\s+{recip_esc}\b", frame_low):
             return False
-        if ev.utterance and ev.utterance.lower() not in s_low:
-            return False
+        if ev.utterance:
+            utt_core = ev.utterance.rstrip(".!?").lower()
+            if utt_core not in s_low:
+                return False
         return True
 
     return False
@@ -547,21 +868,21 @@ def check_prose_no_markers(prose: str) -> None:
     """Prose check (a): refuse if any bracket marker `[...]`, fact ID `F0`..`F9`, or `step N` survives."""
     bracket_match = _BRACKET_MARKER_RE.search(prose)
     if bracket_match is not None:
-        raise RenderCheckError(
+        _raise_prose_check_error(
+            "a_no_markers_bracket",
             f"Render check (a) failed: surviving bracket marker {bracket_match.group(0)!r} in prose.",
-            check_id="a_no_markers_bracket",
         )
     fact_match = _FACT_ID_RE.search(prose)
     if fact_match is not None:
-        raise RenderCheckError(
+        _raise_prose_check_error(
+            "a_no_markers_fact_id",
             f"Render check (a) failed: surviving fact ID {fact_match.group(0)!r} in prose.",
-            check_id="a_no_markers_fact_id",
         )
     step_match = _STEP_NUMBER_RE.search(prose)
     if step_match is not None:
-        raise RenderCheckError(
+        _raise_prose_check_error(
+            "a_no_markers_step_number",
             f"Render check (a) failed: surviving step number {step_match.group(0)!r} in prose.",
-            check_id="a_no_markers_step_number",
         )
 
 
@@ -569,9 +890,9 @@ def check_prose_banned_adverbs(prose: str) -> tuple[str, ...]:
     """Prose check (b): refuse if any banned mental/emotional adverb from `BANNED_ADVERBS` appears."""
     hits = tuple(dict.fromkeys(m.group(1).lower() for m in _BANNED_PATTERN.finditer(prose)))
     if hits:
-        raise RenderCheckError(
+        _raise_prose_check_error(
+            "b_banned_adverbs",
             f"Render check (b) failed: prose contains banned unlogged mental/emotional adverb(s): {hits}",
-            check_id="b_banned_adverbs",
         )
     return ()
 
@@ -582,15 +903,15 @@ def check_prose_rule_and_hearing_threshold(prose: str, world: World) -> None:
     setup_text = paragraphs[0] if paragraphs else prose
     rule_count = setup_text.count(BELIEF_PERSISTENCE_RULE)
     if rule_count != 1:
-        raise RenderCheckError(
+        _raise_prose_check_error(
+            "d_rule_sentence",
             f"Render check (d) failed: setup prose must contain BELIEF_PERSISTENCE_RULE byte-identically once (found {rule_count}).",
-            check_id="d_rule_sentence",
         )
     threshold_str = f"{world.noise_threshold} dB"
     if threshold_str.lower() not in setup_text.lower() or "doorway" not in setup_text.lower():
-        raise RenderCheckError(
+        _raise_prose_check_error(
+            "d_hearing_threshold",
             f"Render check (d) failed: setup prose is missing the doorway hearing threshold '{threshold_str}'.",
-            check_id="d_hearing_threshold",
         )
 
 
@@ -603,7 +924,8 @@ def check_prose_render_fidelity(
 
     Verifies:
     1. Setup states every room, container pair, occluder (between `far-side alcove` and `container bay`),
-       doorway edge, initial agent room, absent party, goal, and stake edge.
+       doorway edge (both room names in one setup sentence), initial agent room (each agent and starting
+       room in one setup sentence), absent party, verbatim goal, and verbatim stake edge.
     2. Every event in `world.events` is stated in the prose with its actor, action, object, place,
        and room in exact relative chronological order.
     3. Nothing the event log lacks is asserted (no unlogged party names, rooms, containers, objects,
@@ -614,85 +936,90 @@ def check_prose_render_fidelity(
     paragraphs = [p.strip() for p in prose.split("\n\n") if p.strip()]
     setup_text = paragraphs[0] if paragraphs else prose
     setup_low = setup_text.lower()
+    setup_sents_low = [s.lower() for s in _split_prose_sentences(setup_text)]
 
     if focal_agent is not None and focal_agent.lower() not in setup_low:
-        raise RenderCheckError(
+        _raise_prose_check_error(
+            "c_fidelity_focal_agent",
             f"Render check (c) failed: focal_agent '{focal_agent}' is missing from setup prose.",
-            check_id="c_fidelity_focal_agent",
         )
 
     # 1. Verify per-room containers and occluders in setup
     for room in world.rooms:
         if room.lower() not in setup_low:
-            raise RenderCheckError(
+            _raise_prose_check_error(
+                "c_fidelity_room_setup",
                 f"Render check (c) failed: room '{room}' is missing from setup prose.",
-                check_id="c_fidelity_room_setup",
             )
         c0, c1 = world.containers_by_room[room]
         if c0.lower() not in setup_low or c1.lower() not in setup_low:
-            raise RenderCheckError(
+            _raise_prose_check_error(
+                "c_fidelity_containers",
                 f"Render check (c) failed: containers ({c0!r}, {c1!r}) for room '{room}' missing from setup prose.",
-                check_id="c_fidelity_containers",
             )
         occ = world.occluders_by_room[room]
         if occ.lower() not in setup_low:
-            raise RenderCheckError(
+            _raise_prose_check_error(
+                "c_fidelity_occluder",
                 f"Render check (c) failed: occluder '{occ}' for room '{room}' missing from setup prose.",
-                check_id="c_fidelity_occluder",
             )
 
     if CONTAINER_BAY_STATION.lower() not in setup_low or FAR_SIDE_ALCOVE_STATION.lower() not in setup_low:
-        raise RenderCheckError(
+        _raise_prose_check_error(
+            "c_fidelity_stations",
             "Render check (c) failed: station names ('container bay', 'far-side alcove') missing from setup prose.",
-            check_id="c_fidelity_stations",
         )
 
-    # Verify doorways
+    # Verify doorways: both room names of each edge must appear in one setup sentence
     for r_a, r_b in world.doorways:
-        adj_a_b = f"{r_a.lower()} connects to the {r_b.lower()}"
-        adj_b_a = f"{r_b.lower()} connects to the {r_a.lower()}"
-        if adj_a_b not in setup_low and adj_b_a not in setup_low:
-            raise RenderCheckError(
+        if not any(r_a.lower() in s_low and r_b.lower() in s_low for s_low in setup_sents_low):
+            _raise_prose_check_error(
+                "c_fidelity_doorways",
                 f"Render check (c) failed: doorway ({r_a!r}, {r_b!r}) missing from setup prose.",
-                check_id="c_fidelity_doorways",
             )
 
-    # Verify initial agent rooms, absent parties, goals, and stakes
+    # Verify initial agent rooms (agent name and starting room in the same setup sentence), absent parties, goals, and stakes
+    candidate_init_sents = [
+        s for s in setup_sents_low if CONTAINER_BAY_STATION.lower() not in s
+    ] or setup_sents_low
     for ag in world.agents:
         init_r = world.initial_agent_rooms[ag]
-        if f"{ag.lower()} starts in the {init_r.lower()}" not in setup_low:
-            raise RenderCheckError(
+        if not any(
+            re.search(rf"\b{re.escape(ag.lower())}\b", s_low) and init_r.lower() in s_low
+            for s_low in candidate_init_sents
+        ):
+            _raise_prose_check_error(
+                "c_fidelity_initial_room",
                 f"Render check (c) failed: initial room '{init_r}' for agent '{ag}' missing from setup prose.",
-                check_id="c_fidelity_initial_room",
             )
         goal_txt = world.goals[ag].goal_text.lower()
         if goal_txt not in setup_low:
-            raise RenderCheckError(
+            _raise_prose_check_error(
+                "c_fidelity_goal",
                 f"Render check (c) failed: goal '{world.goals[ag].goal_text}' for agent '{ag}' missing from setup prose.",
-                check_id="c_fidelity_goal",
             )
 
     for abs_p in world.absent_parties:
         if not re.search(rf"\b{re.escape(abs_p.lower())}\b", setup_low):
-            raise RenderCheckError(
+            _raise_prose_check_error(
+                "c_fidelity_absent_party",
                 f"Render check (c) failed: absent party '{abs_p}' missing from setup prose.",
-                check_id="c_fidelity_absent_party",
             )
 
     for stake in world.stake_edges:
         if stake.description.lower() not in setup_low:
-            raise RenderCheckError(
+            _raise_prose_check_error(
+                "c_fidelity_stake_edge",
                 f"Render check (c) failed: stake edge '{stake.description}' missing from setup prose.",
-                check_id="c_fidelity_stake_edge",
             )
 
     # 2. Verify no unlogged party names or foreign domain entities appear anywhere in the prose
     allowed_parties = set(world.agents) | set(world.absent_parties)
     for party_name in ALL_KNOWN_PARTY_NAMES - allowed_parties:
         if re.search(rf"\b{re.escape(party_name)}\b", prose):
-            raise RenderCheckError(
+            _raise_prose_check_error(
+                "c_fidelity_unlogged_party",
                 f"Render check (c) failed: unlogged party name '{party_name}' asserted in prose.",
-                check_id="c_fidelity_unlogged_party",
             )
 
     current_domain = next((d for d in DOMAINS if d.name == world.domain_name), None)
@@ -711,9 +1038,9 @@ def check_prose_render_fidelity(
         )
         for phrase in foreign_phrases:
             if phrase.lower() in prose_low:
-                raise RenderCheckError(
+                _raise_prose_check_error(
+                    "c_fidelity_unlogged_entity",
                     f"Render check (c) failed: unlogged entity/phrase '{phrase}' from domain '{dom.name}' asserted in prose.",
-                    check_id="c_fidelity_unlogged_entity",
                 )
 
     # Check that unlogged side_reasons or unlogged note placement are never asserted when unknowable
@@ -721,9 +1048,9 @@ def check_prose_render_fidelity(
         logged_reasons = {ev.stated_reason.lower() for ev in world.events if ev.stated_reason}
         for reason_str in current_domain.side_reasons:
             if reason_str.lower() not in logged_reasons and reason_str.lower() in prose_low:
-                raise RenderCheckError(
+                _raise_prose_check_error(
+                    "c_fidelity_unlogged_motive",
                     f"Render check (c) failed: unlogged motive '{reason_str}' asserted in prose.",
-                    check_id="c_fidelity_unlogged_motive",
                 )
         note_moves = [
             ev
@@ -736,17 +1063,17 @@ def check_prose_render_fidelity(
                     f"{ag.lower()} placed the {current_domain.note_item.lower()}" in prose_low
                     or f"{ag.lower()} moved the {current_domain.note_item.lower()}" in prose_low
                 ):
-                    raise RenderCheckError(
+                    _raise_prose_check_error(
+                        "c_fidelity_unlogged_placer",
                         f"Render check (c) failed: unlogged placement of '{current_domain.note_item}' by '{ag}' asserted in prose.",
-                        check_id="c_fidelity_unlogged_placer",
                     )
 
     # 3. Verify every event in `world.events` is stated in exact relative order and no extra event sentences exist
-    #Paragraph 1 (`paragraphs[0]`) is structurally the setup paragraph; `paragraphs[1:]` are event paragraphs.
+    # Paragraph 1 (`paragraphs[0]`) is structurally the setup paragraph; `paragraphs[1:]` are event paragraphs.
     if len(paragraphs) < 2:
-        raise RenderCheckError(
+        _raise_prose_check_error(
+            "c_fidelity_paragraph_split",
             "Render check (c) failed: prose must separate the setup paragraph from the event paragraph(s) with a blank line ('\\n\\n').",
-            check_id="c_fidelity_paragraph_split",
         )
     event_sentences: list[str] = []
     for ev_para in paragraphs[1:]:
@@ -755,9 +1082,9 @@ def check_prose_render_fidelity(
     for sent in event_sentences:
         s_low = sent.lower()
         if "in open view" in s_low and "blocked" in s_low:
-            raise RenderCheckError(
+            _raise_prose_check_error(
+                "c_fidelity_contradictory_occlusion",
                 f"Render check (c) failed: contradictory visibility ('in open view' and 'blocked') in sentence: {sent!r}",
-                check_id="c_fidelity_contradictory_occlusion",
             )
 
     matched_sentence_indices: list[int] = []
@@ -780,13 +1107,13 @@ def check_prose_render_fidelity(
                 None,
             )
             if earlier_idx is not None:
-                raise RenderCheckError(
+                _raise_prose_check_error(
+                    "c_fidelity_event_order",
                     f"Render check (c) failed: event #{ev_idx + 1} ({ev.kind} by {ev.actor} in {ev.room}) is out of relative chronological order.",
-                    check_id="c_fidelity_event_order",
                 )
-            raise RenderCheckError(
+            _raise_prose_check_error(
+                "c_fidelity_missing_event",
                 f"Render check (c) failed: missing or altered event #{ev_idx + 1} (step={ev.step}, kind={ev.kind}, actor={ev.actor}, room={ev.room}, target={ev.target_object!r}, from={ev.from_location!r}, to={ev.to_location!r}).",
-                check_id="c_fidelity_missing_event",
             )
         matched_sentence_indices.append(found_idx)
         search_start = found_idx + 1
@@ -797,9 +1124,9 @@ def check_prose_render_fidelity(
             for i in range(len(event_sentences))
             if i not in set(matched_sentence_indices)
         ]
-        raise RenderCheckError(
+        _raise_prose_check_error(
+            "c_fidelity_unlogged_event",
             f"Render check (c) failed: prose asserts {len(unmatched)} unlogged event sentence(s) not in world.events: {unmatched[:2]}",
-            check_id="c_fidelity_unlogged_event",
         )
 
 
