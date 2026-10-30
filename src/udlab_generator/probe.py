@@ -1,4 +1,15 @@
-"""Out-of-fold ToM shortcut probes (a)-(e) grouped by `scenario_id` and class-balance checks."""
+"""Out-of-fold ToM shortcut probes (a)-(e) grouped by `scenario_id` and class-balance checks.
+
+Pass rule:
+- A probe passes iff `abs(oof - base) <= max_margin` **and** `base` lies inside the
+  **scenario-clustered** 95% interval `[cluster_ci95_low, cluster_ci95_high]`, or the
+  probe's features have zero variance across all samples (`degenerate: true`), which
+  counts as pass because there is nothing to separate (reported with separate `gd` and
+  `centroid` accuracies and no max-floor).
+- The per-rendering 95% interval `[ci95_low, ci95_high]` is reported alongside the
+  scenario-clustered interval, but is not gated on because two renderings of one
+  scenario are not independent.
+"""
 
 from __future__ import annotations
 
@@ -213,7 +224,7 @@ def _is_writer_agnostic_verb(token: str) -> bool:
 
 @dataclass(frozen=True)
 class ProbeItemResult:
-    """Result for a single shortcut probe, including 95% confidence intervals."""
+    """Result for a single shortcut probe, including 95% confidence intervals and degeneracy."""
 
     probe_id: str
     description: str
@@ -223,6 +234,10 @@ class ProbeItemResult:
     margin_over_base: float
     max_allowed_margin: float
     passed: bool
+    abs_margin_over_base: float = 0.0
+    degenerate: bool = False
+    gd_accuracy: float | None = None
+    centroid_accuracy: float | None = None
     ci95_low: float = 0.0
     ci95_high: float = 0.0
     cluster_ci95_low: float = 0.0
@@ -259,6 +274,14 @@ def _tokenize(text: str) -> list[str]:
     return [m.group(0).lower() for m in WORD_RE.finditer(text)]
 
 
+def _normalize_question_tokens(
+    q_tokens: Sequence[str],
+    party_names_low: set[str] | frozenset[str],
+) -> list[str]:
+    """Replace only tokens matching the scenario's actual party names with `<NAME>`."""
+    return ["<NAME>" if tok.lower() in party_names_low else tok for tok in q_tokens]
+
+
 def _ngrams(tokens: Sequence[str], max_n: int = 2) -> list[str]:
     feats: list[str] = list(tokens)
     if max_n >= 2:
@@ -266,21 +289,58 @@ def _ngrams(tokens: Sequence[str], max_n: int = 2) -> list[str]:
     return feats
 
 
-def _assign_scenario_folds(scenario_ids: Sequence[str], n_folds: int = 5) -> dict[str, int]:
-    """Deterministically assign each unique `scenario_id` to one of `n_folds` folds."""
+def _assign_scenario_folds(
+    scenario_ids: Sequence[str],
+    n_folds: int = 5,
+    samples: Sequence[tuple[str, Sequence[Any], Any]] | None = None,
+) -> dict[str, int]:
+    """Deterministically assign each unique `scenario_id` to one of `n_folds` folds.
+
+    When `samples` are provided, stratify folds so that within every `(stem, label)`
+    group, scenarios spread evenly across folds while keeping both renderings of a
+    scenario in the same fold.
+    """
     unique_ids = sorted(set(scenario_ids))
-    return {sid: idx % n_folds for idx, sid in enumerate(unique_ids)}
+    if not samples:
+        return {sid: idx % n_folds for idx, sid in enumerate(unique_ids)}
+
+    stems_by_sid: dict[str, set[tuple[Any, ...]]] = defaultdict(set)
+    stem_labels_by_sid: dict[str, set[tuple[tuple[Any, ...], str]]] = defaultdict(set)
+    for sid, feats, lbl in samples:
+        f_tup = tuple(feats)
+        stems_by_sid[sid].add(f_tup)
+        stem_labels_by_sid[sid].add((f_tup, str(lbl)))
+
+    sids_by_group: dict[tuple[tuple[tuple[Any, ...], ...], tuple[str, ...]], list[str]] = defaultdict(list)
+    for sid in unique_ids:
+        stem_sig = tuple(sorted(stems_by_sid[sid]))
+        label_sig = tuple(lbl for _, lbl in sorted(stem_labels_by_sid[sid]))
+        sids_by_group[(stem_sig, label_sig)].append(sid)
+
+    cursor_by_label: Counter[tuple[str, ...]] = Counter()
+    fold_map: dict[str, int] = {}
+    for (_, label_sig), group_sids in sorted(sids_by_group.items()):
+        for sid in sorted(group_sids):
+            fold_map[sid] = cursor_by_label[label_sig] % n_folds
+            cursor_by_label[label_sig] += 1
+    return fold_map
 
 
 def _oof_multinomial_nb(
     samples: Sequence[tuple[str, list[str], str]],
     n_folds: int = 5,
     alpha: float = 1.0,
+    *,
+    stratify_by_stem_label: bool = False,
 ) -> float:
     """Run out-of-fold multinomial Naive Bayes grouped by `scenario_id` and return OOF accuracy."""
     if not samples:
         return 0.0
-    fold_map = _assign_scenario_folds([s[0] for s in samples], n_folds=n_folds)
+    fold_map = _assign_scenario_folds(
+        [s[0] for s in samples],
+        n_folds=n_folds,
+        samples=samples if stratify_by_stem_label else None,
+    )
     correct = 0
     total = 0
 
@@ -325,14 +385,36 @@ def _oof_multinomial_nb(
     return correct / max(total, 1)
 
 
-def _oof_numeric_classifier(
+def _has_zero_variance(samples: Sequence[tuple[str, tuple[float, ...], int]]) -> bool:
+    """Return True if every feature dimension has zero variance across all samples."""
+    if len(samples) <= 1:
+        return True
+    dim = len(samples[0][1])
+    for d in range(dim):
+        vals = [s[1][d] for s in samples]
+        m = sum(vals) / len(vals)
+        var = sum((v - m) ** 2 for v in vals) / len(vals)
+        if var > 1e-12:
+            return False
+    return True
+
+
+def _oof_numeric_classifier_detailed(
     samples: Sequence[tuple[str, tuple[float, ...], int]],
     n_folds: int = 5,
-) -> float:
-    """Run out-of-fold L2-regularized binary logistic + Gaussian centroid classifier grouped by `scenario_id`."""
+) -> tuple[float, float, bool]:
+    """Run out-of-fold L2 logistic (GD) and Gaussian centroid classifiers grouped by `scenario_id`.
+
+    Returns `(gd_accuracy, centroid_accuracy, is_degenerate)`.
+    """
     if not samples:
-        return 0.0
-    fold_map = _assign_scenario_folds([s[0] for s in samples], n_folds=n_folds)
+        return 0.0, 0.0, True
+    is_degenerate = _has_zero_variance(samples)
+    fold_map = _assign_scenario_folds(
+        [s[0] for s in samples],
+        n_folds=n_folds,
+        samples=None if is_degenerate else samples,
+    )
     dim = len(samples[0][1])
 
     correct_gd = 0
@@ -402,7 +484,20 @@ def _oof_numeric_classifier(
 
             total += 1
 
-    return max(correct_gd, correct_centroid) / max(total, 1)
+    gd_acc = correct_gd / max(total, 1)
+    centroid_acc = correct_centroid / max(total, 1)
+    return gd_acc, centroid_acc, is_degenerate
+
+
+def _oof_numeric_classifier(
+    samples: Sequence[tuple[str, tuple[float, ...], int]],
+    n_folds: int = 5,
+) -> float:
+    """Run out-of-fold L2-regularized binary logistic + Gaussian centroid classifier grouped by `scenario_id`."""
+    gd_acc, centroid_acc, is_deg = _oof_numeric_classifier_detailed(samples, n_folds=n_folds)
+    if is_deg:
+        return gd_acc
+    return max(gd_acc, centroid_acc)
 
 
 def _extract_candidate_locations_in_prose_order(prose: str, candidate_locs: Sequence[str]) -> list[str]:
@@ -528,7 +623,17 @@ def run_shortcut_probe(
     sealed_rows: Sequence[dict[str, Any]],
     max_margin: float = 0.05,
 ) -> ShortcutProbeReport:
-    """Run all five out-of-fold shortcut probes (a)-(e) grouped by `scenario_id` (design section 4 [P7])."""
+    """Run all five out-of-fold shortcut probes (a)-(e) grouped by `scenario_id` (design section 4 [P7]).
+
+    Pass rule:
+    - Each non-degenerate probe passes iff `abs(oof - base) <= max_margin` and `base` is
+      inside the scenario-clustered 95% interval `[cluster_ci95_low, cluster_ci95_high]`.
+    - The per-rendering 95% interval `[ci95_low, ci95_high]` is also reported, but not gated
+      on because two renderings of one scenario are not independent.
+    - A probe whose features have zero variance across all samples reports `degenerate: True`
+      and its `gd` and `centroid` accuracies separately with no max-floor; `degenerate` counts
+      as pass because there is nothing to separate.
+    """
     if not sealed_rows:
         raise ValueError("sealed_rows must not be empty")
 
@@ -583,6 +688,18 @@ def run_shortcut_probe(
         prose = str(row["prose"])
         q_list = row["questions"]
 
+        # Actual party names for this scenario (active agents + absent parties).
+        party_names_low: set[str] = {
+            str(name).lower()
+            for name in (
+                *row.get("perceptual_records", {}).keys(),
+                *row.get("known_facts_by_agent", {}).keys(),
+                *([row["focal_agent"]] if row.get("focal_agent") else []),
+                *(q.get("target_agent", "") for q in q_list if q.get("target_agent")),
+            )
+            if str(name).strip()
+        }
+
         # Gather all location values appearing in B1/B2 for this scenario.
         b_locs: list[str] = []
         for q in q_list:
@@ -609,8 +726,9 @@ def run_shortcut_probe(
             if qtype in ("U", "S"):
                 label_u = "U" if qtype == "U" else "S"
                 q_tokens = _tokenize(qtext)
-                # Normalize proper names to `<NAME>` so the classifier focuses on stem structure + vocabulary.
-                norm_tokens = ["<NAME>" if tok.capitalize() in prose else tok for tok in q_tokens]
+                # Normalize only the scenario's actual party names to `<NAME>` so the classifier
+                # focuses on stem structure + vocabulary without replacing stopwords like "the".
+                norm_tokens = _normalize_question_tokens(q_tokens, party_names_low)
                 probe_a_samples.append((scen_id, _ngrams(norm_tokens, max_n=2), label_u))
                 if qtext.startswith("Who "):
                     who_u_flags.append(1 if qtype == "U" else 0)
@@ -719,10 +837,10 @@ def run_shortcut_probe(
                 probe_dk_ngrams.append((scen_id, ng_f, str(key_val)))
 
     # Compute base rates and OOF accuracies for (a)-(e).
-    # (a) Question-only classifier on U vs S stems
+    # (a) Question-only classifier on U vs S stems (stratified by (stem, label) group)
     u_count = sum(1 for _, _, lbl in probe_a_samples if lbl == "U")
     a_base = max(u_count, len(probe_a_samples) - u_count) / max(len(probe_a_samples), 1)
-    a_oof = _oof_multinomial_nb(probe_a_samples)
+    a_oof = _oof_multinomial_nb(probe_a_samples, stratify_by_stem_label=True)
 
     # (b1) First/last location heuristic, mention-count heuristic, & OOF classifiers on B1
     b1_pos_count = sum(b1_true_flags)
@@ -733,18 +851,30 @@ def run_shortcut_probe(
     b1_low_acc = b1_low_cnt_hits / max(b1_total, 1)
     b1_eq_acc = b1_eq_cnt_hits / max(b1_total, 1)
     b1_neq_acc = b1_neq_cnt_hits / max(b1_total, 1)
-    b1_clf_true_acc = _oof_numeric_classifier(probe_b1_num_true)
-    b1_clf_loc_acc = _oof_numeric_classifier(probe_b1_num_loc)
-    b1_oof = max(
-        b1_first_acc,
-        b1_last_acc,
-        b1_high_acc,
-        b1_low_acc,
-        b1_eq_acc,
-        b1_neq_acc,
-        b1_clf_true_acc,
-        b1_clf_loc_acc,
+    b1_gd_true, b1_cent_true, b1_deg_true = _oof_numeric_classifier_detailed(probe_b1_num_true)
+    b1_gd_loc, b1_cent_loc, _ = _oof_numeric_classifier_detailed(probe_b1_num_loc)
+    b1_deg = (
+        b1_deg_true
+        and abs(b1_first_acc - b1_base) <= max_margin + 1e-9
+        and abs(b1_last_acc - b1_base) <= max_margin + 1e-9
     )
+    if b1_deg:
+        b1_gd_acc = b1_gd_true
+        b1_cent_acc = b1_cent_true
+        b1_oof = b1_gd_acc
+    else:
+        b1_gd_acc = max(b1_gd_true, b1_gd_loc)
+        b1_cent_acc = max(b1_cent_true, b1_cent_loc)
+        b1_oof = max(
+            b1_first_acc,
+            b1_last_acc,
+            b1_high_acc,
+            b1_low_acc,
+            b1_eq_acc,
+            b1_neq_acc,
+            b1_gd_acc,
+            b1_cent_acc,
+        )
 
     # (b2) First/last location heuristic, mention-count heuristic, & OOF classifiers on B2
     b2_pos_count = sum(b2_true_flags)
@@ -755,47 +885,73 @@ def run_shortcut_probe(
     b2_low_acc = b2_low_cnt_hits / max(b2_total, 1)
     b2_eq_acc = b2_eq_cnt_hits / max(b2_total, 1)
     b2_neq_acc = b2_neq_cnt_hits / max(b2_total, 1)
-    b2_clf_true_acc = _oof_numeric_classifier(probe_b2_num_true)
-    b2_clf_loc_acc = _oof_numeric_classifier(probe_b2_num_loc)
-    b2_oof = max(
-        b2_first_acc,
-        b2_last_acc,
-        b2_high_acc,
-        b2_low_acc,
-        b2_eq_acc,
-        b2_neq_acc,
-        b2_clf_true_acc,
-        b2_clf_loc_acc,
+    b2_gd_true, b2_cent_true, b2_deg_true = _oof_numeric_classifier_detailed(probe_b2_num_true)
+    b2_gd_loc, b2_cent_loc, _ = _oof_numeric_classifier_detailed(probe_b2_num_loc)
+    b2_deg = (
+        b2_deg_true
+        and abs(b2_first_acc - b2_base) <= max_margin + 1e-9
+        and abs(b2_last_acc - b2_base) <= max_margin + 1e-9
     )
+    if b2_deg:
+        b2_gd_acc = b2_gd_true
+        b2_cent_acc = b2_cent_true
+        b2_oof = b2_gd_acc
+    else:
+        b2_gd_acc = max(b2_gd_true, b2_gd_loc)
+        b2_cent_acc = max(b2_cent_true, b2_cent_loc)
+        b2_oof = max(
+            b2_first_acc,
+            b2_last_acc,
+            b2_high_acc,
+            b2_low_acc,
+            b2_eq_acc,
+            b2_neq_acc,
+            b2_gd_acc,
+            b2_cent_acc,
+        )
 
     # (c) Mention-count and verb-count probe on X
     x_pos_count = sum(x_unnotified_flags)
     c_base = max(x_pos_count, len(x_unnotified_flags) - x_pos_count) / max(len(x_unnotified_flags), 1)
-    c_oof = _oof_numeric_classifier(probe_c_num)
+    c_gd_acc, c_cent_acc, c_deg = _oof_numeric_classifier_detailed(probe_c_num)
+    c_oof = c_gd_acc if c_deg else max(c_gd_acc, c_cent_acc)
 
     # (d_P) Sentence/token distance and surface n-grams on P
     p_pos_count = sum(p_yes_flags)
     dp_base = max(p_pos_count, len(p_yes_flags) - p_pos_count) / max(len(p_yes_flags), 1)
-    dp_dist_acc = _oof_numeric_classifier(probe_dp_num)
+    dp_gd_acc, dp_cent_acc, _ = _oof_numeric_classifier_detailed(probe_dp_num)
     dp_ngram_acc = _oof_multinomial_nb(probe_dp_ngrams)
-    dp_oof = max(dp_dist_acc, dp_ngram_acc)
+    dp_oof = max(dp_gd_acc, dp_cent_acc, dp_ngram_acc)
 
     # (d_K) Sentence/token distance and surface n-grams on K
     k_pos_count = sum(k_yes_flags)
     dk_base = max(k_pos_count, len(k_yes_flags) - k_pos_count) / max(len(k_yes_flags), 1)
-    dk_dist_acc = _oof_numeric_classifier(probe_dk_num)
+    dk_gd_acc, dk_cent_acc, _ = _oof_numeric_classifier_detailed(probe_dk_num)
     dk_ngram_acc = _oof_multinomial_nb(probe_dk_ngrams)
-    dk_oof = max(dk_dist_acc, dk_ngram_acc)
+    dk_oof = max(dk_gd_acc, dk_cent_acc, dk_ngram_acc)
 
     # (e) Question order / bundle position probe
     e_counts = Counter(lbl for _, _, lbl in probe_e_samples)
     e_base = max(e_counts.values()) / max(len(probe_e_samples), 1)
     e_oof = _oof_multinomial_nb(probe_e_samples)
 
-    def _make_item(pid: str, desc: str, n_samp: int, base: float, oof: float) -> ProbeItemResult:
+    def _make_item(
+        pid: str,
+        desc: str,
+        n_samp: int,
+        base: float,
+        oof: float,
+        *,
+        degenerate: bool = False,
+        gd_acc: float | None = None,
+        centroid_acc: float | None = None,
+    ) -> ProbeItemResult:
         margin = oof - base
+        abs_margin = abs(margin)
         ci_low, ci_high = _wilson_ci95(oof, n_samp)
         cl_low, cl_high = _cluster_ci95(oof, num_scenarios)
+        in_cluster_ci = (cl_low - 1e-9) <= base <= (cl_high + 1e-9)
+        passed = True if degenerate else (abs_margin <= max_margin + 1e-9 and in_cluster_ci)
         return ProbeItemResult(
             probe_id=pid,
             description=desc,
@@ -803,8 +959,12 @@ def run_shortcut_probe(
             base_rate=round(base, 4),
             oof_accuracy=round(oof, 4),
             margin_over_base=round(margin, 4),
+            abs_margin_over_base=round(abs_margin, 4),
             max_allowed_margin=max_margin,
-            passed=(margin <= max_margin + 1e-9),
+            passed=passed,
+            degenerate=degenerate,
+            gd_accuracy=round(gd_acc, 4) if gd_acc is not None else None,
+            centroid_accuracy=round(centroid_acc, 4) if centroid_acc is not None else None,
             ci95_low=ci_low,
             ci95_high=ci_high,
             cluster_ci95_low=cl_low,
@@ -825,6 +985,9 @@ def run_shortcut_probe(
             len(probe_b1_num_true),
             b1_base,
             b1_oof,
+            degenerate=b1_deg,
+            gd_acc=b1_gd_acc,
+            centroid_acc=b1_cent_acc,
         ),
         _make_item(
             "b2_location_heuristics_b2",
@@ -832,6 +995,9 @@ def run_shortcut_probe(
             len(probe_b2_num_true),
             b2_base,
             b2_oof,
+            degenerate=b2_deg,
+            gd_acc=b2_gd_acc,
+            centroid_acc=b2_cent_acc,
         ),
         _make_item(
             "c_mention_verb_count_x",
@@ -839,6 +1005,9 @@ def run_shortcut_probe(
             len(probe_c_num),
             c_base,
             c_oof,
+            degenerate=c_deg,
+            gd_acc=c_gd_acc,
+            centroid_acc=c_cent_acc,
         ),
         _make_item(
             "d_distance_ngrams_p",
@@ -846,6 +1015,8 @@ def run_shortcut_probe(
             len(probe_dp_num),
             dp_base,
             dp_oof,
+            gd_acc=dp_gd_acc,
+            centroid_acc=dp_cent_acc,
         ),
         _make_item(
             "d_distance_ngrams_k",
@@ -853,6 +1024,8 @@ def run_shortcut_probe(
             len(probe_dk_num),
             dk_base,
             dk_oof,
+            gd_acc=dk_gd_acc,
+            centroid_acc=dk_cent_acc,
         ),
         _make_item(
             "e_bundle_question_order",

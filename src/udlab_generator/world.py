@@ -339,50 +339,67 @@ def are_rooms_adjacent(
 
 
 def make_balanced_configs(count: int, base_seed: int = 20261030) -> list[ScenarioConfig]:
-    """Build `count` scenario configurations with exact 50/50 balance on every binary axis."""
+    """Build `count` scenario configurations with exact 50/50 balance and orthogonal label axes."""
     if count <= 0:
         raise ValueError("count must be positive")
     rng = random.Random(base_seed)
+    design_rng = random.Random(base_seed ^ 0x3C6EF372)
 
-    # Pair consecutive scenarios `(2*m, 2*m + 1)` inside each domain so every binary axis
-    # is balanced 50/50 both globally and within each domain.
-    def _domain_stratified_bools(axis_salt: int) -> list[bool]:
-        axis_rng = random.Random(base_seed ^ (axis_salt * 0x9E3779B1))
-        vec: list[bool] = []
-        for pair_idx in range(count // 2):
-            pair = [True, False] if axis_rng.randint(0, 1) == 0 else [False, True]
-            vec.extend(pair)
-        if count % 2 == 1:
-            vec.append(bool(axis_salt % 2 == 0))
-        return vec
-
-    p_vec = _domain_stratified_bools(1)
-    k_vec = _domain_stratified_bools(2)
-    # Construct `(b1, b2, loc_order_bit)` as an exact 2x2x2 factorial so B1, B2,
-    # and first/last container mention order are mutually orthogonal (exact 50/50 in every cell).
-    oct_cells = [
-        (True, True, 0),
-        (True, False, 1),
-        (False, True, 1),
-        (False, False, 0),
-        (True, True, 1),
-        (True, False, 0),
-        (False, True, 0),
-        (False, False, 1),
-    ]
-    b12_triples = [oct_cells[i % 8] for i in range(count)]
-    rng_b12 = random.Random(base_seed ^ 0x3C6EF372)
-    rng_b12.shuffle(b12_triples)
-    b1_vec = [t[0] for t in b12_triples]
-    b2_vec = [t[1] for t in b12_triples]
-    loc_bit_vec = [t[2] for t in b12_triples]
-    x_vec = _domain_stratified_bools(5)
-    u_vec = _domain_stratified_bools(6)
+    # Construct 4-bit state vectors `s = (s0, s1, s2, s3)` arranged inblocks of 4 quads (16 scenarios).
+    # Each quad consists of two complementary pairs `{z, z ^ 0b1111}` and `{z ^ 0b0110, z ^ 0b1001}`
+    # for `z in {(0,0,0,0), (0,0,0,1), (0,1,0,0), (0,1,0,1)}`.
+    # Mapping the 7 binary axes to distinct odd-weight linear combinations over F_2^4:
+    #   U       = s0             (1, 0, 0, 0)
+    #   B1      = s1             (0, 1, 0, 0)
+    #   B2      = s2             (0, 0, 1, 0)
+    #   loc_bit = s3             (0, 0, 0, 1)
+    #   X       = s0 ^ s1 ^ s2   (1, 1, 1, 0)
+    #   P       = s0 ^ s2 ^ s3   (1, 0, 1, 1)
+    #   K       = s0 ^ s1 ^ s3   (1, 1, 0, 1)
+    # guarantees:
+    # 1. Every consecutive pair `(2*m, 2*m + 1)` has opposite values on all 7 axes (50/50 per domain).
+    # 2. Every quad of 4 scenarios has exact 1/1/1/1 balance on P x U, K x U, B1 x X, B2 x X,
+    #    B1 x loc_bit, and B2 x loc_bit.
+    # 3. Every block of 16 scenarios is an exact 4/4/4/4 orthogonal array on all 21 axis pairs
+    #    and an exact 2x2x2 factorial on (B1, B2, loc_bit).
+    quad_base_states = [0b0000, 0b0001, 0b0100, 0b0101]
+    states: list[int] = []
+    while len(states) < count:
+        quads = list(quad_base_states)
+        design_rng.shuffle(quads)
+        for z in quads:
+            pairs = [
+                [z, z ^ 0b1111],
+                [z ^ 0b0110, z ^ 0b1001],
+            ]
+            design_rng.shuffle(pairs)
+            first_p_target = design_rng.randint(0, 1)
+            for p_idx, pair in enumerate(pairs):
+                target_p = first_p_target ^ p_idx
+                s_first = pair[0]
+                p_first = ((s_first >> 3) & 1) ^ ((s_first >> 1) & 1) ^ (s_first & 1)
+                if p_first != target_p:
+                    pair.reverse()
+                states.extend(pair)
 
     configs: list[ScenarioConfig] = []
     for idx in range(count):
+        s = states[idx]
+        s0 = (s >> 3) & 1
+        s1 = (s >> 2) & 1
+        s2 = (s >> 1) & 1
+        s3 = s & 1
+
+        u_val = bool(s0)
+        b1_val = bool(s1)
+        b2_val = bool(s2)
+        loc_bit = s3
+        x_val = bool(s0 ^ s1 ^ s2)
+        p_val = bool(s0 ^ s2 ^ s3)
+        k_val = bool(s0 ^ s1 ^ s3)
+
         raw_seed = rng.randint(100_000, 999_999_999) ^ (idx * 7919)
-        scen_seed = (raw_seed & ~1) | loc_bit_vec[idx]
+        scen_seed = (raw_seed & ~1) | loc_bit
         num_agents = 3 + (idx % 3)  # 3, 4, or 5 active agents
         num_absent = 1 + (idx % 2)  # 1 or 2 absent parties
         topology_kind = TOPOLOGIES[idx % len(TOPOLOGIES)]
@@ -390,12 +407,12 @@ def make_balanced_configs(count: int, base_seed: int = 20261030) -> list[Scenari
             ScenarioConfig(
                 scenario_id=f"scen_{idx:04d}",
                 seed=scen_seed,
-                p_can_see=p_vec[idx],
-                k_knows=k_vec[idx],
-                b1_true_belief=b1_vec[idx],
-                b2_true_belief=b2_vec[idx],
-                x_notified=x_vec[idx],
-                u_is_who=u_vec[idx],
+                p_can_see=p_val,
+                k_knows=k_val,
+                b1_true_belief=b1_val,
+                b2_true_belief=b2_val,
+                x_notified=x_val,
+                u_is_who=u_val,
                 num_agents=num_agents,
                 num_absent=num_absent,
                 topology_kind=topology_kind,
@@ -1158,6 +1175,20 @@ def _build_event_trace(
                 room=r_sec_a,
                 target_object=domain.note_item,
                 from_location="dispatch folder",
+                to_location="countertop",
+                occluded=False,
+            )
+        )
+        step += 1
+        # Equalize `a0`'s step count across `u_is_who` so `len(agent_sent_indices)` does not leak into P/K.
+        events.append(
+            Event(
+                step=step,
+                kind="see",
+                actor=a0,
+                room=r_k_dest,
+                target_object=domain.note_item,
+                from_location="countertop",
                 to_location="countertop",
                 occluded=False,
             )

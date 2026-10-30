@@ -659,10 +659,210 @@ def test_cli_end_to_end(tmp_path: Path) -> None:
     sealed_path = out_dir / "sealed_store" / "keys.sealed.jsonl"
     assert sealed_path.is_file()
 
-    # Verify fresh private seed is generated when --private-seed is omitted
+    # Verify fresh private seed is generated when --private-seed is omitted by comparing two unseeded runs
+    out_dir_2 = tmp_path / "cli_out_2"
+    rc_2 = cli_main(["--count", "48", "--out-dir", str(out_dir_2)])
+    assert rc_2 == 0
     sealing_meta_1 = json.loads((out_dir / "sealed_store" / "sealing.sealed.json").read_text(encoding="utf-8"))
-    assert sealing_meta_1["private_seed_hex"] != "a94f3c82e1b07d65432198fedcba0123456789abcdef0123456789abcdef0123"
+    sealing_meta_2 = json.loads((out_dir_2 / "sealed_store" / "sealing.sealed.json").read_text(encoding="utf-8"))
+    assert len(sealing_meta_1["private_seed_hex"]) == 64
+    assert len(sealing_meta_2["private_seed_hex"]) == 64
+    assert sealing_meta_1["private_seed_hex"] != sealing_meta_2["private_seed_hex"]
 
     # Verify --probe-only runs the shortcut probe directly on an existing sealed JSONL file
     rc_probe = cli_main(["--probe-only", str(sealed_path)])
     assert rc_probe == 0
+
+
+def test_9_probe_pass_rule_and_stratified_probe_a(tmp_path: Path) -> None:
+    """Test 9: Pass rule requires abs(oof - base) <= max_margin and base inside scenario-clustered 95% CI, and stratified probe (a) passes."""
+    import udlab_generator.probe as probe_mod
+
+    configs = make_balanced_configs(60, base_seed=20261030)
+    writer = MockWriter()
+    pairs = [writer.render_scenario_pair(generate_world(c)) for c in configs]
+    receipt = write_sealed_dataset(
+        rendered_pairs=pairs,
+        public_dir=tmp_path / "pub_9",
+        sealed_dir=tmp_path / "seal_9",
+        private_seed_hex="1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+    )
+    sealed_rows = [
+        json.loads(line)
+        for line in receipt.keys_sealed_path.read_text(encoding="utf-8").splitlines()
+    ]
+    report = run_shortcut_probe(sealed_rows)
+    probe_a = next(p for p in report.probes if p.probe_id == "a_question_only_u_vs_settled")
+
+    assert abs(probe_a.margin_over_base) <= probe_a.max_allowed_margin, (
+        f"Probe (a) failed two-sided |margin| bound: oof={probe_a.oof_accuracy}, margin={probe_a.margin_over_base}"
+    )
+    assert probe_a.cluster_ci95_low <= probe_a.base_rate <= probe_a.cluster_ci95_high, (
+        f"Probe (a) base_rate {probe_a.base_rate} outside scenario-clustered 95% CI "
+        f"[{probe_a.cluster_ci95_low}, {probe_a.cluster_ci95_high}]"
+    )
+    assert probe_a.passed
+    assert "scenario-clustered" in (probe_mod.__doc__ or "") and "abs(" in (probe_mod.__doc__ or ""), (
+        "probe.py docstring must state the pass rule (abs(oof - base) <= max_margin and base inside scenario-clustered 95% interval)."
+    )
+    norm_fn = getattr(probe_mod, "_normalize_question_tokens", None)
+    assert callable(norm_fn)
+    assert norm_fn(["who", "placed", "the", "slip", "with", "ana"], {"ana", "ben"}) == [
+        "who",
+        "placed",
+        "the",
+        "slip",
+        "with",
+        "<NAME>",
+    ]
+
+    # Verify that a negative OOF margin (oof < base - max_margin, e.g. oof <= 0.40) fails the two-sided pass rule
+    who_info_by_sid: dict[str, tuple[bool, str]] = {}
+    for r in sealed_rows:
+        for q in r["questions"]:
+            if q["question_text"].startswith("Who "):
+                who_info_by_sid[str(r["scenario_id"])] = (q["question_type"] == "U", str(q["question_text"]))
+    sids_true = sorted((sid for sid, (is_u, _) in who_info_by_sid.items() if is_u), key=lambda s: (who_info_by_sid[s][1], s))
+    sids_false = sorted((sid for sid, (is_u, _) in who_info_by_sid.items() if not is_u), key=lambda s: (who_info_by_sid[s][1], s))
+    tok_by_sid: dict[str, tuple[str, str]] = {}
+    for grp_idx, grp in enumerate((sids_true, sids_false)):
+        for pos, sid in enumerate(grp):
+            tok_a = " ".join([f"antitoka_{grp_idx}_{pos // 2}"] * 6)
+            tok_b = " ".join([f"antitokb_{grp_idx}_{pos // 2}"] * 6)
+            tok_by_sid[sid] = (tok_a, tok_b) if (pos % 2 == 0) else (tok_b, tok_a)
+
+    anti_rows = []
+    for r in sealed_rows:
+        tok_u, tok_s = tok_by_sid[str(r["scenario_id"])]
+        new_qs = []
+        for q in r["questions"]:
+            if q["question_type"] == "U":
+                new_qs.append(dict(q, question_text=f"{q['question_text']} {tok_u}"))
+            elif q["question_type"] == "S":
+                new_qs.append(dict(q, question_text=f"{q['question_text']} {tok_s}"))
+            else:
+                new_qs.append(dict(q))
+        anti_rows.append(dict(r, questions=new_qs))
+    anti_report = run_shortcut_probe(anti_rows)
+    anti_a = next(p for p in anti_report.probes if p.probe_id == "a_question_only_u_vs_settled")
+    assert anti_a.oof_accuracy <= 0.40
+    assert anti_a.margin_over_base <= -0.10
+    assert not anti_a.passed
+    assert not anti_report.passed
+
+
+def test_10_degenerate_classifiers_and_leaky_fixtures(tmp_path: Path) -> None:
+    """Test 10: Zero-variance probes report degenerate=True with separate gd/centroid accuracies and no max-floor; leaky fixtures for b1, b2, c, d_P, d_K, e each fail."""
+    configs = make_balanced_configs(40, base_seed=20261030)
+    writer = MockWriter()
+    pairs = [writer.render_scenario_pair(generate_world(c)) for c in configs]
+    receipt = write_sealed_dataset(
+        rendered_pairs=pairs,
+        public_dir=tmp_path / "pub_10",
+        sealed_dir=tmp_path / "seal_10",
+        private_seed_hex="abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    )
+    sealed_rows = [
+        json.loads(line)
+        for line in receipt.keys_sealed_path.read_text(encoding="utf-8").splitlines()
+    ]
+    clean_report = run_shortcut_probe(sealed_rows)
+    by_id = {p.probe_id: p for p in clean_report.probes}
+
+    for pid in ("b1_location_heuristics_b1", "b2_location_heuristics_b2", "c_mention_verb_count_x"):
+        item = by_id[pid]
+        assert getattr(item, "degenerate", False) is True, f"{pid} should report degenerate=True on zero-variance features"
+        assert getattr(item, "gd_accuracy", None) is not None
+        assert getattr(item, "centroid_accuracy", None) is not None
+        assert item.oof_accuracy == item.gd_accuracy, f"{pid} must not apply a max-floor over gd_accuracy when degenerate"
+        assert item.passed is True
+
+    # 1. Leaky fixture for b1
+    leaky_b1_rows = []
+    for r in sealed_rows:
+        b1_key = next(q["key"] for q in r["questions"] if q["question_type"] == "B1")
+        leaky_b1_rows.append(dict(r, prose=f"{r['prose']} The {b1_key} was checked again."))
+    res_b1 = run_shortcut_probe(leaky_b1_rows)
+    p_b1 = next(p for p in res_b1.probes if p.probe_id == "b1_location_heuristics_b1")
+    assert not p_b1.degenerate and not p_b1.passed and not res_b1.passed
+
+    # 2. Leaky fixture for b2
+    leaky_b2_rows = []
+    for r in sealed_rows:
+        b2_key = next(q["key"] for q in r["questions"] if q["question_type"] == "B2")
+        leaky_b2_rows.append(dict(r, prose=f"{r['prose']} The {b2_key} was checked again."))
+    res_b2 = run_shortcut_probe(leaky_b2_rows)
+    p_b2 = next(p for p in res_b2.probes if p.probe_id == "b2_location_heuristics_b2")
+    assert not p_b2.degenerate and not p_b2.passed and not res_b2.passed
+
+    # 3. Leaky fixture for c (X)
+    leaky_c_rows = []
+    for r in sealed_rows:
+        x_q = next(q for q in r["questions"] if q["question_type"] == "X")
+        extra = f" {x_q['target_agent']} walked and waited for the courier." if x_q["key"] != "none" else ""
+        leaky_c_rows.append(dict(r, prose=f"{r['prose']}{extra}"))
+    res_c = run_shortcut_probe(leaky_c_rows)
+    p_c = next(p for p in res_c.probes if p.probe_id == "c_mention_verb_count_x")
+    assert not p_c.degenerate and not p_c.passed and not res_c.passed
+
+    # 4. Leaky fixture for d_P
+    leaky_dp_rows = []
+    for r in sealed_rows:
+        p_q = next(q for q in r["questions"] if q["question_type"] == "P")
+        obj_name = str(p_q["queried_variable"]).split(":", 1)[-1]
+        extra = f" {p_q['target_agent']} spotted the {obj_name} directly." if p_q["key"] == "yes" else ""
+        leaky_dp_rows.append(dict(r, prose=f"{r['prose']}{extra}"))
+    res_dp = run_shortcut_probe(leaky_dp_rows)
+    p_dp = next(p for p in res_dp.probes if p.probe_id == "d_distance_ngrams_p")
+    assert not p_dp.passed and not res_dp.passed
+
+    # 5. Leaky fixture for d_K
+    leaky_dk_rows = []
+    for r in sealed_rows:
+        k_q = next(q for q in r["questions"] if q["question_type"] == "K")
+        obj_name = str(k_q["queried_variable"]).split(":", 1)[-1]
+        extra = f" {k_q['target_agent']} heard about the {obj_name} clearly." if k_q["key"] == "yes" else ""
+        leaky_dk_rows.append(dict(r, prose=f"{r['prose']}{extra}"))
+    res_dk = run_shortcut_probe(leaky_dk_rows)
+    p_dk = next(p for p in res_dk.probes if p.probe_id == "d_distance_ngrams_k")
+    assert not p_dk.passed and not res_dk.passed
+
+    # 6. Leaky fixture for e (fixed question order)
+    leaky_e_rows = [
+        dict(r, questions=sorted(r["questions"], key=lambda q: str(q["slot_id"])))
+        for r in sealed_rows
+    ]
+    res_e = run_shortcut_probe(leaky_e_rows)
+    p_e = next(p for p in res_e.probes if p.probe_id == "e_bundle_question_order")
+    assert not p_e.passed and not res_e.passed
+
+
+def test_11_p_step_parity_and_label_axis_independence() -> None:
+    """Test 11: Equalize a0 step count across u_is_who and ensure P x U, K x U, B1 x X, and B2 x X crosstabs are balanced within +-2."""
+    configs = make_balanced_configs(300, base_seed=20261030)
+
+    # Check P x U, K x U, B1 x X, B2 x X crosstabs at both scenario (target 75) and rendering (target 150) levels
+    pu_counts = Counter((c.p_can_see, c.u_is_who) for c in configs)
+    ku_counts = Counter((c.k_knows, c.u_is_who) for c in configs)
+    b1x_counts = Counter((c.b1_true_belief, c.x_notified) for c in configs)
+    b2x_counts = Counter((c.b2_true_belief, c.x_notified) for c in configs)
+
+    for name, ctab in (("P x U", pu_counts), ("K x U", ku_counts), ("B1 x X", b1x_counts), ("B2 x X", b2x_counts)):
+        assert len(ctab) == 4, f"{name} missing cells: {ctab}"
+        for cell, cnt in ctab.items():
+            # Rendering-level count is 2 * cnt (target 150 +- 2) and scenario-level target is 75 +- 2
+            assert abs(2 * cnt - 150) <= 2, f"{name} rendering crosstab imbalanced on {cell}: {2 * cnt} (scenario count {cnt})"
+
+    # Check a0 step count parity across u_is_who=True and u_is_who=False
+    a0_steps_who: set[int] = set()
+    a0_steps_why: set[int] = set()
+    for cfg in configs[:24]:
+        w = generate_world(cfg)
+        n_a0 = sum(1 for ev in w.events if ev.actor == w.p_agent)
+        if cfg.u_is_who:
+            a0_steps_who.add(n_a0)
+        else:
+            a0_steps_why.add(n_a0)
+    assert a0_steps_who == a0_steps_why, (
+        f"a0 step count differs across u_is_who: u_is_who=True has {a0_steps_who} vs u_is_who=False has {a0_steps_why}"
+    )
