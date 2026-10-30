@@ -283,13 +283,13 @@ _NEGATION_PATTERN = re.compile(
 _ADJACENT_ROOMS_COULD_NOT_HEAR_RE = re.compile(r"\badjacent\s+rooms\s+could\s+not\s+hear\b", re.IGNORECASE)
 _COULD_NOT_SEE_RE = re.compile(r"\bcould\s+not\s+see\b", re.IGNORECASE)
 _FRONTED_TIME_PLACE_NEG_RE = re.compile(
-    r"\b(?:not\s+long\s+(?:after(?:wards?)?|before)\s*,"
+    r"\b(?:not\s+long\s+(?:after(?:wards?)?|before)(?:\s+(?:arriving|entering|leaving|moving|speaking|stepping|walking|coming|returning|that)(?:\s+(?:in|into|at|from|to)\s+[a-z0-9_ -]+)?)?\s*,"
     r"|not\s+far\s+(?:from|away|off)(?:\s+[a-z0-9_-]+){0,6}\s*,"
-    r"|without\s+(?:delay|pause|waiting|hesitation)(?:\s*,|\b))",
+    r"|without\s+(?:a\s+(?:word|sound)|delay|pause|waiting|hesitation)(?:\s*,|\b))",
     re.IGNORECASE,
 )
 _POST_ARG_BENIGN_NEG_RE = re.compile(
-    r"(?:\bwithout\s+(?:delay|pause|waiting|hesitation|incident|difficulty)\b"
+    r"(?:\bwithout\s+(?:a\s+(?:word|sound)|delay|pause|waiting|hesitation|incident|difficulty)\b"
     r"|\bnot\s+(?:far\s+(?:from|away|off)|long\s+(?:after(?:wards?)?|before))\b[^,;:.]*)",
     re.IGNORECASE,
 )
@@ -303,8 +303,35 @@ SETUP_CHECKLIST_ORDER: str = (
 )
 
 _ACTION_VERBS_BY_KIND: dict[str, tuple[str, ...]] = {
-    "enter": ("walked", "entered", "stepped", "came", "arrived", "went", "moved", "returned", "proceeded", "crossed"),
-    "leave": ("exited", "left", "departed", "walked", "headed", "went", "stepped", "proceeded", "crossed"),
+    "enter": (
+        "walked",
+        "entered",
+        "stepped",
+        "came",
+        "arrived",
+        "went",
+        "moved",
+        "returned",
+        "proceeded",
+        "crossed",
+        "made his way",
+        "made her way",
+        "made their way",
+    ),
+    "leave": (
+        "exited",
+        "left",
+        "departed",
+        "walked",
+        "headed",
+        "went",
+        "stepped",
+        "proceeded",
+        "crossed",
+        "made his way",
+        "made her way",
+        "made their way",
+    ),
     "move": (
         "moved",
         "stepped",
@@ -327,13 +354,38 @@ _ACTION_VERBS_BY_KIND: dict[str, tuple[str, ...]] = {
 _FOLDED_LEAVE_ENTER_VERBS: tuple[str, ...] = tuple(
     dict.fromkeys(_ACTION_VERBS_BY_KIND["enter"] + _ACTION_VERBS_BY_KIND["leave"])
 )
+_PURE_ENTER_VERBS: tuple[str, ...] = ("entered", "arrived")
 
 _GERUNDS_BY_KIND: dict[str, frozenset[str]] = {
     "enter": frozenset(
-        {"walking", "entering", "stepping", "coming", "arriving", "going", "moving", "returning", "proceeding", "crossing"}
+        {
+            "walking",
+            "entering",
+            "stepping",
+            "coming",
+            "arriving",
+            "going",
+            "moving",
+            "returning",
+            "proceeding",
+            "crossing",
+            "making",
+        }
     ),
     "leave": frozenset(
-        {"exiting", "leaving", "departing", "walking", "heading", "going", "stepping", "proceeding", "crossing", "moving"}
+        {
+            "exiting",
+            "leaving",
+            "departing",
+            "walking",
+            "heading",
+            "going",
+            "stepping",
+            "proceeding",
+            "crossing",
+            "moving",
+            "making",
+        }
     ),
     "move": frozenset(
         {
@@ -365,6 +417,7 @@ _GERUNDS_BY_KIND: dict[str, frozenset[str]] = {
             "watching",
             "glancing",
             "examining",
+            "laying",
         }
     ),
     "say": frozenset(
@@ -375,13 +428,13 @@ _GERUNDS_BY_KIND: dict[str, frozenset[str]] = {
     ),
 }
 _BASE_VERBS_BY_KIND: dict[str, frozenset[str]] = {
-    "enter": frozenset({"walk", "enter", "step", "come", "arrive", "go", "move", "return", "proceed", "cross"}),
-    "leave": frozenset({"exit", "leave", "depart", "walk", "head", "go", "step", "proceed", "cross", "move"}),
+    "enter": frozenset({"walk", "enter", "step", "come", "arrive", "go", "move", "return", "proceed", "cross", "make"}),
+    "leave": frozenset({"exit", "leave", "depart", "walk", "head", "go", "step", "proceed", "cross", "move", "make"}),
     "move": frozenset(
         {"move", "step", "place", "put", "shift", "transfer", "adjust", "turn", "pull", "set", "relocate", "carry", "take"}
     ),
     "see": frozenset(
-        {"observe", "look", "see", "spot", "notice", "inspect", "check", "view", "watch", "glance", "examine"}
+        {"observe", "look", "see", "spot", "notice", "inspect", "check", "view", "watch", "glance", "examine", "lay"}
     ),
     "say": frozenset({"say", "state", "speak", "announce", "utter", "claim", "report", "tell"}),
     "message": frozenset({"send", "message", "text", "transmit", "notify", "write"}),
@@ -410,7 +463,7 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ),
     ProseRequirementSpec(
         "c_fidelity_focal_agent",
-        "Name focal_agent in setup, framing transitions around focal_agent without omitting events.",
+        "Name focal_agent in setup, framing transitions around focal_agent.",
     ),
     ProseRequirementSpec(
         "c_fidelity_room_setup",
@@ -426,7 +479,7 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ),
     ProseRequirementSpec(
         "c_fidelity_occluder",
-        "Name each room's occluder in setup, between 'far-side alcove' and 'container bay' blocking sight from 'far-side alcove' while 'container bay' sees containers in open view.",
+        "Name each room's occluder in setup, between 'far-side alcove' and 'container bay' blocking sight from 'far-side alcove' while 'container bay' sees containers.",
     ),
     ProseRequirementSpec(
         "c_fidelity_stations",
@@ -434,11 +487,11 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ),
     ProseRequirementSpec(
         "c_fidelity_doorways",
-        "For each doorway [room_a, room_b], name both rooms in one setup sentence (natural phrasing).",
+        "For each doorway [room_a, room_b], name both rooms in one setup sentence.",
     ),
     ProseRequirementSpec(
         "c_fidelity_initial_room",
-        "For each agent, name agent and initial_agent_rooms[agent] in one setup sentence (grouped pass).",
+        "For each agent, name agent and initial_agent_rooms[agent] in one setup sentence.",
     ),
     ProseRequirementSpec(
         "c_fidelity_goal",
@@ -458,7 +511,7 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ),
     ProseRequirementSpec(
         "d_hearing_threshold",
-        "State doorway hearing threshold in dB and 'doorway' in setup (>= threshold dB carries one doorway; quieter stays).",
+        "State doorway hearing threshold in dB and 'doorway' in setup (>= threshold dB carries one doorway).",
     ),
     ProseRequirementSpec(
         "c_fidelity_event_order",
@@ -467,7 +520,7 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
         "actor (no pronouns) precedes verb ("
         f"{format_action_verbs_by_kind_summary()}"
         ") with no intervening party; name room ('in/from/inside/at/of [the] <room>', no other room on intra-room); "
-        "every enter sentence must name both from_location and to_location (never write a bare 'entered <to>' without 'from <from>'), and from_location precedes to_location on enter/leave/move (or 'entered/arrived in <to> ... from <from>' on enter), where from-locations on enter/move use 'from'/'out of' and to-locations on enter/leave/move use 'to'/'into'/'toward'/'at'/'in'/'onto'; "
+        "every enter sentence must name both from_location and to_location (no bare 'entered <to>' without 'from <from>'), and from_location precedes to_location on enter/leave/move (or '<verb> into/to <to> ... from <from>' on enter/leave), where from-locations on enter/move use 'from'/'out of' and to-locations on enter/leave/move use 'to'/'into'/'toward'/'at'/'in'/'onto'; "
         "on see, name target_object, and if unoccluded at a container place it at to_location ('container bay' optional); "
         "on unoccluded move/see, no blocking phrases ("
         f"{format_blocking_phrases_summary()}"
@@ -476,11 +529,11 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ),
     ProseRequirementSpec(
         "c_fidelity_missing_event",
-        "Include every logged event without omitting or merging.",
+        "Include every logged event.",
     ),
     ProseRequirementSpec(
         "c_fidelity_unlogged_event",
-        "Include no extra unlogged event sentences.",
+        "Include no unlogged event sentences.",
     ),
     ProseRequirementSpec(
         "c_fidelity_contradictory_occlusion",
@@ -740,17 +793,24 @@ def format_repair_retry_line(exc: RenderCheckError, *, retry_form: str = "multi_
     )
 
 
+def normalize_prose_line_endings(text: str) -> str:
+    """Normalize `\r\n` and `\r` line endings in `text` to `\n` so paragraph splitting and character offsets are consistent."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _count_unchanged_sentences(attempt0_text: str, retry_text: str) -> tuple[int, int]:
     """Return `(unchanged_sentence_count, attempt0_sentence_count)` comparing `attempt0_text` and `retry_text`."""
+    norm_0 = normalize_prose_line_endings(attempt0_text)
+    norm_1 = normalize_prose_line_endings(retry_text)
     sents_0 = [
         s
-        for para in attempt0_text.split("\n\n")
+        for para in norm_0.split("\n\n")
         if para.strip()
         for s in _split_prose_sentences(para.strip())
     ]
     sents_1 = [
         s
-        for para in retry_text.split("\n\n")
+        for para in norm_1.split("\n\n")
         if para.strip()
         for s in _split_prose_sentences(para.strip())
     ]
@@ -1106,32 +1166,40 @@ def _post_verb_core_args_end(frame_low: str, verb_end: int, ev: Event) -> int:
 
 
 def _adjunct_negates_event_verb_object_or_location(clause_low: str, ev: Event) -> bool:
-    """Return True if a post-argument `without <gerund>` or relative clause negates `ev`'s own verb, target object, or location."""
+    """Return True if a post-argument `without <gerund>` or relative clause negates `ev`'s own verb, location state, or actor action."""
     kind_gerunds = _GERUNDS_BY_KIND.get(ev.kind, frozenset())
     m_gerund = _POST_ARG_GERUND_CLAUSE_RE.match(clause_low.strip())
     if m_gerund is not None:
         gerund_word = m_gerund.group(1).lower()
-        if gerund_word in kind_gerunds:
-            return True
-    else:
-        for g_word in kind_gerunds:
-            if re.search(rf"\b{re.escape(g_word)}\b", clause_low):
-                return True
-        kind_verbs = set(_ACTION_VERBS_BY_KIND.get(ev.kind, ())) | set(_BASE_VERBS_BY_KIND.get(ev.kind, frozenset()))
-        if ev.kind in ("enter", "leave"):
-            kind_verbs |= (
-                set(_ACTION_VERBS_BY_KIND["enter"])
-                | set(_ACTION_VERBS_BY_KIND["leave"])
-                | set(_BASE_VERBS_BY_KIND["enter"])
-                | set(_BASE_VERBS_BY_KIND["leave"])
-            )
-        for v_word in kind_verbs:
-            if re.search(rf"\b{re.escape(v_word)}\b", clause_low):
-                return True
+        return gerund_word in kind_gerunds
 
-    for piece in (ev.target_object, ev.from_location, ev.to_location, ev.room):
-        if piece and re.search(rf"\b{re.escape(piece.lower())}\b", clause_low):
+    # Negated relative clause (`, which/where/who ...`):
+    # 1. Refuse when it negates being at the location or identity ("was/were/is not there/in/inside/at/...", "never reached"):
+    if re.search(r"\b(?:was|were|is|are)\s+not\b", clause_low) or re.search(r"\bnever\s+reached\b", clause_low):
+        return True
+
+    # 2. Allow passive or other-agent clauses ("had not been moved/removed/touched/disturbed", "nobody/no one had ..."):
+    if re.search(r"\bhad\s+not\s+been\b", clause_low) or re.search(r"\b(?:nobody|no\s+one)\b", clause_low):
+        return False
+
+    # 3. Refuse when the actor is negated from doing the event:
+    for g_word in kind_gerunds:
+        if re.search(rf"\b{re.escape(g_word)}\b", clause_low):
             return True
+    kind_verbs = set(_ACTION_VERBS_BY_KIND.get(ev.kind, ())) | set(_BASE_VERBS_BY_KIND.get(ev.kind, frozenset()))
+    if ev.kind in ("enter", "leave"):
+        kind_verbs |= (
+            set(_ACTION_VERBS_BY_KIND["enter"])
+            | set(_ACTION_VERBS_BY_KIND["leave"])
+            | set(_BASE_VERBS_BY_KIND["enter"])
+            | set(_BASE_VERBS_BY_KIND["leave"])
+        )
+    for v_word in kind_verbs:
+        if v_word in ("moved", "move") and re.search(r"\bhad\s+not\s+moved\b", clause_low):
+            continue
+        if re.search(rf"\b{re.escape(v_word)}\b", clause_low):
+            return True
+
     return False
 
 
@@ -1206,8 +1274,9 @@ def _ordered_from_to_positions(
     to_loc: str,
     *,
     require_from_prep: bool = True,
+    allow_dest_before_source: bool = False,
 ) -> bool:
-    """Return True if `from_loc` appears in the source phrase strictly before `to_loc` in the destination phrase."""
+    """Return True if `from_loc` appears in the source phrase strictly before `to_loc` in the destination phrase (or destination before explicit source on movement)."""
     from_esc = re.escape(from_loc.lower())
     to_esc = re.escape(to_loc.lower())
     if require_from_prep:
@@ -1221,14 +1290,17 @@ def _ordered_from_to_positions(
 
     to_matches = list(
         re.finditer(
-            rf"\b(?:to|into|toward|towards|for|onto|in|at|behind|around|entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}\b",
+            rf"\b(?:to|into|toward|towards|for|onto|in|at|behind|around|entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}(?!\s+(?:doorway|threshold)\b)\b",
             s_low,
         )
     )
     if not to_matches:
         return False
 
-    if re.search(rf"\b(?:entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}\b.*\b(?:from|out of)\s+{_ARTICLE_OPT_RE}{from_esc}\b", s_low):
+    if allow_dest_before_source and re.search(
+        rf"\b(?:to|into|onto|in|at|entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}(?!\s+(?:doorway|threshold)\b)\b.*\b(?:from|out of)\s+{_ARTICLE_OPT_RE}{from_esc}\b",
+        s_low,
+    ):
         return True
 
     for fm in from_matches:
@@ -1261,13 +1333,15 @@ def _sentence_has_folded_from_and_arrival(
     from_loc: str,
     to_loc: str,
 ) -> bool:
-    """Return True if `s_low` explicitly names both `from <from_loc>` and arrival at `<to_loc>` (`to/into/onto/in/at/entered/arrived in <to_loc>`)."""
+    """Return True if `s_low` explicitly names both source (`from/out of/exited/left/departed <from_loc>`) and arrival at `<to_loc>` (`to/into/onto/in/at/entered/arrived in <to_loc>`, excluding `toward(s)`, `heading`, or `<to_loc> doorway/threshold`)."""
     from_esc = re.escape(from_loc.lower())
     to_esc = re.escape(to_loc.lower())
-    if not re.search(rf"\bfrom\s+{_ARTICLE_OPT_RE}{from_esc}\b", s_low):
+    if not re.search(rf"\b(?:from|out of|exited|left|departed)\s+{_ARTICLE_OPT_RE}{from_esc}\b", s_low):
+        return False
+    if re.search(rf"\bheading\b.*\b(?:to|into|onto|in|at)\s+{_ARTICLE_OPT_RE}{to_esc}\b", s_low):
         return False
     if not re.search(
-        rf"\b(?:to|into|onto|in|at|entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}\b",
+        rf"\b(?:(?:to|into|onto|in|at|arrived\s+in)\s+{_ARTICLE_OPT_RE}|entered\s+(?:the|a|an)\s+|entered\s+(?!from\b|out\s+of\b)){to_esc}(?!\s+(?:doorway|threshold)\b)\b",
         s_low,
     ):
         return False
@@ -1276,7 +1350,39 @@ def _sentence_has_folded_from_and_arrival(
         from_loc,
         to_loc,
         require_from_prep=True,
+        allow_dest_before_source=True,
     )
+
+
+def _sentence_is_arrival_half_of_leave_enter(
+    s_low: str,
+    ev: Event,
+    all_parties: Sequence[str],
+    prev_sentence: str | None = None,
+) -> bool:
+    """Return True if `s_low` is the arrival half (`enter`-only verb such as `entered` / `arrived in`) following a departure sentence, rather than a duplicate full trip."""
+    if not (
+        _actor_precedes_verb_as_subject(
+            s_low,
+            ev.actor,
+            _PURE_ENTER_VERBS,
+            all_parties,
+            ev=ev,
+        )
+        and not _actor_precedes_verb_as_subject(
+            s_low,
+            ev.actor,
+            _ACTION_VERBS_BY_KIND["leave"],
+            all_parties,
+            ev=ev,
+        )
+    ):
+        return False
+    if prev_sentence is not None:
+        prev_low = prev_sentence.lower()
+        if re.search(r"\b(?:entered|arrived\s+in)\b", prev_low):
+            return False
+    return True
 
 
 def _preceding_sentence_is_matching_leave(
@@ -1390,6 +1496,19 @@ def _sentence_matches_event(
             next_event.from_location,
             next_event.to_location,
         )
+        and not _sentence_is_arrival_half_of_leave_enter(
+            next_sentence.lower(),
+            next_event,
+            all_parties,
+            prev_sentence=sentence,
+        )
+        and _actor_precedes_verb_as_subject(
+            s_low,
+            ev.actor,
+            _ACTION_VERBS_BY_KIND["leave"],
+            all_parties,
+            ev=ev,
+        )
     ):
         is_folded_movement = False
     action_verbs: Sequence[str] = (
@@ -1404,8 +1523,14 @@ def _sentence_matches_event(
 
     if ev.target_object:
         target_esc = re.escape(ev.target_object.lower())
-        if re.search(rf"\bno\s+{_ARTICLE_OPT_RE}{target_esc}\b", frame_low):
+        if re.search(rf"\bno\s+(?:[a-z]+\s+of\s+)?{_ARTICLE_OPT_RE}{target_esc}\b", frame_low):
             return False
+
+    for loc_piece in (ev.from_location, ev.to_location):
+        if loc_piece:
+            loc_esc = re.escape(loc_piece.lower())
+            if re.search(rf"\bno\s+(?:[a-z]+\s+of\s+)?{_ARTICLE_OPT_RE}{loc_esc}\b", frame_low):
+                return False
 
     if ev.room.lower() not in frame_low:
         if ev.kind not in ("say", "message"):
@@ -1420,11 +1545,14 @@ def _sentence_matches_event(
             room_esc = re.escape(ev.room.lower())
             # Strip any "not far from [the] <room>" before checking that the event's room is stated as the location
             frame_for_room = re.sub(
-                rf"\bnot\s+far\s+from\s+{_ARTICLE_OPT_RE}{room_esc}\b",
+                rf"\bnot\s+far\s+from\s+{_ARTICLE_OPT_RE}{room_esc}(?:\s+(?:doorway|threshold))?\b",
                 "",
                 frame_low,
             )
-            if not re.search(rf"\b(?:in|from|inside|at|of)\s+{_ARTICLE_OPT_RE}{room_esc}\b", frame_for_room):
+            if not re.search(
+                rf"\b(?:in|from|inside|at|of)\s+{_ARTICLE_OPT_RE}{room_esc}(?!\s+(?:doorway|threshold)\b)\b",
+                frame_for_room,
+            ):
                 return False
 
     if ev.kind in ("say", "message") and ev.room.lower() not in frame_low and world is not None:
@@ -1446,8 +1574,10 @@ def _sentence_matches_event(
             ev.from_location,
             ev.to_location,
             require_from_prep=True,
+            allow_dest_before_source=True,
         ):
-            # Prevent two consecutive folded movement sentences from covering one logged leave+enter pair:
+            # Prevent two consecutive folded movement sentences from covering one logged leave+enter pair,
+            # while allowing the arrival half (enter-only verb naming from_location, as the prompt requires):
             if (
                 prev_sentence is not None
                 and prev_event is not None
@@ -1455,17 +1585,30 @@ def _sentence_matches_event(
                     prev_sentence, prev_event, ev, noise_threshold, world=world
                 )
             ):
-                return False
+                return _sentence_is_arrival_half_of_leave_enter(
+                    s_low,
+                    ev,
+                    all_parties,
+                    prev_sentence=prev_sentence,
+                )
             return True
         to_esc = re.escape(ev.to_location.lower())
         has_to_dest = bool(
             re.search(
-                rf"\b(?:to|into|toward|towards|for|onto|in|at|entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}\b",
+                rf"\b(?:to|into|toward|towards|for|onto|in|at|entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}(?!\s+(?:doorway|threshold)\b)\b",
                 s_low,
             )
         )
-        if has_to_dest and _preceding_sentence_is_matching_leave(
-            prev_sentence, prev_event, ev, noise_threshold, world=world
+        if (
+            has_to_dest
+            and not _sentence_has_folded_from_and_arrival(
+                s_low,
+                ev.from_location,
+                ev.to_location,
+            )
+            and _preceding_sentence_is_matching_leave(
+                prev_sentence, prev_event, ev, noise_threshold, world=world
+            )
         ):
             return True
         return False
@@ -1483,6 +1626,7 @@ def _sentence_matches_event(
             ev.from_location,
             ev.to_location,
             require_from_prep=False,
+            allow_dest_before_source=is_folded_movement,
         )
 
     if ev.kind == "move":
@@ -1576,8 +1720,9 @@ def _sentence_matches_event(
 
 def _find_sentence_with_substring(prose: str, substring: str) -> str:
     """Return the first sentence in `prose` containing `substring` (case-insensitive), or `'no candidate sentence'`."""
+    norm_prose = normalize_prose_line_endings(prose)
     sub_low = substring.lower()
-    for para in prose.split("\n\n"):
+    for para in norm_prose.split("\n\n"):
         for sent in _split_prose_sentences(para.strip()):
             if sub_low in sent.lower():
                 return sent
@@ -1586,6 +1731,7 @@ def _find_sentence_with_substring(prose: str, substring: str) -> str:
 
 def check_prose_no_markers(prose: str) -> None:
     """Prose check (a): refuse if any bracket marker `[...]`, fact ID `F0`..`F9`, or `step N` survives."""
+    prose = normalize_prose_line_endings(prose)
     bracket_match = _BRACKET_MARKER_RE.search(prose)
     if bracket_match is not None:
         cand = _find_sentence_with_substring(prose, bracket_match.group(0))
@@ -1614,6 +1760,7 @@ def check_prose_no_markers(prose: str) -> None:
 
 def check_prose_banned_adverbs(prose: str) -> tuple[str, ...]:
     """Prose check (b): refuse if any banned mental/emotional adverb from `BANNED_ADVERBS` appears."""
+    prose = normalize_prose_line_endings(prose)
     hits = tuple(dict.fromkeys(m.group(1).lower() for m in _BANNED_PATTERN.finditer(prose)))
     if hits:
         cand = _find_sentence_with_substring(prose, hits[0])
@@ -1627,6 +1774,7 @@ def check_prose_banned_adverbs(prose: str) -> tuple[str, ...]:
 
 def check_prose_rule_and_hearing_threshold(prose: str, world: World) -> None:
     """Prose check (d): refuse unless the belief-persistence rule sentence and hearing threshold appear in the setup prose."""
+    prose = normalize_prose_line_endings(prose)
     paragraphs = [p.strip() for p in prose.split("\n\n") if p.strip()]
     setup_text = paragraphs[0] if paragraphs else prose
     rule_count = setup_text.count(BELIEF_PERSISTENCE_RULE)
@@ -1664,6 +1812,7 @@ def check_prose_render_fidelity(
        unlogged motives on unknowable `why` actions, unlogged note placers on unknowable `who` actions,
        or extra unlogged event sentences).
     """
+    prose = normalize_prose_line_endings(prose)
     prose_low = prose.lower()
     paragraphs = [p.strip() for p in prose.split("\n\n") if p.strip()]
     setup_text = paragraphs[0] if paragraphs else prose
@@ -2751,14 +2900,16 @@ def locate_failing_sentence_in_response(
     response_text: str,
     failing_sentence: str | None,
 ) -> tuple[str, int | None, int | None]:
-    """Locate `failing_sentence` in `response_text` and return `(sha256_hex, offset, length)`."""
+    """Locate `failing_sentence` in `response_text` (after normalizing CRLF to LF) and return `(sha256_hex, offset, length)`."""
     if not failing_sentence or failing_sentence == "no candidate sentence":
         return "", None, None
-    idx = response_text.find(failing_sentence)
+    norm_resp = normalize_prose_line_endings(response_text)
+    norm_fail = normalize_prose_line_endings(failing_sentence)
+    idx = norm_resp.find(norm_fail)
     if idx < 0:
         return "", None, None
-    length = len(failing_sentence)
-    sha256_hex = _sha256_bytes(failing_sentence.encode("utf-8"))
+    length = len(norm_fail)
+    sha256_hex = _sha256_bytes(norm_fail.encode("utf-8"))
     return sha256_hex, idx, length
 
 
@@ -2769,7 +2920,7 @@ def resolve_sealed_failing_sentence(
     failing_sentence_offset: int | None,
     failing_sentence_length: int | None,
 ) -> tuple[str | None, bool]:
-    """Slice `response_text[offset : offset + length]` and verify its SHA-256 matches `failing_sentence_sha256`."""
+    """Slice `response_text[offset : offset + length]` (on CRLF-normalized `response_text`) and verify its SHA-256 matches `failing_sentence_sha256`."""
     expected_sha = str(failing_sentence_sha256 or "").strip().lower()
     if (
         not expected_sha
@@ -2777,6 +2928,7 @@ def resolve_sealed_failing_sentence(
         and failing_sentence_length is None
     ):
         return None, True
+    norm_resp = normalize_prose_line_endings(response_text)
     if (
         not expected_sha
         or not isinstance(failing_sentence_offset, int)
@@ -2785,14 +2937,39 @@ def resolve_sealed_failing_sentence(
         or isinstance(failing_sentence_length, bool)
         or failing_sentence_offset < 0
         or failing_sentence_length < 0
-        or failing_sentence_offset + failing_sentence_length > len(response_text)
+        or failing_sentence_offset + failing_sentence_length > len(norm_resp)
     ):
         return None, False
-    sliced = response_text[failing_sentence_offset : failing_sentence_offset + failing_sentence_length]
+    sliced = norm_resp[failing_sentence_offset : failing_sentence_offset + failing_sentence_length]
     actual_sha = _sha256_bytes(sliced.encode("utf-8"))
     if actual_sha != expected_sha:
         return sliced, False
     return sliced, True
+
+
+def sanitize_render_check_error_for_stderr(
+    exc: RenderCheckError,
+    prose: str,
+) -> RenderCheckError:
+    """Return a `RenderCheckError` whose message (`str(exc)`) carries only check_id, event number/kind, and sealed sentence sha/offset/length, with no sentence text."""
+    fail_sha, fail_off, fail_len = locate_failing_sentence_in_response(
+        prose, exc.failing_sentence
+    )
+    sanitized_msg = format_non_sealed_refusal_reason(
+        check_id=exc.check_id,
+        event_index=exc.event_index,
+        event_kind=exc.event_kind,
+        failing_sentence_sha256=fail_sha,
+        failing_sentence_offset=fail_off,
+        failing_sentence_length=fail_len,
+    )
+    return RenderCheckError(
+        sanitized_msg,
+        check_id=exc.check_id,
+        failing_sentence=None,
+        event_index=exc.event_index,
+        event_kind=exc.event_kind,
+    )
 
 
 def format_non_sealed_refusal_reason(
@@ -3269,8 +3446,14 @@ class WriterCheckpointManager:
             r0, r1 = pair
             w_obj = world or r0.world or r1.world
             if w_obj is not None:
-                check_rendered_prose(r0.prose, w_obj, focal_agent=r0.focal_agent)
-                check_rendered_prose(r1.prose, w_obj, focal_agent=r1.focal_agent)
+                try:
+                    check_rendered_prose(r0.prose, w_obj, focal_agent=r0.focal_agent)
+                except RenderCheckError as exc:
+                    raise sanitize_render_check_error_for_stderr(exc, r0.prose) from None
+                try:
+                    check_rendered_prose(r1.prose, w_obj, focal_agent=r1.focal_agent)
+                except RenderCheckError as exc:
+                    raise sanitize_render_check_error_for_stderr(exc, r1.prose) from None
             scen_id = r0.scenario_id
             focal_agents = [r0.focal_agent, r1.focal_agent]
             prose_sha256 = [
@@ -3456,8 +3639,14 @@ class WriterCheckpointManager:
                 prompt_0 = str(r0_dict["writer_prompt"])
                 prompt_1 = str(r1_dict["writer_prompt"])
 
-                check_rendered_prose(prose_0, world, focal_agent=focal_0)
-                check_rendered_prose(prose_1, world, focal_agent=focal_1)
+                try:
+                    check_rendered_prose(prose_0, world, focal_agent=focal_0)
+                except RenderCheckError as exc:
+                    raise sanitize_render_check_error_for_stderr(exc, prose_0) from None
+                try:
+                    check_rendered_prose(prose_1, world, focal_agent=focal_1)
+                except RenderCheckError as exc:
+                    raise sanitize_render_check_error_for_stderr(exc, prose_1) from None
                 keys = compute_scenario_keys(world)
 
                 restored_pairs.append(
@@ -4050,8 +4239,8 @@ class OllamaWriter:
             msg = resp.get("message")
             if not isinstance(msg, dict):
                 msg = {}
-            content = str(msg.get("content") or "").strip()
-            thinking_text = str(msg.get("thinking") or "")
+            content = normalize_prose_line_endings(str(msg.get("content") or "").strip())
+            thinking_text = normalize_prose_line_endings(str(msg.get("thinking") or ""))
             done_reason = str(resp.get("done_reason") or "stop").strip()
             resp_sha, think_sha = compute_sealed_response_digests(content, thinking_text)
 
@@ -4233,7 +4422,7 @@ class OllamaWriter:
                     continue
                 if allow_refusal:
                     return None
-                raise
+                raise sanitize_render_check_error_for_stderr(exc, content) from None
 
             rec = GenerationCallRecord(
                 call_id=call_id,

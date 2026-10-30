@@ -5235,7 +5235,7 @@ def test_63_card_sz_folded_leave_enter_verbs_and_no_double_count() -> None:
     # Req 2: Two consecutive folded movement sentences cannot cover one logged leave+enter pair; the second is unlogged:
     for second_folded in (
         "Dan walked from the bindery room to the sorting room.",
-        "Dan entered the sorting room from the bindery room.",
+        "Dan headed into the sorting room from the bindery room.",
         "Dan moved from the bindery room to the sorting room.",
     ):
         sents_double_folded = list(sj_sents)
@@ -5246,12 +5246,16 @@ def test_63_card_sz_folded_leave_enter_verbs_and_no_double_count() -> None:
         assert exc_double.value.check_id == "c_fidelity_unlogged_event"
         assert exc_double.value.failing_sentence == second_folded
 
-    # Req 2 positive direction: A folded sentence followed by a pure enter sentence ("Dan entered the sorting room.")
-    # still passes, counted once each:
+    # Req 2 positive direction: A folded sentence followed by an arrival-half enter sentence
+    # ("Dan entered the sorting room." or "Dan entered the sorting room from the bindery room.") still passes, counted once each:
     sents_folded_then_pure_enter = list(sj_sents)
     sents_folded_then_pure_enter[1] = "Dan walked from the bindery room to the sorting room."
     sents_folded_then_pure_enter[2] = "Dan entered the sorting room."
     assert check_rendered_prose(f"{setup_dan}\n\n{' '.join(sents_folded_then_pure_enter)}", w, focal_agent=fa) == ()
+    sents_folded_then_enter_from = list(sj_sents)
+    sents_folded_then_enter_from[1] = "Dan walked from the bindery room to the sorting room."
+    sents_folded_then_enter_from[2] = "Dan entered the sorting room from the bindery room."
+    assert check_rendered_prose(f"{setup_dan}\n\n{' '.join(sents_folded_then_enter_from)}", w, focal_agent=fa) == ()
 
 
 def test_64_card_sz_post_argument_adjuncts() -> None:
@@ -6393,4 +6397,586 @@ def test_69_card_tb_legacy_format_recheck_and_verify(tmp_path: Path) -> None:
     vw_report_raw = (out_dir / "verify_written_report.json").read_text(encoding="utf-8")
     assert legacy_secret_sent not in vw_report_raw
     assert "LEGACY_SENT_MARKER_TB_69" not in vw_report_raw
+
+
+def test_70_card_td_req1_dest_before_source_and_made_way() -> None:
+    """Test 70 (Card td Req 1):
+    - Destination-before-source order ('<verb> into <to> from <from>') passes for every folded movement verb.
+    - 'Dan headed into the sorting room from the bindery room.' passes as a folded leave+enter.
+    - 'Dan walked into the sorting room from the bindery room.' and 'Dan stepped into the sorting room from the bindery room.' pass.
+    - 'Dan made his way from the bindery room to the sorting room.' (and 'made her way' / 'made their way') passes.
+    - '...stopping in the sorting room doorway' and '...pausing at the sorting room threshold' do NOT count as arriving.
+    """
+    from udlab_generator.render import (
+        _FOLDED_LEAVE_ENTER_VERBS,
+        _sentence_matches_event,
+        _sentence_matches_folded_leave_enter,
+    )
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[1]  # Dan
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    setup_dan = sj_setup.replace("Following Eva", "Following Dan")
+    ev_2 = w.events[1]  # leave by Dan: bindery room -> sorting room
+    ev_3 = w.events[2]  # enter by Dan: bindery room -> sorting room
+
+    skip_indices = {2, 4, 8, 12, 14, 20}
+    folded_by_leave_idx = {
+        1: "Dan walked from the bindery room to the sorting room.",
+        3: "Cara walked from the bindery room to the sorting room.",
+        7: "Eva walked from the bindery room to the sorting room.",
+        11: "Cara walked from the sorting room to the bindery room.",
+        13: "Cara walked from the bindery room to the reading room.",
+        19: "Eva walked from the sorting room to the bindery room.",
+    }
+    base_folded_sents = [
+        folded_by_leave_idx.get(idx, sent)
+        for idx, sent in enumerate(sj_sents)
+        if idx not in skip_indices
+    ]
+
+    # Positive: "Dan headed into the sorting room from the bindery room.", "Dan made his way from the bindery room to the sorting room.",
+    # and "Dan left the bindery room and entered the sorting room.":
+    passing_folded = (
+        "Dan headed into the sorting room from the bindery room.",
+        "Dan walked into the sorting room from the bindery room.",
+        "Dan stepped into the sorting room from the bindery room.",
+        "Dan came into the sorting room from the bindery room.",
+        "Dan made his way from the bindery room to the sorting room.",
+        "Dan made her way from the bindery room to the sorting room.",
+        "Dan made their way from the bindery room to the sorting room.",
+        "Dan made his way into the sorting room from the bindery room.",
+        "Dan left the bindery room and entered the sorting room.",
+    )
+    for s_pass in passing_folded:
+        assert _sentence_matches_folded_leave_enter(s_pass, ev_2, ev_3, w.noise_threshold, world=w), (
+            f"Expected folded sentence to pass: {s_pass!r}"
+        )
+        sents_try = list(base_folded_sents)
+        sents_try[1] = s_pass
+        assert check_rendered_prose(f"{setup_dan}\n\n{' '.join(sents_try)}", w, focal_agent=fa) == ()
+
+    # Every verb in _FOLDED_LEAVE_ENTER_VERBS passes in destination-before-source order ("<verb> into <to> from <from>"):
+    for verb in _FOLDED_LEAVE_ENTER_VERBS:
+        if verb == "entered":
+            cand = "Dan entered the sorting room from the bindery room."
+        elif verb == "arrived":
+            cand = "Dan arrived in the sorting room from the bindery room."
+        else:
+            cand = f"Dan {verb} into the sorting room from the bindery room."
+        assert _sentence_matches_folded_leave_enter(cand, ev_2, ev_3, w.noise_threshold, world=w), (
+            f"Expected folded verb {verb!r} in destination-before-source order to pass: {cand!r}"
+        )
+
+    # Negative: "...stopping in the sorting room doorway" / "...pausing at the sorting room threshold" must NOT count as arriving:
+    refused_doorway = (
+        "Dan exited from the bindery room, stopping in the sorting room doorway.",
+        "Dan departed from the bindery room, pausing at the sorting room threshold.",
+        "Dan walked from the bindery room, stopping in the sorting room doorway.",
+    )
+    for s_ref in refused_doorway:
+        assert not _sentence_matches_folded_leave_enter(s_ref, ev_2, ev_3, w.noise_threshold, world=w), (
+            f"Expected doorway/threshold stop not to count as folded arrival: {s_ref!r}"
+        )
+        assert not _sentence_matches_event(s_ref, ev_3, w.noise_threshold, world=w), (
+            f"Expected doorway/threshold stop not to count as enter: {s_ref!r}"
+        )
+        sents_ref = list(base_folded_sents)
+        sents_ref[1] = s_ref
+        with pytest.raises(RenderCheckError) as exc_dw:
+            check_rendered_prose(f"{setup_dan}\n\n{' '.join(sents_ref)}", w, focal_agent=fa)
+        assert exc_dw.value.check_id == "c_fidelity_missing_event"
+
+
+def test_71_card_td_req2_two_sentence_leave_plus_enter_and_double_count() -> None:
+    """Test 71 (Card td Req 2):
+    - A leave sentence followed by an enter sentence that names the from-room (as the prompt asks) passes, counted once each:
+      - 'Dan walked from the bindery room to the sorting room.' followed by 'Dan entered the sorting room from the bindery room.' passes.
+      - 'Dan departed from the bindery room to the sorting room.' followed by 'Dan entered the sorting room from the bindery room.' passes.
+      - Also with 'Dan arrived in the sorting room from the bindery room.' passes.
+    - Two consecutive sentences that BOTH assert the full trip still fail as a double count (including 'out of' and 'exited' variants).
+    """
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[1]  # Dan
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    setup_dan = sj_setup.replace("Following Eva", "Following Dan")
+
+    # Positive: two-sentence leave + enter where enter names the from-room (obeying the prompt rule):
+    passing_pairs = (
+        (
+            "Dan walked from the bindery room to the sorting room.",
+            "Dan entered the sorting room from the bindery room.",
+        ),
+        (
+            "Dan departed from the bindery room to the sorting room.",
+            "Dan entered the sorting room from the bindery room.",
+        ),
+        (
+            "Dan left from the bindery room to the sorting room.",
+            "Dan arrived in the sorting room from the bindery room.",
+        ),
+        (
+            "Dan exited the bindery room toward the sorting room.",
+            "Dan entered the sorting room from the bindery room.",
+        ),
+    )
+    for s_leave, s_enter in passing_pairs:
+        sents_try = list(sj_sents)
+        sents_try[1] = s_leave
+        sents_try[2] = s_enter
+        assert check_rendered_prose(f"{setup_dan}\n\n{' '.join(sents_try)}", w, focal_agent=fa) == (), (
+            f"Expected two-sentence leave + enter pair to pass: {s_leave!r} / {s_enter!r}"
+        )
+
+    # Negative: two consecutive sentences that BOTH assert the full trip fail as a double count (c_fidelity_unlogged_event):
+    refused_double_trips = (
+        (
+            "Dan walked from the bindery room to the sorting room.",
+            "Dan walked from the bindery room to the sorting room.",
+        ),
+        (
+            "Dan walked from the bindery room to the sorting room.",
+            "Dan moved from the bindery room to the sorting room.",
+        ),
+        (
+            "Dan walked out of the bindery room into the sorting room.",
+            "Dan walked from the bindery room into the sorting room.",
+        ),
+        (
+            "Dan exited the bindery room into the sorting room.",
+            "Dan walked from the bindery room into the sorting room.",
+        ),
+        (
+            "Dan departed the bindery room into the sorting room.",
+            "Dan stepped into the sorting room from the bindery room.",
+        ),
+        (
+            "Dan entered the sorting room from the bindery room.",
+            "Dan entered the sorting room from the bindery room.",
+        ),
+    )
+    for s_trip1, s_trip2 in refused_double_trips:
+        sents_double = list(sj_sents)
+        sents_double[1] = s_trip1
+        sents_double[2] = s_trip2
+        with pytest.raises(RenderCheckError) as exc_dbl:
+            check_rendered_prose(f"{setup_dan}\n\n{' '.join(sents_double)}", w, focal_agent=fa)
+        assert exc_dbl.value.check_id == "c_fidelity_unlogged_event", (
+            f"Expected double full-trip pair to fail with c_fidelity_unlogged_event: {s_trip1!r} / {s_trip2!r}"
+        )
+        assert exc_dbl.value.failing_sentence == s_trip2
+
+
+def test_72_card_td_req3_post_argument_clauses() -> None:
+    """Test 72 (Card td Req 3):
+    - A `without <gerund>` clause is refused only when the gerund belongs to the event's own kind.
+    - A negated relative clause is refused when it negates being at the location ('was not there / in / inside', 'never reached')
+      or the actor doing the event.
+    - Passive or other-agent clauses ('had not been moved / removed / touched', 'nobody had moved it') pass.
+    """
+    from udlab_generator.render import _sentence_matches_event
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]  # Eva
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    ev_1 = w.events[0]  # see by Eva: index reel in linen bin in bindery room
+    ev_7 = w.events[6]  # move by Cara: brass ledger from intake bench to iron safe in sorting room
+
+    # Positive (true paraphrases with passive / other-agent / non-kind gerunds):
+    passing_see = (
+        "In the bindery room, Eva observed the index reel in the linen bin, which had not been removed from the linen bin.",
+        "In the bindery room, Eva observed the index reel in the linen bin, which had not been moved.",
+        "In the bindery room, Eva observed the index reel in the linen bin, which had not been touched.",
+        "In the bindery room, Eva observed the index reel in the linen bin, which nobody had moved from the linen bin.",
+        "In the bindery room, Eva observed the index reel in the linen bin, which nobody had moved.",
+        "In the bindery room, Eva observed the index reel in the linen bin, where nobody else had looked.",
+        "In the bindery room, Eva observed the index reel in the linen bin without removing the index reel.",
+        "In the bindery room, Eva observed the index reel in the linen bin without disturbing the linen bin.",
+        "In the bindery room, Eva observed the index reel in the linen bin without touching the index reel.",
+    )
+    for s_pass in passing_see:
+        assert _sentence_matches_event(s_pass, ev_1, w.noise_threshold, world=w), (
+            f"Expected benign post-argument clause to pass: {s_pass!r}"
+        )
+        assert check_rendered_prose(f"{sj_setup}\n\n{' '.join([s_pass, *sj_sents[1:]])}", w, focal_agent=fa) == ()
+
+    # Negative (negates being at the location or the actor doing the event):
+    refused_see = (
+        "In the bindery room, Eva observed the index reel in the linen bin, which was not there.",
+        "In the bindery room, Eva observed the index reel in the linen bin, which was not inside it.",
+        "In the bindery room, Eva observed the index reel in the linen bin, which was not in the linen bin.",
+        "In the bindery room, Eva observed the index reel in the linen bin without laying eyes on it.",
+        "In the bindery room, Eva observed the index reel in the linen bin without seeing it.",
+        "In the bindery room, Eva observed the index reel in the linen bin, where Eva did not see the index reel.",
+    )
+    for s_ref in refused_see:
+        assert not _sentence_matches_event(s_ref, ev_1, w.noise_threshold, world=w), (
+            f"Expected contradictory post-argument clause on see to be refused: {s_ref!r}"
+        )
+        with pytest.raises(RenderCheckError) as exc_see:
+            check_rendered_prose(f"{sj_setup}\n\n{' '.join([s_ref, *sj_sents[1:]])}", w, focal_agent=fa)
+        assert exc_see.value.check_id == "c_fidelity_missing_event"
+
+    refused_move = (
+        "In the sorting room, Cara moved the brass ledger from the intake bench to the iron safe, which never reached it.",
+        "In the sorting room, Cara moved the brass ledger from the intake bench to the iron safe, which was not there.",
+        "In the sorting room, Cara moved the brass ledger from the intake bench to the iron safe, which was not inside it.",
+        "In the sorting room, Cara moved the brass ledger from the intake bench to the iron safe without moving it.",
+    )
+    for s_ref_m in refused_move:
+        assert not _sentence_matches_event(s_ref_m, ev_7, w.noise_threshold, world=w), (
+            f"Expected contradictory post-argument clause on move to be refused: {s_ref_m!r}"
+        )
+
+
+def test_73_card_td_req4_fronted_phrases_no_and_doorway() -> None:
+    """Test 73 (Card td Req 4):
+    - Benign fronted time and manner phrases pass: 'Not long after arriving in...', 'Not long after that,', 'Without a word,'.
+    - 'Not long after failing,' stays refused.
+    - 'no trace / sign of the <target>' and 'in no <location>' are refused.
+    - 'at the <room> doorway / threshold' doesn't count as being in the room.
+    """
+    from udlab_generator.render import _sentence_matches_event
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]  # Eva
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    ev_1 = w.events[0]  # see by Eva: index reel in linen bin in bindery room
+
+    # Positive: benign fronted time and manner phrases pass:
+    passing_fronted = (
+        "Not long after arriving in the bindery room, Eva observed the index reel in the linen bin.",
+        "Not long after that, in the bindery room, Eva observed the index reel in the linen bin.",
+        "Without a word, in the bindery room, Eva observed the index reel in the linen bin.",
+        "Without a sound, in the bindery room, Eva observed the index reel in the linen bin.",
+    )
+    for s_pass in passing_fronted:
+        assert _sentence_matches_event(s_pass, ev_1, w.noise_threshold, world=w), (
+            f"Expected benign fronted time/manner phrase to pass: {s_pass!r}"
+        )
+        assert check_rendered_prose(f"{sj_setup}\n\n{' '.join([s_pass, *sj_sents[1:]])}", w, focal_agent=fa) == ()
+
+    # Negative: "Not long after failing," and "no trace/sign of" and "in no <location>" and "at the <room> doorway/threshold":
+    refused_cases = (
+        "Not long after failing, in the bindery room, Eva observed the index reel in the linen bin.",
+        "In the bindery room, Eva observed no trace of the index reel in the linen bin.",
+        "In the bindery room, Eva observed no sign of the index reel in the linen bin.",
+        "In the bindery room, Eva observed the index reel in no linen bin.",
+        "Not far from the bindery room, at the bindery room doorway, Eva observed the index reel in the linen bin.",
+        "At the bindery room doorway, Eva observed the index reel in the linen bin.",
+        "At the bindery room threshold, Eva observed the index reel in the linen bin.",
+    )
+    for s_ref in refused_cases:
+        assert not _sentence_matches_event(s_ref, ev_1, w.noise_threshold, world=w), (
+            f"Expected sentence to be refused: {s_ref!r}"
+        )
+        with pytest.raises(RenderCheckError) as exc_ref:
+            check_rendered_prose(f"{sj_setup}\n\n{' '.join([s_ref, *sj_sents[1:]])}", w, focal_agent=fa)
+        assert exc_ref.value.check_id == "c_fidelity_missing_event"
+
+
+def test_74_card_td_req5_uncaught_checkpoint_and_sealing_exceptions_carry_no_sentence_text(
+    tmp_path: Path,
+) -> None:
+    """Test 74 (Card td Req 5):
+    - For an uncaught `RenderCheckError` or `SealingError` on a kept rendering or a checkpoint path,
+      the exception / traceback carries NO candidate sentence text, using the same sha / offset / length form as tb.
+    """
+    import hashlib
+    import traceback
+    from udlab_generator.render import (
+        RenderedScenario,
+        WriterCheckpointManager,
+    )
+    from udlab_generator.sealing import verify_written_dataset_recounts_and_prose
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    passing_r0 = render_world_template(w0, w0.agents[0])
+    passing_r1 = render_world_template(w0, w0.agents[1])
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    secret_sent = "In the bindery room, Eva observed the index reel in open view (SECRET_STDERR_LEAK_TD_74)."
+    bad_prose = f"{sj_setup}\n\n{' '.join([secret_sent, *sj_sents[1:]])}"
+    exp_sha = hashlib.sha256(secret_sent.encode("utf-8")).hexdigest()
+    exp_off = bad_prose.index(secret_sent)
+    exp_len = len(secret_sent)
+
+    keys = compute_scenario_keys(w0)
+    prompt_0 = format_writer_prompt(w0, w0.agents[0])
+    prompt_1 = format_writer_prompt(w0, w0.agents[1])
+
+    # 1. WriterCheckpointManager.append_scenario on a kept pair with bad prose:
+    ckpt_dir = tmp_path / "td_ckpt_append"
+    mgr = WriterCheckpointManager(
+        output_dir=ckpt_dir,
+        count=1,
+        base_seed=20261030,
+        private_seed_hex="ab" * 32,
+        writer_kind="ollama",
+    )
+    mgr.initialize_fresh()
+    bad_pair = (
+        RenderedScenario(
+            scenario_id=w0.scenario_id,
+            rendering_index=0,
+            focal_agent=w0.agents[0],
+            prose=bad_prose,
+            writer_prompt=prompt_0,
+            keys=keys,
+            world=w0,
+        ),
+        RenderedScenario(
+            scenario_id=w0.scenario_id,
+            rendering_index=1,
+            focal_agent=w0.agents[1],
+            prose=passing_r1,
+            writer_prompt=prompt_1,
+            keys=keys,
+            world=w0,
+        ),
+    )
+    with pytest.raises(RenderCheckError) as exc_append:
+        mgr.append_scenario(scenario_index=0, pair=bad_pair, call_records=(), world=w0)
+    tb_append = "".join(traceback.format_exception(exc_append.type, exc_append.value, exc_append.tb))
+    assert secret_sent not in str(exc_append.value)
+    assert "SECRET_STDERR_LEAK_TD_74" not in tb_append
+    assert f"failing_sentence_sha256={exp_sha}" in str(exc_append.value)
+    assert f"failing_sentence_offset={exp_off}" in str(exc_append.value)
+    assert f"failing_sentence_length={exp_len}" in str(exc_append.value)
+
+    # 2. WriterCheckpointManager.load_and_verify on a tampered checkpoint with bad prose:
+    good_pair = (
+        RenderedScenario(
+            scenario_id=w0.scenario_id,
+            rendering_index=0,
+            focal_agent=w0.agents[0],
+            prose=passing_r0,
+            writer_prompt=prompt_0,
+            keys=keys,
+            world=w0,
+        ),
+        RenderedScenario(
+            scenario_id=w0.scenario_id,
+            rendering_index=1,
+            focal_agent=w0.agents[1],
+            prose=passing_r1,
+            writer_prompt=prompt_1,
+            keys=keys,
+            world=w0,
+        ),
+    )
+    mgr.append_scenario(scenario_index=0, pair=good_pair, call_records=(), world=w0)
+    # Tamper with rendering_0 prose and recompute hashes in checkpoint files so load_and_verify reaches check_rendered_prose:
+    sealed_doc = json.loads(mgr.sealed_path.read_text(encoding="utf-8"))
+    pub_doc = json.loads(mgr.public_path.read_text(encoding="utf-8"))
+    sealed_doc["scenarios"][0]["rendering_0"]["prose"] = bad_prose
+    s_rec = sealed_doc["scenarios"][0]
+    s_payload = {k: v for k, v in s_rec.items() if k not in ("sealed_entry_sha256", "chain_hash")}
+    s_sha = hashlib.sha256(
+        json.dumps(s_payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    p_rec = pub_doc["scenarios"][0]
+    p_payload = {k: v for k, v in p_rec.items() if k != "chain_hash"}
+    c_hash = hashlib.sha256(
+        f"{s_rec['prev_hash']}:{json.dumps(p_payload, sort_keys=True, ensure_ascii=False, separators=(',', ':'))}:{s_sha}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    s_rec["sealed_entry_sha256"] = s_sha
+    s_rec["chain_hash"] = c_hash
+    p_rec["chain_hash"] = c_hash
+    sealed_doc["chain_head_sha256"] = c_hash
+    pub_doc["chain_head_sha256"] = c_hash
+    mgr.sealed_path.write_text(json.dumps(sealed_doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    mgr.public_path.write_text(json.dumps(pub_doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(RenderCheckError) as exc_load:
+        mgr.load_and_verify(worlds=[w0])
+    tb_load = "".join(traceback.format_exception(exc_load.type, exc_load.value, exc_load.tb))
+    assert secret_sent not in str(exc_load.value)
+    assert "SECRET_STDERR_LEAK_TD_74" not in tb_load
+    assert f"failing_sentence_sha256={exp_sha}" in str(exc_load.value)
+    assert f"failing_sentence_offset={exp_off}" in str(exc_load.value)
+    assert f"failing_sentence_length={exp_len}" in str(exc_load.value)
+
+    # 3. verify_written_dataset_recounts_and_prose raising SealingError on a kept rendering:
+    out_dir = tmp_path / "td_sealing_err"
+    build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="mock",
+    )
+    # Replace prose in both keys.sealed.jsonl and items.jsonl (and update digests/hmac) so verify_sealed_part passes
+    # and verify_written_dataset_recounts_and_prose reaches check_rendered_prose:
+    from udlab_generator.sealing import _hmac_hex, _render_public_from_sealed
+
+    sealed_dir = out_dir / "sealed_store"
+    public_dir = out_dir / "part_public"
+    sealing_meta_path = sealed_dir / "sealing.sealed.json"
+    keys_sealed_path = sealed_dir / "keys.sealed.jsonl"
+    sealing_meta = json.loads(sealing_meta_path.read_text(encoding="utf-8"))
+    sealed_rows = [json.loads(line) for line in keys_sealed_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    sealed_rows[0]["prose"] = bad_prose
+    keys_bytes = ("\n".join(json.dumps(r, sort_keys=True, ensure_ascii=False, separators=(",", ":")) for r in sealed_rows) + "\n").encode("utf-8")
+    keys_sha = hashlib.sha256(keys_bytes).hexdigest()
+    sealing_meta["keys_sealed_sha256"] = keys_sha
+    sealing_meta["commitment_hmac_sha256"] = _hmac_hex(sealing_meta["private_seed_hex"], f"commitment:{keys_sha}", 64)
+    items_bytes, part_bytes, _, _ = _render_public_from_sealed(sealed_rows, sealing_meta)
+    keys_sealed_path.write_bytes(keys_bytes)
+    sealing_meta_path.write_text(json.dumps(sealing_meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (public_dir / "items.jsonl").write_bytes(items_bytes)
+    (public_dir / "part.json").write_bytes(part_bytes)
+
+    with pytest.raises(SealingError) as exc_seal:
+        verify_written_dataset_recounts_and_prose(public_dir, sealed_dir)
+    tb_seal = "".join(traceback.format_exception(exc_seal.type, exc_seal.value, exc_seal.tb))
+    assert secret_sent not in str(exc_seal.value)
+    assert "SECRET_STDERR_LEAK_TD_74" not in tb_seal
+    assert f"failing_sentence_sha256={exp_sha}" in str(exc_seal.value)
+    assert f"failing_sentence_offset={exp_off}" in str(exc_seal.value)
+    assert f"failing_sentence_length={exp_len}" in str(exc_seal.value)
+
+    # 4. OllamaWriter.render_scenario_pair (default allow_refusal=False) raising RenderCheckError:
+    from udlab_generator import PINNED_WRITER_MANIFEST_DIGEST, PINNED_WRITER_MODEL_TAG
+    from udlab_generator.render import OllamaWriter
+
+    def _bad_writer_transport(method: str, url: str, payload: dict | None = None) -> dict:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            return {
+                "message": {"role": "assistant", "content": bad_prose},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3050,
+                "eval_count": 800,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    writer = OllamaWriter(
+        max_retries=0,
+        grant_id="test-grant-td-74",
+        http_transport=_bad_writer_transport,
+        start_owned_server=False,
+    )
+    with pytest.raises(RenderCheckError) as exc_writer:
+        writer.render_scenario_pair(w0)
+    tb_writer = "".join(traceback.format_exception(exc_writer.type, exc_writer.value, exc_writer.tb))
+    assert secret_sent not in str(exc_writer.value)
+    assert "SECRET_STDERR_LEAK_TD_74" not in tb_writer
+    assert f"failing_sentence_sha256={exp_sha}" in str(exc_writer.value)
+    assert f"failing_sentence_offset={exp_off}" in str(exc_writer.value)
+    assert f"failing_sentence_length={exp_len}" in str(exc_writer.value)
+
+
+def test_75_card_td_req6_crlf_normalization_in_writer_and_reader(tmp_path: Path) -> None:
+    """Test 75 (Card td Req 6):
+    - Line endings (`\\r\\n`) are normalized before paragraph splitting and offset slicing, consistently in writer and reader.
+    - Tests a response containing `\\r\\n\\r\\n` between paragraphs and `\\r\\n` inside a sentence, both passing and failing.
+    """
+    import hashlib
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+    )
+    from udlab_generator.cli import recheck_saved_responses, verify_written_dataset
+    from udlab_generator.render import (
+        locate_failing_sentence_in_response,
+        resolve_sealed_failing_sentence,
+    )
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    passing_r0 = render_world_template(w0, w0.agents[0])
+    passing_r1 = render_world_template(w0, w0.agents[1])
+
+    # 1. Direct check_rendered_prose with \r\n\r\n paragraph separator:
+    passing_r0_crlf = passing_r0.replace("\n\n", "\r\n\r\n")
+    assert check_rendered_prose(passing_r0_crlf, w0, focal_agent=w0.agents[0]) == ()
+
+    # 2. Direct locate_failing_sentence_in_response and resolve_sealed_failing_sentence on CRLF response:
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    bad_ev1_crlf = "In the bindery room,\r\nEva observed the index reel in open view (CRLF_FAIL_TD_75)."
+    failing_r0_crlf = f"{sj_setup}\r\n\r\n{' '.join([bad_ev1_crlf, *sj_sents[1:]])}"
+    with pytest.raises(RenderCheckError) as exc_crlf:
+        check_rendered_prose(failing_r0_crlf, w0, focal_agent=w0.agents[0])
+    assert exc_crlf.value.check_id == "c_fidelity_missing_event"
+    f_sha, f_off, f_len = locate_failing_sentence_in_response(failing_r0_crlf, exc_crlf.value.failing_sentence)
+    expected_norm_sent = bad_ev1_crlf.replace("\r\n", "\n")
+    assert f_sha == hashlib.sha256(expected_norm_sent.encode("utf-8")).hexdigest()
+    resolved_sent, ok = resolve_sealed_failing_sentence(
+        failing_r0_crlf,
+        failing_sentence_sha256=f_sha,
+        failing_sentence_offset=f_off,
+        failing_sentence_length=f_len,
+    )
+    assert ok is True
+    assert resolved_sent == expected_norm_sent
+
+    # 3. End-to-end writer -> generations.jsonl -> recheck / verify-written with \r\n responses from transport:
+    scripted = [failing_r0_crlf, passing_r0_crlf, passing_r1.replace("\n\n", "\r\n\r\n")]
+    idx = 0
+
+    def _crlf_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            out_txt = scripted[idx]
+            idx += 1
+            return {
+                "message": {"role": "assistant", "content": out_txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3050,
+                "eval_count": 800,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_dir = tmp_path / "td_crlf_e2e"
+    build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        max_retries=1,
+        grant_id="test-grant-td-75",
+        http_transport=_crlf_transport,
+        start_owned_server=False,
+    )
+    recheck_res = recheck_saved_responses(out_dir)
+    assert recheck_res["matches_recorded_verdicts"] is True
+    assert recheck_res["calls"][0]["checks_passed"] is False
+    assert recheck_res["calls"][0]["failing_sentence_sha256_verified"] is True
+    assert recheck_res["calls"][0]["failing_sentence"] == expected_norm_sent
+    assert recheck_res["calls"][1]["checks_passed"] is True
+    assert recheck_res["calls"][2]["checks_passed"] is True
+    vw_res = verify_written_dataset(out_dir)
+    assert "CRLF_FAIL_TD_75" not in (out_dir / "verify_written_report.json").read_text(encoding="utf-8")
+    assert vw_res["recount_verification"]["prose_checks_passed"] is True
+
 

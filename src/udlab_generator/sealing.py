@@ -27,7 +27,12 @@ from udlab_generator.keys import (
     verify_unknowable_u,
 )
 from udlab_generator.probe import _oof_multinomial_nb
-from udlab_generator.render import RenderedScenario, check_rendered_prose
+from udlab_generator.render import (
+    RenderCheckError,
+    RenderedScenario,
+    check_rendered_prose,
+    sanitize_render_check_error_for_stderr,
+)
 from udlab_generator.world import (
     AgentGoal,
     Event,
@@ -1080,6 +1085,11 @@ def verify_written_dataset_recounts_and_prose(
         # Re-run all prose checks (a)-(d) on every written rendering
         try:
             check_rendered_prose(prose, w_obj, focal_agent=focal_ag)
+        except RenderCheckError as exc:
+            sanitized_exc = sanitize_render_check_error_for_stderr(exc, prose)
+            raise SealingError(
+                f"Prose check failed in {scen_id} (focal={focal_ag}): {sanitized_exc}"
+            ) from None
         except Exception as exc:
             raise SealingError(
                 f"Prose check failed in {scen_id} (focal={focal_ag}): {exc}"
