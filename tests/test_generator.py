@@ -3954,25 +3954,35 @@ def test_48_setup_checklist_order_in_prompt_and_content_not_order_in_checker() -
     )
     assert check_rendered_prose(f"{reordered_setup}\n\n{events_para}", w, focal_agent=fa) == ()
 
-    # 2. Setup missing any room's containers fails with c_fidelity_containers, naming the missing container(s) and room:
+    # 2. Setup omitting optional per-room containers or fixtures is accepted under omission-by-key,
+    #    while falsely placing a container or fixture in the wrong room fails with c_fidelity_containers / c_fidelity_fixtures:
     missing_containers_setup = reordered_setup.replace(
         "an oak drawer and steel cabinet in the vault room, ",
         "",
     )
+    assert check_rendered_prose(f"{missing_containers_setup}\n\n{events_para}", w, focal_agent=fa) == ()
+    wrong_room_containers_setup = reordered_setup.replace(
+        "an oak drawer and steel cabinet in the vault room, a slate tray and cedar shelf in the reading room",
+        "an oak drawer in the vault room; in the reading room are a steel cabinet, a slate tray, and a cedar shelf",
+    )
     with pytest.raises(RenderCheckError) as exc_cont:
-        check_rendered_prose(f"{missing_containers_setup}\n\n{events_para}", w, focal_agent=fa)
+        check_rendered_prose(f"{wrong_room_containers_setup}\n\n{events_para}", w, focal_agent=fa)
     assert exc_cont.value.check_id == "c_fidelity_containers"
-    assert "oak drawer" in str(exc_cont.value)
     assert "steel cabinet" in str(exc_cont.value)
-    assert "vault room" in str(exc_cont.value)
+    assert "reading room" in str(exc_cont.value)
 
-    # 3. Setup missing any room's fixture fails with c_fidelity_fixtures, naming the missing fixture and room:
+    # 3. Setup omitting optional fixture is accepted, while placing a fixture in the wrong room fails with c_fidelity_fixtures:
     missing_fixture_setup = reordered_setup.replace(
         "a humidity dial in the bindery room, ",
         "",
     )
+    assert check_rendered_prose(f"{missing_fixture_setup}\n\n{events_para}", w, focal_agent=fa) == ()
+    wrong_room_fixture_setup = reordered_setup.replace(
+        "a wall clock in the reading room, a humidity dial in the bindery room",
+        "a wall clock in the reading room; in the vault room is a humidity dial",
+    )
     with pytest.raises(RenderCheckError) as exc_fix:
-        check_rendered_prose(f"{missing_fixture_setup}\n\n{events_para}", w, focal_agent=fa)
+        check_rendered_prose(f"{wrong_room_fixture_setup}\n\n{events_para}", w, focal_agent=fa)
     assert exc_fix.value.check_id == "c_fidelity_fixtures"
     assert "humidity dial" in str(exc_fix.value)
     assert "bindery room" in str(exc_fix.value)
@@ -3995,8 +4005,11 @@ def test_49_max_retries_1_records_refusal_and_saves_both_texts(tmp_path: Path) -
     w0 = generate_world(configs_1[0])
     passing_r0 = render_world_template(w0, w0.agents[0])
     passing_r1 = render_world_template(w0, w0.agents[1])
-    # Attempt 0 for r1 omits containers in vault room -> fails with c_fidelity_containers
-    failing_r1_attempt0 = passing_r1.replace("contains the oak drawer and the steel cabinet", "has storage")
+    # Attempt 0 for r1 falsely places the reading room's slate tray in the vault room -> fails with c_fidelity_containers
+    failing_r1_attempt0 = passing_r1.replace(
+        "contains the oak drawer and the steel cabinet",
+        "contains the oak drawer and the slate tray",
+    )
 
     call_counter = 0
 
@@ -7570,6 +7583,425 @@ def test_80_card_tk_leak_guard_git_ls_files_and_planted_fixtures(tmp_path: Path)
     )
     v_resp = _scan_files_for_repo_leaks(tmp_path, ["planted_resp.jsonl"])
     assert any("sealed_store_response_record" in v for v in v_resp)
+
+
+def test_81_card_tn_omission_by_key_optional_vs_required_and_prompt_aligned() -> None:
+    """Test 81 (Card tn Item 3):
+    - A setup check whose item no key, lure, or validator depends on (occluders, containers, fixtures,
+      station names in setup) stops refusing on omission.
+    - Omissions that a key, lure, or validator depends on (rooms, doorways, initial rooms, goals,
+      absent parties, stakes, belief rule, hearing threshold) stay refused.
+    - The prompt's constraints block, generated from the same single source (`SETUP_OMISSION_POLICY` /
+      `WRITER_PROSE_REQUIREMENTS`), states which setup items are required and which are optional,
+      keeping `verify_prompt_and_checker_requirements_aligned` passing.
+    """
+    import udlab_generator.render as ug_render
+    from udlab_generator.world import BELIEF_PERSISTENCE_RULE
+
+    assert hasattr(ug_render, "SETUP_OMISSION_POLICY")
+    assert hasattr(ug_render, "REQUIRED_SETUP_CHECK_IDS")
+    assert hasattr(ug_render, "OPTIONAL_SETUP_CHECK_IDS")
+    assert ug_render.OPTIONAL_SETUP_CHECK_IDS == {
+        "c_fidelity_containers",
+        "c_fidelity_fixtures",
+        "c_fidelity_occluder",
+        "c_fidelity_stations",
+    }
+    assert ug_render.REQUIRED_SETUP_CHECK_IDS == {
+        "c_fidelity_focal_agent",
+        "c_fidelity_room_setup",
+        "c_fidelity_doorways",
+        "c_fidelity_initial_room",
+        "c_fidelity_goal",
+        "c_fidelity_absent_party",
+        "c_fidelity_stake_edge",
+        "d_rule_sentence",
+        "d_hearing_threshold",
+    }
+    assert ug_render.verify_prompt_and_checker_requirements_aligned() == ug_render.WRITER_PROSE_REQUIREMENTS
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]
+    prompt_str = format_writer_prompt(w, fa)
+    assert "(required)" in prompt_str.lower() or "(required;" in prompt_str.lower()
+    assert "(optional)" in prompt_str.lower() or "(optional;" in prompt_str.lower()
+    for cid in ug_render.OPTIONAL_SETUP_CHECK_IDS:
+        assert ug_render.WRITER_PROSE_REQUIREMENTS_BY_ID[cid].required_in_setup is False
+    for cid in ug_render.REQUIRED_SETUP_CHECK_IDS:
+        assert ug_render.WRITER_PROSE_REQUIREMENTS_BY_ID[cid].required_in_setup is True
+
+    _, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    events_para = " ".join(sj_sents)
+
+    # Setup that omits all optional items (no setup containers, no setup fixtures, no setup occluders, no setup station names)
+    # while keeping every required setup item (focal_agent, rooms, doorways, starting rooms, goals, absent party, stake,
+    # belief rule, hearing threshold) passes under Verdict A:
+    minimal_required_setup = (
+        "Following Eva through the archival registry, the vault room is on the north side, "
+        "while the reading room and the sorting room are on the south side. "
+        "Doorways connect the vault room to the reading room, the reading room to the bindery room, "
+        "and the bindery room to the sorting room, with a doorway hearing threshold of 50 dB (>= 50 dB carries one doorway). "
+        f"{BELIEF_PERSISTENCE_RULE} "
+        "Eva starts in the bindery room. Dan starts in the bindery room. Cara starts in the bindery room, "
+        "while Gia is absent off-site. "
+        "Eva plans to complete the quarterly audit packet; Dan plans to verify the municipal deed transfer; "
+        "Cara plans to catalog the incoming charter folio. "
+        "Gia is off-site and depends on the location of the brass ledger for tomorrow's courier handoff."
+    )
+    assert check_rendered_prose(f"{minimal_required_setup}\n\n{events_para}", w, focal_agent=fa) == ()
+
+    # Omitting ONLY the occluders in setup is also accepted:
+    setup_no_occluders = (
+        "Following Eva through the archival registry, the vault room holds an oak drawer and a steel cabinet with a wall barometer; "
+        "the reading room holds a slate tray and a cedar shelf with a wall clock; "
+        "the bindery room holds a linen bin and a copper rack with a humidity dial; "
+        "the sorting room holds a maple cubby and an iron safe with a ventilation grille. "
+        "Doorways connect the vault room to the reading room, the reading room to the bindery room, "
+        "and the bindery room to the sorting room, with a doorway hearing threshold of 50 dB. "
+        f"{BELIEF_PERSISTENCE_RULE} "
+        "Eva starts in the bindery room, Dan starts in the bindery room, and Cara starts in the bindery room, "
+        "while Gia is absent off-site. "
+        "Eva plans to complete the quarterly audit packet; Dan plans to verify the municipal deed transfer; "
+        "Cara plans to catalog the incoming charter folio. "
+        "Gia is off-site and depends on the location of the brass ledger for tomorrow's courier handoff."
+    )
+    assert check_rendered_prose(f"{setup_no_occluders}\n\n{events_para}", w, focal_agent=fa) == ()
+
+    # Conversely, omitting any REQUIRED setup item stays refused with its check_id:
+    required_omission_cases = (
+        (
+            "c_fidelity_room_setup",
+            minimal_required_setup.replace("the vault room is on the north side, while ", "").replace(
+                "Doorways connect the vault room to the reading room, ",
+                "Doorways connect ",
+            ),
+        ),
+        (
+            "c_fidelity_doorways",
+            minimal_required_setup.replace(
+                "Doorways connect the vault room to the reading room, the reading room to the bindery room, "
+                "and the bindery room to the sorting room",
+                "Doorways connect the vault room to the reading room. A doorway connects the bindery room to the sorting room",
+            ),
+        ),
+        (
+            "c_fidelity_initial_room",
+            minimal_required_setup.replace("Dan starts in the bindery room. ", ""),
+        ),
+        (
+            "c_fidelity_goal",
+            minimal_required_setup.replace("Dan plans to verify the municipal deed transfer; ", ""),
+        ),
+        (
+            "c_fidelity_absent_party",
+            minimal_required_setup.replace(", while Gia is absent off-site", "").replace(
+                "Gia is off-site and depends on the location of the brass ledger for tomorrow's courier handoff.",
+                "",
+            ),
+        ),
+        (
+            "c_fidelity_stake_edge",
+            minimal_required_setup.replace(
+                "Gia is off-site and depends on the location of the brass ledger for tomorrow's courier handoff.",
+                "",
+            ),
+        ),
+        (
+            "d_rule_sentence",
+            minimal_required_setup.replace(f"{BELIEF_PERSISTENCE_RULE} ", ""),
+        ),
+        (
+            "d_hearing_threshold",
+            minimal_required_setup.replace(
+                "Doorways connect the vault room to the reading room, the reading room to the bindery room, "
+                "and the bindery room to the sorting room, with a doorway hearing threshold of 50 dB (>= 50 dB carries one doorway).",
+                "The vault room links to the reading room, the reading room links to the bindery room, and the bindery room links to the sorting room.",
+            ),
+        ),
+    )
+    for expected_cid, bad_setup in required_omission_cases:
+        with pytest.raises(RenderCheckError, match=".") as exc_req:
+            check_rendered_prose(f"{bad_setup}\n\n{events_para}", w, focal_agent=fa)
+        assert exc_req.value.check_id == expected_cid, f"Expected {expected_cid}, got {exc_req.value.check_id}"
+        assert exc_req.value.failure_kind == "absent"
+
+
+def test_82_card_tn_false_statements_about_optional_items_refused() -> None:
+    """Test 82 (Card tn Item 4):
+    - Omitting an optional setup item is accepted, but asserting something FALSE about it is refused AS FALSE,
+      with its own check_id and `failure_kind == 'false'`, not as missing:
+      1. `'In the <room> there is no occluder.'` / `'... and no named occluder.'` for a room that has one
+         -> refused with `c_fidelity_false_statement` (`failure_kind == 'false'`).
+      2. A wrong occluder name for a room (attributing another room's occluder to `<room>`)
+         -> refused with `c_fidelity_occluder` (`failure_kind == 'false'`).
+      3. A container in the wrong room (attributing another room's container to `<room>`)
+         -> refused with `c_fidelity_containers` (`failure_kind == 'false'`).
+      4. A fixture in the wrong room (attributing another room's fixture to `<room>`)
+         -> refused with `c_fidelity_fixtures` (`failure_kind == 'false'`).
+    """
+    from udlab_generator.world import BELIEF_PERSISTENCE_RULE
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]
+    _, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    events_para = " ".join(sj_sents)
+
+    # Baseline setup without optional occluders passes:
+    base_no_occ_setup = (
+        "Following Eva through the archival registry, the vault room, reading room, bindery room, and sorting room "
+        "are linked by doorways connecting the vault room to the reading room, the reading room to the bindery room, "
+        "and the bindery room to the sorting room (doorway hearing threshold: 50 dB). "
+        f"{BELIEF_PERSISTENCE_RULE} "
+        "Eva starts in the bindery room, Dan starts in the bindery room, and Cara starts in the bindery room, "
+        "with Gia absent off-site. "
+        "Eva plans to complete the quarterly audit packet; Dan plans to verify the municipal deed transfer; "
+        "Cara plans to catalog the incoming charter folio. "
+        "Gia is off-site and depends on the location of the brass ledger for tomorrow's courier handoff."
+    )
+    assert check_rendered_prose(f"{base_no_occ_setup}\n\n{events_para}", w, focal_agent=fa) == ()
+
+    # (a) Made-up wording required by Card tn Item 4: "In the <room> there is no occluder." for a room that has one is refused:
+    for room in w.rooms:
+        false_no_occ_sent = f"In the {room} there is no occluder."
+        with pytest.raises(RenderCheckError) as exc_no_occ:
+            check_rendered_prose(
+                f"{base_no_occ_setup} {false_no_occ_sent}\n\n{events_para}",
+                w,
+                focal_agent=fa,
+            )
+        assert exc_no_occ.value.check_id == "c_fidelity_false_statement"
+        assert exc_no_occ.value.failure_kind == "false"
+        assert exc_no_occ.value.failing_sentence == false_no_occ_sent
+
+    # Also test "no named occluder" and "no containers" / "no fixture":
+    false_named_occ_sent = "In the vault room are containers oak drawer and steel cabinet with fixture wall barometer and no named occluder."
+    with pytest.raises(RenderCheckError) as exc_named_occ:
+        check_rendered_prose(
+            f"{base_no_occ_setup} {false_named_occ_sent}\n\n{events_para}",
+            w,
+            focal_agent=fa,
+        )
+    assert exc_named_occ.value.check_id == "c_fidelity_false_statement"
+    assert exc_named_occ.value.failure_kind == "false"
+    assert exc_named_occ.value.failing_sentence == false_named_occ_sent
+
+    false_no_cont_sent = "In the vault room there are no containers."
+    with pytest.raises(RenderCheckError) as exc_no_cont:
+        check_rendered_prose(
+            f"{base_no_occ_setup} {false_no_cont_sent}\n\n{events_para}",
+            w,
+            focal_agent=fa,
+        )
+    assert exc_no_cont.value.check_id == "c_fidelity_false_statement"
+    assert exc_no_cont.value.failure_kind == "false"
+
+    # (b) Wrong occluder name for a room (vault room has frosted partition, not canvas screen):
+    wrong_occ_sent = "In the vault room, a canvas screen stands between the far-side alcove and the container bay."
+    with pytest.raises(RenderCheckError) as exc_wrong_occ:
+        check_rendered_prose(
+            f"{base_no_occ_setup} {wrong_occ_sent}\n\n{events_para}",
+            w,
+            focal_agent=fa,
+        )
+    assert exc_wrong_occ.value.check_id == "c_fidelity_occluder"
+    assert exc_wrong_occ.value.failure_kind == "false"
+    assert exc_wrong_occ.value.failing_sentence == wrong_occ_sent
+
+    # (c) Container in the wrong room (linen bin belongs to bindery room, not vault room):
+    wrong_cont_sent = "In the vault room are the oak drawer and the linen bin."
+    with pytest.raises(RenderCheckError) as exc_wrong_cont:
+        check_rendered_prose(
+            f"{base_no_occ_setup} {wrong_cont_sent}\n\n{events_para}",
+            w,
+            focal_agent=fa,
+        )
+    assert exc_wrong_cont.value.check_id == "c_fidelity_containers"
+    assert exc_wrong_cont.value.failure_kind == "false"
+    assert exc_wrong_cont.value.failing_sentence == wrong_cont_sent
+
+    # (d) Fixture in the wrong room (wall clock belongs to reading room, not sorting room):
+    wrong_fix_sent = "In the sorting room is the wall clock fixture."
+    with pytest.raises(RenderCheckError) as exc_wrong_fix:
+        check_rendered_prose(
+            f"{base_no_occ_setup} {wrong_fix_sent}\n\n{events_para}",
+            w,
+            focal_agent=fa,
+        )
+    assert exc_wrong_fix.value.check_id == "c_fidelity_fixtures"
+    assert exc_wrong_fix.value.failure_kind == "false"
+    assert exc_wrong_fix.value.failing_sentence == wrong_fix_sent
+
+
+def test_83_card_tn_repair_wording_absent_altered_false_forms(tmp_path: Path) -> None:
+    """Test 83 (Card tn Item 5 - Q2):
+    - For an `absent` required item, `format_repair_retry_line` reads:
+      `'Keep your earlier text as it was; add one sentence naming <item> ...'`.
+    - For an `altered` or `false` item, `format_repair_retry_line` reads:
+      `'Keep your earlier text exactly as it was; change only ...'`.
+    - Generated from `check_id` plus `absent`/`altered`/`false` flag (`failure_kind`),
+      recorded with its sha256 on the retry row as now, and carries no key content.
+    - Tests all three forms (`absent`, `altered`, `false`).
+    """
+    import hashlib
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+    )
+    from udlab_generator.render import (
+        VALID_FAILURE_KINDS,
+        WRITER_PROSE_REQUIREMENTS,
+        format_repair_retry_line,
+    )
+
+    assert VALID_FAILURE_KINDS == frozenset({"absent", "altered", "false"})
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    skeys = compute_scenario_keys(w0)
+    forbidden_key_strings = {
+        q.key.lower()
+        for q in skeys.questions
+        if isinstance(q.key, str) and q.key.lower() not in ("yes", "no", "none")
+    }
+
+    # 1. Direct unit test of all three forms (absent, altered, false) across setup and event checks:
+    for req in WRITER_PROSE_REQUIREMENTS:
+        for f_kind in ("absent", "altered", "false"):
+            exc_setup = RenderCheckError(
+                "synthetic failure",
+                check_id=req.check_id,
+                failing_sentence="synthetic secret sentence",
+                failure_kind=f_kind,
+            )
+            line_setup = format_repair_retry_line(exc_setup)
+            if f_kind == "absent":
+                assert line_setup.startswith("Keep your earlier text as it was; add one sentence naming ")
+            else:
+                assert line_setup.startswith("Keep your earlier text exactly as it was; change only ")
+                if f_kind == "false":
+                    assert "false statement" in line_setup
+            assert req.check_id in line_setup
+            assert "synthetic secret sentence" not in line_setup
+            for k_str in forbidden_key_strings:
+                assert k_str not in line_setup.lower()
+
+    for f_kind in ("absent", "altered", "false"):
+        exc_ev = RenderCheckError(
+            "synthetic event failure",
+            check_id="c_fidelity_missing_event",
+            failing_sentence="synthetic secret event sentence",
+            event_index=5,
+            event_kind="see",
+            failure_kind=f_kind,
+        )
+        line_ev = format_repair_retry_line(exc_ev)
+        if f_kind == "absent":
+            assert line_ev.startswith("Keep your earlier text as it was; add one sentence naming event 5 ")
+        else:
+            assert line_ev.startswith("Keep your earlier text exactly as it was; change only event 5 ")
+        assert "synthetic secret event sentence" not in line_ev
+        for k_str in forbidden_key_strings:
+            assert k_str not in line_ev.lower()
+
+    # 2. End-to-end test through `check_rendered_prose` and `build_and_probe_dataset` for all 3 forms:
+    passing_r0 = render_world_template(w0, w0.agents[0])
+    passing_r1 = render_world_template(w0, w0.agents[1])
+    orig_stake = w0.stake_edges[0].description
+
+    # Form 1 (absent): stake sentence omitted completely
+    absent_r0 = passing_r0.replace(f"Stakes: {orig_stake}", "")
+    with pytest.raises(RenderCheckError) as exc_abs:
+        check_rendered_prose(absent_r0, w0, focal_agent=w0.agents[0])
+    assert exc_abs.value.check_id == "c_fidelity_stake_edge"
+    assert exc_abs.value.failure_kind == "absent"
+    assert format_repair_retry_line(exc_abs.value).startswith(
+        "Keep your earlier text as it was; add one sentence naming the setup stake description"
+    )
+
+    # Form 2 (altered): stake sentence present with altered dependency phrase
+    altered_r1 = passing_r1.replace(
+        orig_stake,
+        f"{w0.stake_edges[0].agent} is off-site and depends on the location of the index reel for tomorrow's handoff.",
+    )
+    with pytest.raises(RenderCheckError) as exc_alt:
+        check_rendered_prose(altered_r1, w0, focal_agent=w0.agents[1])
+    assert exc_alt.value.check_id == "c_fidelity_stake_edge"
+    assert exc_alt.value.failure_kind == "altered"
+    assert format_repair_retry_line(exc_alt.value).startswith(
+        "Keep your earlier text exactly as it was; change only the setup stake description"
+    )
+
+    # Form 3 (false): setup asserts a false statement about an optional item ("In the vault room there is no occluder.")
+    s0_setup, s0_events = passing_r0.split("\n\n", 1)
+    false_r0 = f"{s0_setup} In the {w0.rooms[0]} there is no occluder.\n\n{s0_events}"
+    with pytest.raises(RenderCheckError) as exc_false:
+        check_rendered_prose(false_r0, w0, focal_agent=w0.agents[0])
+    assert exc_false.value.check_id == "c_fidelity_false_statement"
+    assert exc_false.value.failure_kind == "false"
+    assert format_repair_retry_line(exc_false.value).startswith(
+        "Keep your earlier text exactly as it was; change only the false setup statement"
+    )
+
+    # Verify end-to-end recording of repair_line and repair_line_sha256 in generations.jsonl:
+    scripted = [absent_r0, passing_r0, false_r0.replace(f"Following {w0.agents[0]}", f"Following {w0.agents[1]}"), passing_r1]
+    call_idx = 0
+
+    def _transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal call_idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            txt = scripted[call_idx]
+            call_idx += 1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3050,
+                "eval_count": 800,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_dir = tmp_path / "tn_repair_three_forms"
+    build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        max_retries=1,
+        grant_id="test-grant-tn-83",
+        http_transport=_transport,
+        start_owned_server=False,
+    )
+    gen_rows = [
+        json.loads(line)
+        for line in (out_dir / "generations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(gen_rows) == 4
+    # Retry on r0 (absent stake):
+    assert gen_rows[1]["repair_line"].startswith(
+        "Keep your earlier text as it was; add one sentence naming the setup stake description"
+    )
+    assert gen_rows[1]["repair_line_sha256"] == hashlib.sha256(gen_rows[1]["repair_line"].encode("utf-8")).hexdigest()
+    # Retry on r1 (false occluder statement):
+    assert gen_rows[3]["repair_line"].startswith(
+        "Keep your earlier text exactly as it was; change only the false setup statement"
+    )
+    assert gen_rows[3]["repair_line_sha256"] == hashlib.sha256(gen_rows[3]["repair_line"].encode("utf-8")).hexdigest()
+
 
 
 

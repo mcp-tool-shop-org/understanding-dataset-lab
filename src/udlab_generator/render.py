@@ -156,6 +156,7 @@ class ProseRefusalRecord:
     failing_sentence_sha256: str = ""
     failing_sentence_offset: int | None = None
     failing_sentence_length: int | None = None
+    failure_kind: str = "altered"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -170,7 +171,11 @@ class ProseRefusalRecord:
             "failing_sentence_sha256": self.failing_sentence_sha256,
             "failing_sentence_offset": self.failing_sentence_offset,
             "failing_sentence_length": self.failing_sentence_length,
+            "failure_kind": self.failure_kind,
         }
+
+
+VALID_FAILURE_KINDS: frozenset[str] = frozenset({"absent", "altered", "false"})
 
 
 class RenderCheckError(ValueError):
@@ -187,7 +192,10 @@ class RenderCheckError(ValueError):
         failing_sentence_sha256: str = "",
         failing_sentence_offset: int | None = None,
         failing_sentence_length: int | None = None,
+        failure_kind: str = "altered",
     ) -> None:
+        if failure_kind not in VALID_FAILURE_KINDS:
+            raise ValueError(f"failure_kind must be one of {sorted(VALID_FAILURE_KINDS)}, got {failure_kind!r}")
         if not failing_sentence_sha256 and failing_sentence and failing_sentence != "no candidate sentence":
             norm_fail = normalize_prose_line_endings(failing_sentence)
             failing_sentence_sha256 = _sha256_bytes(norm_fail.encode("utf-8"))
@@ -199,6 +207,7 @@ class RenderCheckError(ValueError):
         self.failing_sentence_sha256 = failing_sentence_sha256
         self.failing_sentence_offset = failing_sentence_offset
         self.failing_sentence_length = failing_sentence_length
+        self.failure_kind = failure_kind
         sanitized = self._format_safe_str()
         super().__init__(sanitized)
 
@@ -248,6 +257,132 @@ class ProseRequirementSpec:
 
     check_id: str
     rule_text: str
+    required_in_setup: bool = True
+
+
+@dataclass(frozen=True)
+class SetupOmissionPolicySpec:
+    """Single-source key-dependence specification for each setup item in `check_prose_render_fidelity`."""
+
+    item_name: str
+    check_id: str
+    required: bool
+    dependent_keys_lures_validators: tuple[str, ...]
+    prompt_summary: str
+
+
+SETUP_OMISSION_POLICY: tuple[SetupOmissionPolicySpec, ...] = (
+    SetupOmissionPolicySpec(
+        item_name="focal_agent",
+        check_id="c_fidelity_focal_agent",
+        required=True,
+        dependent_keys_lures_validators=("perspective_flip_framing",),
+        prompt_summary="focal_agent framing",
+    ),
+    SetupOmissionPolicySpec(
+        item_name="rooms",
+        check_id="c_fidelity_room_setup",
+        required=True,
+        dependent_keys_lures_validators=("K", "B1", "B2", "D", "validate_topology", "validate_hearing"),
+        prompt_summary="rooms",
+    ),
+    SetupOmissionPolicySpec(
+        item_name="doorways",
+        check_id="c_fidelity_doorways",
+        required=True,
+        dependent_keys_lures_validators=("K", "B1", "B2", "D", "validate_topology", "validate_hearing"),
+        prompt_summary="doorways",
+    ),
+    SetupOmissionPolicySpec(
+        item_name="initial_rooms",
+        check_id="c_fidelity_initial_room",
+        required=True,
+        dependent_keys_lures_validators=(
+            "P",
+            "K",
+            "B1",
+            "B2",
+            "D",
+            "validate_topology",
+            "validate_occlusion",
+            "validate_hearing",
+        ),
+        prompt_summary="initial_agent_rooms",
+    ),
+    SetupOmissionPolicySpec(
+        item_name="goals",
+        check_id="c_fidelity_goal",
+        required=True,
+        dependent_keys_lures_validators=("D", "U_why_independence"),
+        prompt_summary="goals",
+    ),
+    SetupOmissionPolicySpec(
+        item_name="absent_parties",
+        check_id="c_fidelity_absent_party",
+        required=True,
+        dependent_keys_lures_validators=("X", "X_lures"),
+        prompt_summary="absent_parties",
+    ),
+    SetupOmissionPolicySpec(
+        item_name="stakes",
+        check_id="c_fidelity_stake_edge",
+        required=True,
+        dependent_keys_lures_validators=("X", "X_lures"),
+        prompt_summary="stake_edges",
+    ),
+    SetupOmissionPolicySpec(
+        item_name="belief_rule",
+        check_id="d_rule_sentence",
+        required=True,
+        dependent_keys_lures_validators=("B1", "B2", "validate_belief_forcing", "derive_b2_from_rule_sentence_alone"),
+        prompt_summary="belief-persistence rule",
+    ),
+    SetupOmissionPolicySpec(
+        item_name="hearing_threshold",
+        check_id="d_hearing_threshold",
+        required=True,
+        dependent_keys_lures_validators=("K", "B1", "B2", "D", "validate_hearing"),
+        prompt_summary="doorway hearing threshold",
+    ),
+    SetupOmissionPolicySpec(
+        item_name="containers",
+        check_id="c_fidelity_containers",
+        required=False,
+        dependent_keys_lures_validators=(),
+        prompt_summary="per-room setup containers (any container used in an event is required in its event sentence)",
+    ),
+    SetupOmissionPolicySpec(
+        item_name="fixtures",
+        check_id="c_fidelity_fixtures",
+        required=False,
+        dependent_keys_lures_validators=(),
+        prompt_summary="per-room setup fixtures (any fixture observed in an event is required in its event sentence)",
+    ),
+    SetupOmissionPolicySpec(
+        item_name="occluders",
+        check_id="c_fidelity_occluder",
+        required=False,
+        dependent_keys_lures_validators=(),
+        prompt_summary="per-room setup occluders (any occluder used in an event is required in its event sentence)",
+    ),
+    SetupOmissionPolicySpec(
+        item_name="stations",
+        check_id="c_fidelity_stations",
+        required=False,
+        dependent_keys_lures_validators=(),
+        prompt_summary="setup station names ('container bay', 'far-side alcove')",
+    ),
+)
+
+SETUP_OMISSION_POLICY_BY_CHECK_ID: dict[str, SetupOmissionPolicySpec] = {
+    spec.check_id: spec for spec in SETUP_OMISSION_POLICY
+}
+REQUIRED_SETUP_CHECK_IDS: frozenset[str] = frozenset(
+    spec.check_id for spec in SETUP_OMISSION_POLICY if spec.required
+)
+OPTIONAL_SETUP_CHECK_IDS: frozenset[str] = frozenset(
+    spec.check_id for spec in SETUP_OMISSION_POLICY if not spec.required
+)
 
 
 HARD_CONSTRAINTS_PLACEHOLDER: str = "{hard_constraints_block}"
@@ -547,6 +682,13 @@ def count_duplicate_stake_statements(prose: str, world: World) -> int:
     return dup_count
 
 
+def format_setup_required_vs_optional_summary() -> str:
+    """Format the setup required-vs-optional summary from `SETUP_OMISSION_POLICY`."""
+    req_names = ", ".join(s.prompt_summary for s in SETUP_OMISSION_POLICY if s.required)
+    opt_names = ", ".join(s.prompt_summary for s in SETUP_OMISSION_POLICY if not s.required)
+    return f"required in setup: {req_names}; optional in setup if not falsely stated: {opt_names}"
+
+
 WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ProseRequirementSpec(
         "c_fidelity_paragraph_split",
@@ -554,55 +696,64 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ),
     ProseRequirementSpec(
         "c_fidelity_focal_agent",
-        "Name focal_agent in setup, framing transitions around focal_agent.",
+        "Name focal_agent in setup (required), framing transitions around focal_agent.",
     ),
     ProseRequirementSpec(
         "c_fidelity_room_setup",
-        "Name every room from rooms in setup.",
+        "Name every room from rooms in setup (required).",
     ),
     ProseRequirementSpec(
         "c_fidelity_containers",
-        "Name both containers of each room in setup.",
+        "Setup containers (optional).",
+        required_in_setup=False,
     ),
     ProseRequirementSpec(
         "c_fidelity_fixtures",
-        "Name each room's fixture in setup.",
+        "Setup fixtures (optional).",
+        required_in_setup=False,
     ),
     ProseRequirementSpec(
         "c_fidelity_occluder",
-        "Name each room's occluder in setup, between 'far-side alcove' and 'container bay' blocking sight from 'far-side alcove' while 'container bay' sees containers.",
+        "Setup occluders (optional).",
+        required_in_setup=False,
     ),
     ProseRequirementSpec(
         "c_fidelity_stations",
-        "Name 'container bay' and 'far-side alcove' in setup.",
+        "Setup stations (optional).",
+        required_in_setup=False,
+    ),
+    ProseRequirementSpec(
+        "c_fidelity_false_statement",
+        "No false setup claim ('no occluder' or wrong room).",
+        required_in_setup=False,
     ),
     ProseRequirementSpec(
         "c_fidelity_doorways",
-        "For each doorway [room_a, room_b], name both rooms in one setup sentence.",
+        "For each doorway [room_a, room_b], name both rooms in one setup sentence (required).",
     ),
     ProseRequirementSpec(
         "c_fidelity_initial_room",
-        "For each agent, name agent and initial_agent_rooms[agent] in one setup sentence.",
+        "For each agent, name agent and initial_agent_rooms[agent] in one setup sentence (required).",
     ),
     ProseRequirementSpec(
         "c_fidelity_goal",
-        "Copy each agent's goal_text (goals[agent].goal_text) verbatim into setup.",
+        "Copy each agent's goal_text (goals[agent].goal_text) verbatim into setup (required).",
     ),
     ProseRequirementSpec(
         "c_fidelity_absent_party",
-        "Name every absent party in setup.",
+        "Name every absent party in setup (required).",
     ),
     ProseRequirementSpec(
         "c_fidelity_stake_edge",
-        format_stake_rule_summary(),
+        f"{format_stake_rule_summary()} (required)",
     ),
     ProseRequirementSpec(
         "d_rule_sentence",
-        f'Include belief-persistence rule once in setup: "{BELIEF_PERSISTENCE_RULE}"',
+        f'Include belief-persistence rule once in setup (required): "{BELIEF_PERSISTENCE_RULE}"',
     ),
     ProseRequirementSpec(
         "d_hearing_threshold",
-        "State doorway hearing threshold in dB and 'doorway' in setup (>= threshold dB carries one doorway).",
+        "State doorway hearing threshold in dB and 'doorway' in setup (required; >= threshold dB carries one doorway).",
     ),
     ProseRequirementSpec(
         "c_fidelity_event_order",
@@ -702,7 +853,19 @@ def parse_writer_prompt_requirements(prompt_text: str) -> tuple[ProseRequirement
             raise ValueError(
                 f"Unrecognized or untracked requirement line in writer prompt HARD CONSTRAINTS: {line!r}"
             )
-        parsed.append(ProseRequirementSpec(check_id=m.group(1), rule_text=m.group(2)))
+        cid = m.group(1)
+        req_in_setup = (
+            WRITER_PROSE_REQUIREMENTS_BY_ID[cid].required_in_setup
+            if cid in WRITER_PROSE_REQUIREMENTS_BY_ID
+            else True
+        )
+        parsed.append(
+            ProseRequirementSpec(
+                check_id=cid,
+                rule_text=m.group(2),
+                required_in_setup=req_in_setup,
+            )
+        )
     if not parsed:
         raise ValueError("No structural requirements parsed from writer prompt.")
     return tuple(parsed)
@@ -714,6 +877,7 @@ def get_checker_enforced_check_ids() -> tuple[str, ...]:
         check_prose_no_markers,
         check_prose_banned_adverbs,
         check_prose_rule_and_hearing_threshold,
+        _check_setup_optional_items_for_false_statements,
         check_prose_render_fidelity,
     )
     found: list[str] = []
@@ -790,6 +954,7 @@ def _raise_prose_check_error(
     failing_sentence: str | None = None,
     event_index: int | None = None,
     event_kind: str | None = None,
+    failure_kind: str = "altered",
 ) -> NoReturn:
     """Raise `RenderCheckError` after verifying `check_id` is registered in `WRITER_PROSE_REQUIREMENTS`."""
     if check_id not in WRITER_PROSE_REQUIREMENTS_BY_ID:
@@ -800,6 +965,7 @@ def _raise_prose_check_error(
         failing_sentence=failing_sentence,
         event_index=event_index,
         event_kind=event_kind,
+        failure_kind=failure_kind,
     )
 
 
@@ -820,6 +986,7 @@ _REPAIR_TARGET_BY_CHECK_ID: dict[str, str] = {
     "c_fidelity_fixtures": "the setup fixtures per room",
     "c_fidelity_occluder": "the setup occluder description",
     "c_fidelity_stations": "the setup station names",
+    "c_fidelity_false_statement": "the false setup statement",
     "c_fidelity_doorways": "the setup doorway sentences",
     "c_fidelity_initial_room": "the setup starting-room sentence",
     "c_fidelity_goal": "the setup agent goal text",
@@ -842,12 +1009,22 @@ _REPAIR_TARGET_BY_CHECK_ID: dict[str, str] = {
 }
 
 
-def format_repair_retry_line(exc: RenderCheckError, *, retry_form: str = "multi_turn") -> str:
-    """Format a single repair-retry line asking for one targeted fix, without key content or model text.
+def format_repair_retry_line(
+    exc: RenderCheckError,
+    *,
+    retry_form: str = "multi_turn",
+    failure_kind: str | None = None,
+) -> str:
+    """Format a single repair-retry line from `exc.check_id` plus `absent`/`altered`/`false` flag, without key content or model text.
 
-    When `retry_form == 'single_turn'`, omits 'keep your earlier text' / 'leaving every other sentence unchanged'
-    because attempt-0 text is not included in the single-turn fallback request.
+    - For an `absent` required item in multi-turn form: `'Keep your earlier text as it was; add one sentence naming <item> ...'`.
+    - For an `altered` or `false` item in multi-turn form: `'Keep your earlier text exactly as it was; change only ...'`.
+    - When `retry_form == 'single_turn'`, omits 'keep your earlier text' / 'leaving every other sentence unchanged'
+      because attempt-0 text is not included in the single-turn fallback request.
     """
+    resolved_kind = failure_kind if failure_kind is not None else getattr(exc, "failure_kind", "altered")
+    if resolved_kind not in VALID_FAILURE_KINDS:
+        raise ValueError(f"failure_kind must be one of {sorted(VALID_FAILURE_KINDS)}, got {resolved_kind!r}")
     is_single_turn = retry_form == "single_turn"
     if exc.event_index is not None and exc.event_kind is not None:
         hint = _REPAIR_HINT_BY_EVENT_KIND.get(
@@ -860,14 +1037,30 @@ def format_repair_retry_line(exc: RenderCheckError, *, retry_form: str = "multi_
                     f"Ensure event {exc.event_index} ({exc.event_kind}, check {exc.check_id}) "
                     f"appears in its logged chronological position and {hint}."
                 )
+            if resolved_kind == "absent":
+                return (
+                    f"Keep your earlier text as it was; add one sentence naming event {exc.event_index} "
+                    f"({exc.event_kind}, check {exc.check_id}) in its logged chronological position "
+                    f"so that it {hint}, leaving every other sentence unchanged."
+                )
             return (
                 f"Keep your earlier text exactly as it was; change only event {exc.event_index} "
                 f"({exc.event_kind}, check {exc.check_id}) so that it appears in its logged chronological position "
                 f"and {hint}, leaving every other sentence unchanged."
             )
         if is_single_turn:
+            if resolved_kind == "absent":
+                return (
+                    f"Include one sentence naming event {exc.event_index} ({exc.event_kind}, check {exc.check_id}) "
+                    f"so that it {hint}."
+                )
             return (
                 f"Ensure event {exc.event_index} ({exc.event_kind}, check {exc.check_id}) {hint}."
+            )
+        if resolved_kind == "absent":
+            return (
+                f"Keep your earlier text as it was; add one sentence naming event {exc.event_index} "
+                f"({exc.event_kind}, check {exc.check_id}) so that it {hint}, leaving every other sentence unchanged."
             )
         return (
             f"Keep your earlier text exactly as it was; change only event {exc.event_index} "
@@ -877,7 +1070,21 @@ def format_repair_retry_line(exc: RenderCheckError, *, retry_form: str = "multi_
     rule_spec = WRITER_PROSE_REQUIREMENTS_BY_ID.get(exc.check_id)
     rule_hint = rule_spec.rule_text if rule_spec is not None else "satisfy this mandatory constraint."
     if is_single_turn:
+        if resolved_kind == "absent":
+            return f"Include one sentence naming {target_item} (check {exc.check_id}) so that it satisfies: {rule_hint}"
+        if resolved_kind == "false":
+            return f"Correct the false statement in {target_item} (check {exc.check_id}) so that it satisfies: {rule_hint}"
         return f"Ensure {target_item} (check {exc.check_id}) satisfies: {rule_hint}"
+    if resolved_kind == "absent":
+        return (
+            f"Keep your earlier text as it was; add one sentence naming {target_item} "
+            f"(check {exc.check_id}) so that it satisfies: {rule_hint} Leave every other sentence unchanged."
+        )
+    if resolved_kind == "false":
+        return (
+            f"Keep your earlier text exactly as it was; change only {target_item} "
+            f"(check {exc.check_id}, false statement) so that it satisfies: {rule_hint} Leave every other sentence unchanged."
+        )
     return (
         f"Keep your earlier text exactly as it was; change only {target_item} "
         f"(check {exc.check_id}) so that it satisfies: {rule_hint} Leave every other sentence unchanged."
@@ -1863,6 +2070,161 @@ def check_prose_banned_adverbs(prose: str) -> tuple[str, ...]:
     return ()
 
 
+_FALSE_NO_OCCLUDER_RE = re.compile(
+    r"(?:\b(?:no|without\s+(?:a|an|any)|lacks?\s+(?:a|an|any)|has\s+no|is\s+no|there\s+is\s+no)\s+(?:named\s+)?occluders?\b"
+    r"|\boccluders?\s+(?:is|are)\s+(?:absent|none|missing)\b)",
+    re.IGNORECASE,
+)
+_FALSE_NO_CONTAINER_RE = re.compile(
+    r"(?:\b(?:no|without\s+(?:a|an|any)|lacks?\s+(?:a|an|any)|has\s+no|is\s+no|there\s+(?:is|are)\s+no)\s+(?:named\s+)?containers?\b"
+    r"|\bcontainers?\s+(?:is|are)\s+(?:absent|none|missing)\b)",
+    re.IGNORECASE,
+)
+_FALSE_NO_FIXTURE_RE = re.compile(
+    r"(?:\b(?:no|without\s+(?:a|an|any)|lacks?\s+(?:a|an|any)|has\s+no|is\s+no|there\s+(?:is|are)\s+no)\s+(?:named\s+)?fixtures?\b"
+    r"|\bfixtures?\s+(?:is|are)\s+(?:absent|none|missing)\b)",
+    re.IGNORECASE,
+)
+_FALSE_NO_STATION_RE = re.compile(
+    r"\b(?:no|without\s+(?:a|an|any)|lacks?\s+(?:a|an|any)|has\s+no|is\s+no|there\s+is\s+no)\s+"
+    r"(?:container\s+bay|far-side\s+alcove)\b",
+    re.IGNORECASE,
+)
+
+
+def _split_setup_clauses_for_room_attribution(sentence: str) -> tuple[str, ...]:
+    """Split a setup sentence on `;` so multi-room semicolon lists scope each clause to its own room(s)."""
+    parts = [p.strip() for p in sentence.split(";") if p.strip()]
+    return tuple(parts) if parts else (sentence,)
+
+
+def _check_setup_optional_items_for_false_statements(
+    setup_sents: Sequence[str],
+    world: World,
+) -> None:
+    """Refuse false statements about optional setup items (occluders, containers, fixtures, stations) while accepting omission."""
+    room_by_low = {r.lower(): r for r in world.rooms}
+    occ_to_room = {occ.lower(): r for r, occ in world.occluders_by_room.items()}
+    cont_to_room = {
+        c.lower(): r
+        for r, pair in world.containers_by_room.items()
+        for c in pair
+    }
+    fix_to_room = {
+        fix.lower(): r
+        for r, fix in world.fixtures_by_room.items()
+        if fix
+    }
+
+    for sent in setup_sents:
+        s_low = sent.lower()
+        # 1. Explicit false negation of occluder, container, fixture, or station in a room that has one
+        if _FALSE_NO_OCCLUDER_RE.search(s_low):
+            _raise_prose_check_error(
+                "c_fidelity_false_statement",
+                f"Render check (c) failed: setup prose falsely asserts no occluder in a room that has one (candidate sentence: {sent!r}).",
+                failing_sentence=sent,
+                failure_kind="false",
+            )
+        if _FALSE_NO_CONTAINER_RE.search(s_low):
+            _raise_prose_check_error(
+                "c_fidelity_false_statement",
+                f"Render check (c) failed: setup prose falsely asserts no container in a room that has containers (candidate sentence: {sent!r}).",
+                failing_sentence=sent,
+                failure_kind="false",
+            )
+        if _FALSE_NO_FIXTURE_RE.search(s_low):
+            _raise_prose_check_error(
+                "c_fidelity_false_statement",
+                f"Render check (c) failed: setup prose falsely asserts no fixture in a room that has one (candidate sentence: {sent!r}).",
+                failing_sentence=sent,
+                failure_kind="false",
+            )
+        if _FALSE_NO_STATION_RE.search(s_low):
+            _raise_prose_check_error(
+                "c_fidelity_stations",
+                f"Render check (c) failed: setup prose falsely negates station ('container bay' or 'far-side alcove') (candidate sentence: {sent!r}).",
+                failing_sentence=sent,
+                failure_kind="false",
+            )
+
+        for occ_low, true_room in occ_to_room.items():
+            if re.search(
+                rf"\b(?:no|without\s+(?:a|an|the|any)|not\s+(?:a|an|the))\s+{re.escape(occ_low)}\b",
+                s_low,
+            ):
+                _raise_prose_check_error(
+                    "c_fidelity_occluder",
+                    f"Render check (c) failed: setup prose falsely negates occluder '{world.occluders_by_room[true_room]}' for room '{true_room}' (candidate sentence: {sent!r}).",
+                    failing_sentence=sent,
+                    failure_kind="false",
+                )
+        for c_low, true_room in cont_to_room.items():
+            if re.search(
+                rf"\b(?:no|without\s+(?:a|an|the|any)|not\s+(?:a|an|the))\s+{re.escape(c_low)}\b",
+                s_low,
+            ):
+                _raise_prose_check_error(
+                    "c_fidelity_containers",
+                    f"Render check (c) failed: setup prose falsely negates container '{c_low}' for room '{true_room}' (candidate sentence: {sent!r}).",
+                    failing_sentence=sent,
+                    failure_kind="false",
+                )
+        for fix_low, true_room in fix_to_room.items():
+            if re.search(
+                rf"\b(?:no|without\s+(?:a|an|the|any)|not\s+(?:a|an|the))\s+{re.escape(fix_low)}\b",
+                s_low,
+            ):
+                _raise_prose_check_error(
+                    "c_fidelity_fixtures",
+                    f"Render check (c) failed: setup prose falsely negates fixture '{fix_low}' for room '{true_room}' (candidate sentence: {sent!r}).",
+                    failing_sentence=sent,
+                    failure_kind="false",
+                )
+
+        # 2. Check room attribution within each semicolon-separated clause of the setup sentence
+        for clause in _split_setup_clauses_for_room_attribution(sent):
+            c_low = clause.lower()
+            clause_rooms = [
+                room_obj
+                for r_low, room_obj in room_by_low.items()
+                if r_low in c_low
+            ]
+            if not clause_rooms:
+                continue
+            clause_room_set = {r.lower() for r in clause_rooms}
+
+            for occ_low, true_room in occ_to_room.items():
+                if occ_low in c_low and true_room.lower() not in clause_room_set:
+                    wrong_room = clause_rooms[0]
+                    _raise_prose_check_error(
+                        "c_fidelity_occluder",
+                        f"Render check (c) failed: setup prose falsely places occluder '{world.occluders_by_room[true_room]}' (belongs to '{true_room}') in room '{wrong_room}' (candidate sentence: {sent!r}).",
+                        failing_sentence=sent,
+                        failure_kind="false",
+                    )
+
+            for cont_low, true_room in cont_to_room.items():
+                if cont_low in c_low and true_room.lower() not in clause_room_set:
+                    wrong_room = clause_rooms[0]
+                    _raise_prose_check_error(
+                        "c_fidelity_containers",
+                        f"Render check (c) failed: setup prose falsely places container '{cont_low}' (belongs to '{true_room}') in room '{wrong_room}' (candidate sentence: {sent!r}).",
+                        failing_sentence=sent,
+                        failure_kind="false",
+                    )
+
+            for fix_low, true_room in fix_to_room.items():
+                if fix_low in c_low and true_room.lower() not in clause_room_set:
+                    wrong_room = clause_rooms[0]
+                    _raise_prose_check_error(
+                        "c_fidelity_fixtures",
+                        f"Render check (c) failed: setup prose falsely places fixture '{fix_low}' (belongs to '{true_room}') in room '{wrong_room}' (candidate sentence: {sent!r}).",
+                        failing_sentence=sent,
+                        failure_kind="false",
+                    )
+
+
 def check_prose_rule_and_hearing_threshold(prose: str, world: World) -> None:
     """Prose check (d): refuse unless the belief-persistence rule sentence and hearing threshold appear in the setup prose."""
     prose = normalize_prose_line_endings(prose)
@@ -1871,18 +2233,26 @@ def check_prose_rule_and_hearing_threshold(prose: str, world: World) -> None:
     rule_count = setup_text.count(BELIEF_PERSISTENCE_RULE)
     if rule_count != 1:
         cand = _find_sentence_with_substring(setup_text, "assumes")
+        rule_kind = "absent" if rule_count == 0 and cand == "no candidate sentence" else "altered"
         _raise_prose_check_error(
             "d_rule_sentence",
             f"Render check (d) failed: setup prose must contain BELIEF_PERSISTENCE_RULE byte-identically once (found {rule_count}; candidate sentence: {cand!r}).",
             failing_sentence=cand,
+            failure_kind=rule_kind,
         )
     threshold_str = f"{world.noise_threshold} dB"
     if threshold_str.lower() not in setup_text.lower() or "doorway" not in setup_text.lower():
-        cand = _find_sentence_with_substring(setup_text, "doorway")
+        cand = _find_sentence_with_substring(setup_text, "threshold")
+        if cand == "no candidate sentence":
+            cand = _find_sentence_with_substring(setup_text, "dB")
+        thresh_kind = "absent" if cand == "no candidate sentence" else "altered"
+        if cand == "no candidate sentence":
+            cand = _find_sentence_with_substring(setup_text, "doorway")
         _raise_prose_check_error(
             "d_hearing_threshold",
             f"Render check (d) failed: setup prose is missing the doorway hearing threshold '{threshold_str}' (candidate sentence: {cand!r}).",
             failing_sentence=cand,
+            failure_kind=thresh_kind,
         )
 
 
@@ -1894,9 +2264,12 @@ def check_prose_render_fidelity(
     """Prose check (c): validate complete event-log and setup fidelity using `world` (never keys).
 
     Verifies:
-    1. Setup states every room, container pair, occluder (between `far-side alcove` and `container bay`),
-       doorway edge (both room names in one setup sentence), initial agent room (each agent and starting
-       room in one setup sentence), absent party, verbatim goal, and verbatim stake edge.
+    1. Setup states every required item that a key, lure, or validator depends on:
+       focal_agent, every room, doorway edge (both room names in one setup sentence), initial agent room
+       (each agent and starting room in one setup sentence), absent party, verbatim goal, and stake edge.
+       Optional setup items that no key, lure, or validator depends on (setup containers, fixtures, occluders,
+       and setup station names) are accepted if omitted, and refused as false if a setup sentence asserts
+       something false about them.
     2. Every event in `world.events` is stated in the prose with its actor, action, object, place,
        and room in exact relative chronological order.
     3. Nothing the event log lacks is asserted (no unlogged party names, rooms, containers, objects,
@@ -1917,9 +2290,10 @@ def check_prose_render_fidelity(
             "c_fidelity_focal_agent",
             f"Render check (c) failed: focal_agent '{focal_agent}' is missing from setup prose (candidate sentence: {cand!r}).",
             failing_sentence=cand,
+            failure_kind="absent",
         )
 
-    # 1. Verify per-room containers and occluders in setup
+    # 1. Verify required rooms in setup and refuse any false statements about optional setup items
     for room in world.rooms:
         if room.lower() not in setup_low:
             cand = setup_sents[0] if setup_sents else "no candidate sentence"
@@ -1927,39 +2301,10 @@ def check_prose_render_fidelity(
                 "c_fidelity_room_setup",
                 f"Render check (c) failed: room '{room}' is missing from setup prose (candidate sentence: {cand!r}).",
                 failing_sentence=cand,
-            )
-        c0, c1 = world.containers_by_room[room]
-        if c0.lower() not in setup_low or c1.lower() not in setup_low:
-            cand = _find_sentence_with_substring(setup_text, room)
-            _raise_prose_check_error(
-                "c_fidelity_containers",
-                f"Render check (c) failed: containers ({c0!r}, {c1!r}) for room '{room}' missing from setup prose (candidate sentence: {cand!r}).",
-                failing_sentence=cand,
-            )
-        fixture = world.fixtures_by_room.get(room)
-        if fixture and fixture.lower() not in setup_low:
-            cand = _find_sentence_with_substring(setup_text, room)
-            _raise_prose_check_error(
-                "c_fidelity_fixtures",
-                f"Render check (c) failed: fixture '{fixture}' for room '{room}' missing from setup prose (candidate sentence: {cand!r}).",
-                failing_sentence=cand,
-            )
-        occ = world.occluders_by_room[room]
-        if occ.lower() not in setup_low:
-            cand = _find_sentence_with_substring(setup_text, room)
-            _raise_prose_check_error(
-                "c_fidelity_occluder",
-                f"Render check (c) failed: occluder '{occ}' for room '{room}' missing from setup prose (candidate sentence: {cand!r}).",
-                failing_sentence=cand,
+                failure_kind="absent",
             )
 
-    if CONTAINER_BAY_STATION.lower() not in setup_low or FAR_SIDE_ALCOVE_STATION.lower() not in setup_low:
-        cand = setup_sents[0] if setup_sents else "no candidate sentence"
-        _raise_prose_check_error(
-            "c_fidelity_stations",
-            f"Render check (c) failed: station names ('container bay', 'far-side alcove') missing from setup prose (candidate sentence: {cand!r}).",
-            failing_sentence=cand,
-        )
+    _check_setup_optional_items_for_false_statements(setup_sents, world)
 
     # Verify doorways: both room names of each edge must appear in one setup sentence
     for r_a, r_b in world.doorways:
@@ -1969,6 +2314,7 @@ def check_prose_render_fidelity(
                 "c_fidelity_doorways",
                 f"Render check (c) failed: doorway ({r_a!r}, {r_b!r}) missing from setup prose (candidate sentence: {cand!r}).",
                 failing_sentence=cand,
+                failure_kind="absent",
             )
 
     # Verify initial agent rooms (agent name and starting room in the same setup sentence), absent parties, goals, and stakes
@@ -1979,18 +2325,34 @@ def check_prose_render_fidelity(
             for s_low in setup_sents_low
         ):
             cand = _find_sentence_with_substring(setup_text, ag)
+            other_rooms_for_ag = [
+                r for r in world.rooms if r.lower() != init_r.lower()
+            ]
+            has_wrong_init_room = any(
+                re.search(rf"\b{re.escape(ag.lower())}\b", s_low)
+                and any(o_r.lower() in s_low for o_r in other_rooms_for_ag)
+                and any(w in s_low for w in ("start", "starts", "begin", "begins", "initial", "initially"))
+                for s_low in setup_sents_low
+            )
             _raise_prose_check_error(
                 "c_fidelity_initial_room",
                 f"Render check (c) failed: initial room '{init_r}' for agent '{ag}' missing from setup prose (candidate sentence: {cand!r}).",
                 failing_sentence=cand,
+                failure_kind="false" if has_wrong_init_room else "absent",
             )
         goal_txt = world.goals[ag].goal_text.lower()
         if goal_txt not in setup_low:
             cand = _find_sentence_with_substring(setup_text, ag)
+            has_partial_goal = any(
+                re.search(rf"\b{re.escape(ag.lower())}\b", s_low)
+                and any(w in s_low for w in ("plan", "plans", "goal", "aims", "intends"))
+                for s_low in setup_sents_low
+            )
             _raise_prose_check_error(
                 "c_fidelity_goal",
                 f"Render check (c) failed: goal '{world.goals[ag].goal_text}' for agent '{ag}' missing from setup prose (candidate sentence: {cand!r}).",
                 failing_sentence=cand,
+                failure_kind="altered" if has_partial_goal else "absent",
             )
 
     for abs_p in world.absent_parties:
@@ -2000,6 +2362,7 @@ def check_prose_render_fidelity(
                 "c_fidelity_absent_party",
                 f"Render check (c) failed: absent party '{abs_p}' missing from setup prose (candidate sentence: {cand!r}).",
                 failing_sentence=cand,
+                failure_kind="absent",
             )
 
     staked_agents = {stake.agent for stake in world.stake_edges}
@@ -2010,15 +2373,22 @@ def check_prose_render_fidelity(
                 "c_fidelity_stake_edge",
                 f"Render check (c) failed: absent party '{abs_p}' has no logged stake edge in setup prose (candidate sentence: {cand!r}).",
                 failing_sentence=cand,
+                failure_kind="absent",
             )
 
     for stake in world.stake_edges:
         if count_stake_statement_occurrences(setup_text, stake) < 1:
             cand = _find_sentence_with_substring(setup_text, stake.agent)
+            has_altered_stake = any(
+                re.search(rf"\b{re.escape(stake.agent.lower())}\b", s_low)
+                and STAKE_RELATION_PHRASE.lower() in s_low
+                for s_low in setup_sents_low
+            )
             _raise_prose_check_error(
                 "c_fidelity_stake_edge",
                 f"Render check (c) failed: stake edge for '{stake.agent}' ('{STAKE_RELATION_PHRASE} {stake.dependency_phrase}') missing from setup prose (candidate sentence: {cand!r}).",
                 failing_sentence=cand,
+                failure_kind="altered" if has_altered_stake else "absent",
             )
 
     # 2. Verify no unlogged party names or foreign domain entities appear anywhere in the prose
@@ -2030,6 +2400,7 @@ def check_prose_render_fidelity(
                 "c_fidelity_unlogged_party",
                 f"Render check (c) failed: unlogged party name '{party_name}' asserted in prose (candidate sentence: {cand!r}).",
                 failing_sentence=cand,
+                failure_kind="false",
             )
 
     current_domain = next((d for d in DOMAINS if d.name == world.domain_name), None)
@@ -2053,6 +2424,7 @@ def check_prose_render_fidelity(
                     "c_fidelity_unlogged_entity",
                     f"Render check (c) failed: unlogged entity/phrase '{phrase}' from domain '{dom.name}' asserted in prose (candidate sentence: {cand!r}).",
                     failing_sentence=cand,
+                    failure_kind="false",
                 )
 
     # Check that unlogged side_reasons or unlogged note placement are never asserted when unknowable
@@ -2065,6 +2437,7 @@ def check_prose_render_fidelity(
                     "c_fidelity_unlogged_motive",
                     f"Render check (c) failed: unlogged motive '{reason_str}' asserted in prose (candidate sentence: {cand!r}).",
                     failing_sentence=cand,
+                    failure_kind="false",
                 )
         note_moves = [
             ev
@@ -2082,6 +2455,7 @@ def check_prose_render_fidelity(
                         "c_fidelity_unlogged_placer",
                         f"Render check (c) failed: unlogged placement of '{current_domain.note_item}' by '{ag}' asserted in prose (candidate sentence: {cand!r}).",
                         failing_sentence=cand,
+                        failure_kind="false",
                     )
 
     # 3. Verify every event in `world.events` is stated in exact relative order and no extra event sentences exist
@@ -2092,6 +2466,7 @@ def check_prose_render_fidelity(
             "c_fidelity_paragraph_split",
             f"Render check (c) failed: prose must separate the setup paragraph from the event paragraph(s) with a blank line ('\\n\\n') (candidate sentence: {cand!r}).",
             failing_sentence=cand,
+            failure_kind="altered",
         )
     event_sentences: list[str] = []
     for ev_para in paragraphs[1:]:
@@ -2104,6 +2479,7 @@ def check_prose_render_fidelity(
                 "c_fidelity_contradictory_occlusion",
                 f"Render check (c) failed: contradictory visibility ('in open view' and 'blocked') in sentence: {sent!r}",
                 failing_sentence=sent,
+                failure_kind="false",
             )
 
     matched_sentence_indices: list[int] = []
@@ -2229,11 +2605,27 @@ def check_prose_render_fidelity(
                     failing_sentence=cand_sent,
                     event_index=ev_idx + 1,
                     event_kind=ev.kind,
+                    failure_kind="altered",
                 )
             cand_sent = (
                 event_sentences[search_start]
                 if search_start < len(event_sentences)
                 else "no candidate sentence"
+            )
+            next_ev_matches_search_start = (
+                search_start < len(event_sentences)
+                and ev_idx + 1 < len(world.events)
+                and _sentence_matches_event(
+                    event_sentences[search_start],
+                    world.events[ev_idx + 1],
+                    world.noise_threshold,
+                    world=world,
+                )
+            )
+            missing_ev_kind = (
+                "absent"
+                if cand_sent == "no candidate sentence" or next_ev_matches_search_start
+                else "altered"
             )
             _raise_prose_check_error(
                 "c_fidelity_missing_event",
@@ -2241,6 +2633,7 @@ def check_prose_render_fidelity(
                 failing_sentence=cand_sent,
                 event_index=ev_idx + 1,
                 event_kind=ev.kind,
+                failure_kind=missing_ev_kind,
             )
         matched_sentence_indices.append(found_idx)
         search_start = found_idx + 1
