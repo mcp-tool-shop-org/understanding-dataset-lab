@@ -1,0 +1,38 @@
+[
+  {
+    "call_id": "scen_0000:r0:call_0001",
+    "file": "writer-stub-10a_scen_0000_r0_call_0001.prompt.txt",
+    "prompt_eval_count": 3124,
+    "prompt_sha256": "71ce7c304d77999f80b1b2a82029e992caf383c26f1fb45496a71fcc0192f6c3",
+    "run": "writer-stub-10a",
+    "template_commit": "49accab",
+    "think": false
+  },
+  {
+    "call_id": "scen_0001:r1:call_0006",
+    "file": "writer-stub-10a_scen_0001_r1_call_0006.prompt.txt",
+    "prompt_eval_count": 3423,
+    "prompt_sha256": "6434a31ba0ccdad44fe5f95544f3881deaf30a4479d73c145c29a1ca5336bcf5",
+    "run": "writer-stub-10a",
+    "template_commit": "49accab",
+    "think": false
+  },
+  {
+    "call_id": "scen_0000:r0:call_0001",
+    "file": "writer-stub-3d_scen_0000_r0_call_0001.prompt.txt",
+    "prompt_eval_count": 3393,
+    "prompt_sha256": "ddd7b181b9290f0b94a54ef0a35d74a702544978c88b679d96566a2222031f22",
+    "run": "writer-stub-3d",
+    "template_commit": "aa3033f",
+    "think": false
+  },
+  {
+    "call_id": "scen_0000:r1:call_0003",
+    "file": "writer-stub-3d_scen_0000_r1_call_0003.prompt.txt",
+    "prompt_eval_count": 3394,
+    "prompt_sha256": "79e8f31aacc42845ed5abd1752297a1b1b2fa85daf4b1a35d29686fea5a10508",
+    "run": "writer-stub-3d",
+    "template_commit": "aa3033f",
+    "think": false
+  }
+]

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import inspect
 import json
+import os
 from pathlib import Path
 from collections import Counter
 import pytest
@@ -2523,20 +2525,26 @@ def test_33_changes_2_4_5_6_think_refusals_cleanup_and_verify(tmp_path: Path) ->
     assert think_writer.think is True
     assert think_writer.num_predict == 5120
     assert think_writer.max_num_ctx == 9216
-    # Card ue: a think call fits only when prompt_tokens_estimate + 5120 <= 9216, i.e. a prompt of at most 4096
-    # tokens. At dfcbe6a that held for 1 of the 10 balanced worlds (this one, by 21 tokens); the station-change
-    # and occluded-see clauses add about 190 tokens, so it now holds for none, and the over-budget think call is
-    # refused as max_num_ctx_exceeded (the defaults are unchanged). The think payload is exercised below with an
-    # explicit num_predict that fits.
-    from udlab_generator.render import estimate_prompt_tokens
+    # Card ue: a think call fits only when prompt tokens + 5120 + 256 <= 9216. At dfcbe6a that held for 1 of the
+    # 10 balanced worlds (this one, by 21 tokens); the station-change and occluded-see clauses add about 190
+    # tokens, so it now holds for none. Card ul: without a tokenizer the bytes/3 estimate decides, the
+    # over-budget think call is refused as c_ctx_over_cap, and because this direct caller forbids refusal the
+    # writer raises CtxOverCapRefusalError (a MaxNumCtxRefusalError). The build loop never raises it (test 89).
+    # The think payload is exercised below with an explicit num_predict that fits.
+    from udlab_generator.render import CTX_OVER_CAP_CHECK_ID, CtxOverCapRefusalError, estimate_prompt_tokens
 
     w0_prompt_tokens = estimate_prompt_tokens(
         [{"role": "user", "content": format_writer_prompt(w0, w0.agents[0])}]
     )
-    assert w0_prompt_tokens + DEFAULT_WRITER_NUM_PREDICT <= DEFAULT_WRITER_MAX_NUM_CTX
-    assert w0_prompt_tokens + think_writer.num_predict > think_writer.max_num_ctx
-    with pytest.raises(MaxNumCtxRefusalError, match="9216"):
+    assert w0_prompt_tokens + DEFAULT_WRITER_NUM_PREDICT + 256 <= DEFAULT_WRITER_MAX_NUM_CTX
+    assert w0_prompt_tokens + think_writer.num_predict + 256 > think_writer.max_num_ctx
+    with pytest.raises(MaxNumCtxRefusalError, match="9216") as ctx_exc:
         think_writer.render_scenario_pair(w0)
+    assert isinstance(ctx_exc.value, CtxOverCapRefusalError)
+    assert ctx_exc.value.check_id == CTX_OVER_CAP_CHECK_ID == "c_ctx_over_cap"
+    assert think_writer.refusals[-1].check_id == CTX_OVER_CAP_CHECK_ID
+    assert think_writer.call_records[-1].check_id == CTX_OVER_CAP_CHECK_ID
+    assert think_writer.call_records[-1].prompt_tokens_exact is None
     assert not seen_chat_payloads
     think_writer_fit = OllamaWriter(
         think=True,
@@ -3414,6 +3422,9 @@ def test_43_fake_transport_keep_and_continue_and_max_retries(tmp_path: Path) -> 
         grant_id="test-grant-sn-2",
         http_transport=_two_scen_transport,
         start_owned_server=False,
+        # Card ul: a cheap counter near the measured ratio (bytes/4); on the bytes/3 estimate alone the card-ul
+        # worked examples push this seed's scen_0001 prompt over the cap, which the exact count never does.
+        prompt_token_counter=lambda text: len(text.encode("utf-8")) // 4,
     )
     assert summary_2["scenarios_kept"] == 1
     assert summary_2["scenarios_refused"] == 1
@@ -6241,8 +6252,15 @@ def test_68_card_tb_marker_tests_refused_retried_and_kept(
     out_dir = tmp_path / "tb_marker_out"
     import udlab_generator.cli as ug_cli
     orig_build = ug_cli.build_and_probe_dataset
+    # Card ul: a cheap counter near the measured ratio (bytes/4), as in test 43; the estimate alone would refuse
+    # a prompt that fits exactly.
     ug_cli.build_and_probe_dataset = lambda **kw: orig_build(
-        **{**kw, "http_transport": _fake_transport, "start_owned_server": False}
+        **{
+            **kw,
+            "http_transport": _fake_transport,
+            "start_owned_server": False,
+            "prompt_token_counter": lambda text: len(text.encode("utf-8")) // 4,
+        }
     )
     try:
         capsys.readouterr()
@@ -8706,3 +8724,361 @@ def test_87_card_ue_station_change_and_occluded_see_prompt_and_checker(monkeypat
         cells_seen[cell] = len(station_moves)
     assert sorted(cells_seen) == sorted(expected_by_cell)
     assert sum(cells_seen.values()) == 8  # eight station-move events over the four cells, from seven sites
+
+
+def test_88_card_ul_station_worked_examples_from_constants_pass_checker_and_mutations_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test 88 (Card ul): the station-change clause carries one worked step and one worked return, and the
+    occluded-see clause one worked sentence, all rendered from the card-ue constants with made-up names that
+    appear in no domain, room, fixture, container, object or agent-name pool. Each example passes the checker
+    for its event; each mutation is refused; the alignment check covers them and fails when an example breaks."""
+    import udlab_generator.render as ug_render
+    from udlab_generator.render import (
+        STATION_EXAMPLE_ACTOR,
+        STATION_EXAMPLE_CONTAINER,
+        STATION_EXAMPLE_NOTE,
+        STATION_EXAMPLE_OCCLUDER,
+        STATION_EXAMPLE_ROOM,
+        STATION_MOVE_VERB,
+        _sentence_matches_event,
+        format_occluded_see_clause,
+        format_occluded_see_example,
+        format_station_change_clause,
+        format_station_change_examples,
+        get_station_and_occlusion_mutated_examples,
+        get_station_and_occlusion_worked_examples,
+        render_writer_prompt_constraints,
+        verify_prompt_and_checker_requirements_aligned,
+        verify_station_and_occlusion_examples_pass_checker,
+    )
+    from udlab_generator.world import AGENT_NAME_POOLS, DOMAINS, is_station_transition_event
+
+    step, back = format_station_change_examples()
+    see = format_occluded_see_example()
+    assert step == (
+        f"In the {STATION_EXAMPLE_ROOM}, {STATION_EXAMPLE_ACTOR} {STATION_MOVE_VERB} behind the "
+        f"{STATION_EXAMPLE_OCCLUDER} to the far-side alcove."
+    )
+    assert back == (
+        f"In the {STATION_EXAMPLE_ROOM}, {STATION_EXAMPLE_ACTOR} {STATION_MOVE_VERB} back around the "
+        f"{STATION_EXAMPLE_OCCLUDER} to the container bay."
+    )
+    assert see == (
+        f"In the {STATION_EXAMPLE_ROOM}, the {STATION_EXAMPLE_OCCLUDER} blocked {STATION_EXAMPLE_ACTOR}'s sight "
+        f"of the {STATION_EXAMPLE_CONTAINER} from the far-side alcove."
+    )
+    # The clauses carry them, with the note, and so does the rendered prompt.
+    assert f"e.g. '{step}' and '{back}' ({STATION_EXAMPLE_NOTE})" in format_station_change_clause()
+    assert f"e.g. '{see}' ({STATION_EXAMPLE_NOTE})" in format_occluded_see_clause()
+    constraints = render_writer_prompt_constraints()
+    for example in (step, back, see):
+        assert constraints.count(example) == 1
+    w = generate_world(make_balanced_configs(1, base_seed=20261033)[0])
+    assert format_writer_prompt(w, w.agents[0]).count(step) == 1
+
+    # Made-up names: in no domain pool (rooms, containers, fixtures, occluders, objects, absent parties) and no
+    # agent-name pool, as whole phrases and as words.
+    pools_text = (repr(DOMAINS) + repr(AGENT_NAME_POOLS)).lower()
+    for phrase in (STATION_EXAMPLE_ACTOR, STATION_EXAMPLE_ROOM, STATION_EXAMPLE_OCCLUDER, STATION_EXAMPLE_CONTAINER):
+        assert phrase.lower() not in pools_text, phrase
+        for word in phrase.lower().split():
+            if word != "room":
+                assert word not in pools_text, word
+
+    # Each example passes the checker for its synthetic event; each mutation is refused.
+    worked = get_station_and_occlusion_worked_examples()
+    mutated = get_station_and_occlusion_mutated_examples()
+    assert len(worked) == len(mutated) == 3
+    (s_step, ev_step), (s_back, ev_back), (s_see, ev_see) = worked
+    assert (s_step, s_back, s_see) == (step, back, see)
+    assert is_station_transition_event(ev_step) and is_station_transition_event(ev_back)
+    assert ev_see.kind == "see" and ev_see.occluded and ev_see.occluder == STATION_EXAMPLE_OCCLUDER
+    for sentence, ev in worked:
+        assert _sentence_matches_event(sentence, ev, 60, world=None), sentence
+    for sentence, ev in mutated:
+        assert not _sentence_matches_event(sentence, ev, 60, world=None), sentence
+    verify_station_and_occlusion_examples_pass_checker()
+    verify_prompt_and_checker_requirements_aligned()
+
+    # Break an example (the step loses its direction word, the literal furniture reading) and the alignment
+    # check fails on it.
+    broken_step = step.replace(f" {STATION_MOVE_VERB} behind the ", f" {STATION_MOVE_VERB} the ")
+    assert broken_step != step
+    monkeypatch.setattr(ug_render, "format_station_change_examples", lambda: (broken_step, back))
+    with pytest.raises(ValueError, match="Worked example in the writer prompt does not pass the checker"):
+        verify_station_and_occlusion_examples_pass_checker()
+    with pytest.raises(ValueError):
+        verify_prompt_and_checker_requirements_aligned()
+    monkeypatch.undo()
+    # Weaken a mutation into a passing sentence and the check fails on the other side.
+    good_step = get_station_and_occlusion_worked_examples()[0]
+    monkeypatch.setattr(
+        ug_render,
+        "get_station_and_occlusion_mutated_examples",
+        lambda: (good_step,) + get_station_and_occlusion_mutated_examples()[1:],
+    )
+    with pytest.raises(ValueError, match="Mutated worked example passes the checker"):
+        verify_station_and_occlusion_examples_pass_checker()
+
+
+def test_89_card_ul_exact_count_decides_num_ctx_and_over_cap_refuses_and_run_continues(tmp_path: Path) -> None:
+    """Test 89 (Card ul): with a tokenizer configured, the exact count of the chat-templated prompt decides
+    num_ctx and the cap check (the bytes/3 estimate is recorded only). An estimate over the cap with an exact
+    count that fits runs; an exact count truly over the cap is refused with its own check id, c_ctx_over_cap,
+    the next rendering and scenario still run, the build summary counts it, and nothing is raised in the build
+    loop. A direct caller that forbids refusal gets CtxOverCapRefusalError. num_ctx rounding never exceeds the cap."""
+    from udlab_generator.cli import build_and_probe_dataset, describe_prompt_token_counter, resolve_prompt_token_counter
+    from udlab_generator.render import (
+        CTX_OVER_CAP_CHECK_ID,
+        DEFAULT_WRITER_MAX_NUM_CTX,
+        DEFAULT_WRITER_MODEL_PIN,
+        NUM_CTX_MARGIN_TOKENS,
+        CtxOverCapRefusalError,
+        MaxNumCtxRefusalError,
+        OllamaWriter,
+        decide_num_ctx,
+        estimate_prompt_tokens,
+        prompt_fits_num_ctx_cap,
+        render_ollama_qwen35_prompt,
+        round_up_num_ctx,
+    )
+
+    # The decision helpers.
+    assert prompt_fits_num_ctx_cap(4864, 4096, 9216) and not prompt_fits_num_ctx_cap(4865, 4096, 9216)
+    assert decide_num_ctx(3393, 4096, max_num_ctx=9216) == 8192  # writer-stub-3d call_0001: 7745 -> 8192
+    assert decide_num_ctx(3810, 4096, max_num_ctx=9216) == 8192  # the refused 3d call_0004: 8162 -> 8192, fits
+    assert decide_num_ctx(4800, 4096, max_num_ctx=9216) == 9216  # 9152 fits; the rounding lands on the cap
+    assert decide_num_ctx(4600, 4096, max_num_ctx=9000) == 9000  # 8952 fits a 9000 cap; the rounding would not
+    assert round_up_num_ctx(9303) == 10240
+
+    configs = make_balanced_configs(2, base_seed=20261030)
+    worlds = [generate_world(c) for c in configs]
+    w0, w1 = worlds
+    pinned_digest = DEFAULT_WRITER_MODEL_PIN.manifest_digest
+    seen_payloads: list[dict] = []
+    counted_texts: list[str] = []
+
+    def _transport(method: str, url: str, body: dict | None = None) -> dict:
+        if method == "GET" and url.endswith("/api/version"):
+            return {"version": "0.40.9-test"}
+        if method == "GET" and url.endswith("/api/tags"):
+            return {"models": [{"name": "qwen3.6:35b", "model": "qwen3.6:35b", "digest": f"sha256:{pinned_digest}"}]}
+        if method == "POST" and url.endswith("/api/chat"):
+            payload = dict(body or {})
+            if payload.get("keep_alive") == 0:
+                return {"model": "qwen3.6:35b", "done": True, "done_reason": "unload"}
+            seen_payloads.append(payload)
+            prompt_content = payload["messages"][-1]["content"]
+            focal = prompt_content.split("Focal Agent: ", 1)[1].splitlines()[0].strip()
+            matching = [w for w in worlds if focal in w.agents]
+            assert len(matching) == 1, focal
+            return {
+                "model": "qwen3.6:35b",
+                "message": {"role": "assistant", "content": render_world_template(matching[0], focal)},
+                "done": True,
+                "done_reason": "stop",
+                "eval_count": 700,
+                "prompt_eval_count": 3300,
+            }
+        raise AssertionError(f"Unexpected {method} {url}")
+
+    prompt_0 = format_writer_prompt(w0, w0.agents[0])
+    est_0 = estimate_prompt_tokens([{"role": "user", "content": prompt_0}])
+    exact_0 = est_0 - 1000  # the measured ratio: bytes/3 overshoots the real count by about a quarter
+
+    # 1. Estimate over the cap, exact count fits: the call runs, num_ctx comes from the exact count.
+    num_predict = DEFAULT_WRITER_MAX_NUM_CTX - NUM_CTX_MARGIN_TOKENS - est_0 + 300
+    assert not prompt_fits_num_ctx_cap(est_0, num_predict, DEFAULT_WRITER_MAX_NUM_CTX)
+    assert prompt_fits_num_ctx_cap(exact_0, num_predict, DEFAULT_WRITER_MAX_NUM_CTX)
+
+    def _counter_fits(text: str) -> int:
+        counted_texts.append(text)
+        return exact_0
+
+    writer = OllamaWriter(
+        grant_id="test-grant-ul",
+        http_transport=_transport,
+        num_predict=num_predict,
+        prompt_token_counter=_counter_fits,
+    )
+    assert writer.prompt_token_counter is _counter_fits
+    pair = writer.render_scenario_pair(w0, allow_refusal=True)
+    assert pair is not None and len(seen_payloads) == 2
+    expected_ctx = decide_num_ctx(exact_0, num_predict, max_num_ctx=DEFAULT_WRITER_MAX_NUM_CTX)
+    assert expected_ctx <= DEFAULT_WRITER_MAX_NUM_CTX
+    assert [p["options"]["num_ctx"] for p in seen_payloads] == [expected_ctx, expected_ctx]
+    assert counted_texts[0] == render_ollama_qwen35_prompt([{"role": "user", "content": prompt_0}], think=False)
+    assert counted_texts[0].startswith("<|im_start|>user\n") and counted_texts[0].endswith(
+        "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    )
+    rec = writer.call_records[0]
+    assert rec.prompt_tokens_exact == exact_0 and rec.prompt_tokens_estimate == est_0
+    assert rec.to_dict()["prompt_tokens_exact"] == exact_0 and rec.to_dict()["tokens"]["prompt_tokens_exact"] == exact_0
+    assert rec.num_ctx == expected_ctx and rec.checks_passed
+
+    # 2. Exact count truly over the cap on one rendering: refused with c_ctx_over_cap, the next rendering runs,
+    #    the next scenario runs, the summary counts it, nothing is raised.
+    seen_payloads.clear()
+    counted_texts.clear()
+    over_once = {"armed": True}
+
+    def _counter_over_once(text: str) -> int:
+        counted_texts.append(text)
+        if over_once["armed"]:
+            over_once["armed"] = False
+            return DEFAULT_WRITER_MAX_NUM_CTX  # exact alone is already the whole cap
+        return 3300
+
+    out_dir = tmp_path / "ul_over_cap"
+    summary = build_and_probe_dataset(
+        count=2,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        grant_id="test-grant-ul",
+        http_transport=_transport,
+        start_owned_server=False,
+        prompt_token_counter=_counter_over_once,
+    )
+    assert len(counted_texts) == 4 and len(seen_payloads) == 3  # r0 of scen_0000 refused; r1 and scen_0001 ran
+    assert summary["refusals_by_check_id"] == {CTX_OVER_CAP_CHECK_ID: 1}
+    assert summary["calls_refused"] == 1 and summary["renderings_refused"] == 1
+    assert summary["scenarios_refused"] == 1 and summary["scenarios_kept"] == 1
+    assert summary["prompt_token_counter"] == "custom"
+    assert summary["writer_pin"]["max_num_ctx"] == 9216
+    rows = [json.loads(line) for line in (out_dir / "generations.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [r["check_id"] for r in rows] == [CTX_OVER_CAP_CHECK_ID, None, None, None]
+    refused_row = rows[0]
+    assert refused_row["done_reason"] == CTX_OVER_CAP_CHECK_ID and refused_row["checks_passed"] is False
+    assert refused_row["prompt_tokens_exact"] == DEFAULT_WRITER_MAX_NUM_CTX and refused_row["prompt_eval_count"] == 0
+    assert refused_row["num_ctx"] == round_up_num_ctx(DEFAULT_WRITER_MAX_NUM_CTX + 4096 + NUM_CTX_MARGIN_TOKENS)
+    assert refused_row["refusal_reasons"][0].startswith(CTX_OVER_CAP_CHECK_ID)
+    assert all(r["prompt_tokens_exact"] == 3300 for r in rows[1:])
+    assert rows[1]["scenario_id"] == w0.scenario_id and rows[2]["scenario_id"] == w1.scenario_id
+
+    # 3. A direct caller that forbids refusal gets the typed error, with the new id, never the old one.
+    seen_payloads.clear()
+    writer_over = OllamaWriter(
+        grant_id="test-grant-ul",
+        http_transport=_transport,
+        prompt_token_counter=lambda text: DEFAULT_WRITER_MAX_NUM_CTX,
+    )
+    with pytest.raises(CtxOverCapRefusalError, match="c_ctx_over_cap") as exc_info:
+        writer_over.render_scenario_pair(w0)
+    assert isinstance(exc_info.value, MaxNumCtxRefusalError)
+    assert exc_info.value.check_id == CTX_OVER_CAP_CHECK_ID != "max_num_ctx_exceeded"
+    assert not seen_payloads
+    assert writer_over.refusals[-1].check_id == CTX_OVER_CAP_CHECK_ID
+
+    # 4. The CLI resolver: both paths or neither; the blob name must carry the pin; the description carries no
+    #    path. A live transport without the counter is refused by the writer before any server starts, the way
+    #    a missing grant is; a fake transport (these tests) may run on the estimate.
+    assert describe_prompt_token_counter(None) is None
+    assert resolve_prompt_token_counter(None, None, environ={}) is None
+    fake_exe = tmp_path / "llama-tokenize.exe"
+    fake_exe.write_bytes(b"")
+    with pytest.raises(ValueError, match="both or neither"):
+        resolve_prompt_token_counter(fake_exe, None, environ={})
+    wrong_blob = tmp_path / ("sha256-" + "0" * 64)
+    wrong_blob.write_bytes(b"GGUF")
+    with pytest.raises(ValueError, match="TOKENIZER_BLOB_PIN"):
+        resolve_prompt_token_counter(fake_exe, wrong_blob, environ={})
+    pinned_blob = tmp_path / f"sha256-{DEFAULT_WRITER_MODEL_PIN.model_layer_digest}"
+    pinned_blob.write_bytes(b"GGUF")
+    counter = resolve_prompt_token_counter(
+        None,
+        None,
+        environ={"UDLAB_LLAMA_TOKENIZE": str(fake_exe), "UDLAB_WRITER_GGUF": str(pinned_blob)},
+    )
+    assert counter is not None and counter.gguf_digest == DEFAULT_WRITER_MODEL_PIN.model_layer_digest
+    assert resolve_prompt_token_counter(fake_exe, pinned_blob, environ={}).gguf_digest == counter.gguf_digest
+    described = describe_prompt_token_counter(counter)
+    assert isinstance(described, dict) and described["tool"] == "llama-tokenize.exe"
+    assert described["args"] == ["--stdin", "-ngl", "0", "--no-escape", "--show-count", "--log-disable"]
+    assert described["cuda_visible_devices"] == "-1"
+    assert str(tmp_path) not in json.dumps(described)
+    with pytest.raises(PermissionError, match="EXACT_COUNT_REQUIRED"):
+        OllamaWriter(grant_id="test-grant-ul", http_transport=None, start_owned_server=False)
+
+
+def test_90_card_ul_qwen35_renderer_matches_ollama_0_40_9() -> None:
+    """Test 90 (Card ul): `render_ollama_qwen35_prompt` reproduces Ollama 0.40.9's qwen3.5 renderer for the
+    shapes the writer sends (`think` off and on, the multi-turn repair retry) and rejects the shapes it does
+    not send."""
+    from udlab_generator.render import render_ollama_qwen35_prompt
+
+    single = render_ollama_qwen35_prompt([{"role": "user", "content": "Write it.\n"}], think=False)
+    assert single == "<|im_start|>user\nWrite it.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    thinking = render_ollama_qwen35_prompt([{"role": "user", "content": "Write it."}], think=True)
+    assert thinking == "<|im_start|>user\nWrite it.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    multi = render_ollama_qwen35_prompt(
+        [
+            {"role": "user", "content": "Write it."},
+            {"role": "assistant", "content": "<think>\nhidden\n</think>\n\nFirst draft.\n"},
+            {"role": "user", "content": "Repair line."},
+        ],
+        think=False,
+    )
+    assert multi == (
+        "<|im_start|>user\nWrite it.<|im_end|>\n"
+        "<|im_start|>assistant\nFirst draft.<|im_end|>\n"
+        "<|im_start|>user\nRepair line.<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    )
+    with pytest.raises(ValueError, match="prefill"):
+        render_ollama_qwen35_prompt([{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}], think=False)
+    with pytest.raises(ValueError, match="Unsupported message role"):
+        render_ollama_qwen35_prompt([{"role": "system", "content": "a"}, {"role": "user", "content": "b"}], think=False)
+    with pytest.raises(ValueError, match="must not be empty"):
+        render_ollama_qwen35_prompt([], think=False)
+
+
+def test_91_card_ul_exactness_against_recorded_prompt_eval_counts() -> None:
+    """Test 91 (Card ul, integration): tests/fixtures/exact_ctx/index.json holds, per recorded attempt-0 call,
+    the prompt file name, the recorded prompt_sha256 and prompt_eval_count (hashes and counts only). The prompt
+    texts are sealed scenario content (the run's world setup and event log) and never live in the repo: they are
+    read from the out-of-repo directory named by UDLAB_EXACT_CTX_PROMPTS, regenerated from the sealed run with
+    the producing commit's template (card ul reply), and the test skips with a reason when it is unset. Each
+    prompt must hash to the recorded prompt_sha256, and, when llama-tokenize and the pinned blob are configured
+    (UDLAB_LLAMA_TOKENIZE and UDLAB_WRITER_GGUF), the qwen3.5-rendered prompt tokenises on CPU to exactly the
+    recorded prompt_eval_count."""
+    from udlab_generator.render import (
+        DEFAULT_WRITER_MODEL_PIN,
+        LlamaTokenizeCounter,
+        count_prompt_tokens_exact,
+        render_ollama_qwen35_prompt,
+    )
+
+    fixtures_dir = Path(__file__).resolve().parent / "fixtures" / "exact_ctx"
+    index = json.loads((fixtures_dir / "index.json").read_text(encoding="utf-8"))
+    assert len(index) >= 3
+    assert not list(fixtures_dir.glob("*.prompt.txt")), "prompt texts are sealed content and must not be in the repo"
+    prompts_dir_raw = os.environ.get("UDLAB_EXACT_CTX_PROMPTS")
+    if not prompts_dir_raw:
+        pytest.skip("the out-of-repo prompt directory is not configured (UDLAB_EXACT_CTX_PROMPTS)")
+    prompts_dir = Path(prompts_dir_raw)
+    assert fixtures_dir.resolve() not in prompts_dir.resolve().parents and prompts_dir.resolve() != fixtures_dir.resolve()
+    pairs: list[tuple[str, list[dict[str, str]], int]] = []
+    for entry in index:
+        prompt_path = prompts_dir / entry["file"]
+        if not prompt_path.is_file():
+            pytest.skip(f"prompt file for {entry['call_id']} not present in UDLAB_EXACT_CTX_PROMPTS")
+        content = prompt_path.read_bytes().decode("utf-8")
+        messages = [{"role": "user", "content": content}]
+        sha = hashlib.sha256(json.dumps(messages, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        assert sha == entry["prompt_sha256"], entry["call_id"]
+        assert entry["think"] is False
+        rendered = render_ollama_qwen35_prompt(messages, think=False)
+        assert rendered.endswith("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
+        pairs.append((entry["call_id"], messages, int(entry["prompt_eval_count"])))
+
+    exe = os.environ.get("UDLAB_LLAMA_TOKENIZE")
+    gguf = os.environ.get("UDLAB_WRITER_GGUF")
+    if not exe or not gguf:
+        pytest.skip("llama-tokenize and the pinned GGUF blob are not configured (UDLAB_LLAMA_TOKENIZE, UDLAB_WRITER_GGUF)")
+    counter = LlamaTokenizeCounter(Path(exe), Path(gguf))
+    counter.verify_pinned_digest(DEFAULT_WRITER_MODEL_PIN.model_layer_digest)
+    assert counter.count("hello world") == 2  # no BOS for this vocab
+    for call_id, messages, recorded in pairs:
+        assert count_prompt_tokens_exact(messages, think=False, counter=counter) == recorded, call_id

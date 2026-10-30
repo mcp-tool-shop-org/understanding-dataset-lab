@@ -102,6 +102,10 @@ DEFAULT_WRITER_THINK: bool = False
 DEFAULT_VRAM_HALT_MIB: int = 26_000
 NUM_CTX_MARGIN_TOKENS: int = 256
 NUM_CTX_STEP_TOKENS: int = 1024
+# Card ul: the check id of a rendering whose exact prompt tokens + num_predict + margin exceed the cap. It is
+# recorded like a prose refusal, counted by the build summary, and the run continues with the next rendering.
+# Distinct from `max_num_ctx_exceeded`, which stays the configuration error for a requested cap above 9216.
+CTX_OVER_CAP_CHECK_ID: str = "c_ctx_over_cap"
 PROMPT_TOKEN_ESTIMATE_RULE: str = "ceil(utf8_bytes / 3)"
 CHECKPOINT_FILENAME: str = "checkpoint.json"
 SEALED_CHECKPOINT_FILENAME: str = "checkpoint.sealed.json"
@@ -673,30 +677,135 @@ def format_blocking_phrases_summary() -> str:
     return ", ".join(f"'{p}'" for p in BLOCKING_PHRASES)
 
 
-def format_station_change_clause() -> str:
-    """Card ue: the station-change clause of `c_fidelity_event_order`, rendered from the same constants the
-    checker's station-move branch enforces (`STATION_MOVE_DIRECTION_WORDS`, `STATION_MOVE_VERB`, the stations)."""
+# Card ul: worked examples for the station-change and occluded-see clauses, rendered from the same constants as
+# the checker's forms. The actor, room, occluder and container are made up and appear in no domain, room,
+# fixture, container or agent-name pool (`test_88` greps every pool), and the clause says they are not to be
+# copied. `verify_station_and_occlusion_examples_pass_checker` runs each example through
+# `_sentence_matches_event` and requires a mutated copy to be refused; the alignment check calls it.
+STATION_EXAMPLE_ACTOR: str = "Zinnia"
+STATION_EXAMPLE_ROOM: str = "quill room"
+STATION_EXAMPLE_OCCLUDER: str = "velour tapestry"
+STATION_EXAMPLE_CONTAINER: str = "jute tote"
+STATION_EXAMPLE_NOTE: str = "made-up names, never to be copied"
+
+
+def format_station_change_examples() -> tuple[str, str]:
+    """Card ul: one worked sentence for the step behind the occluder to the far-side alcove and one for the
+    return around it to the container bay, in the form `format_station_change_clause` prescribes."""
     behind, around = STATION_MOVE_DIRECTION_WORDS
     verb = STATION_MOVE_VERB
+    actor, room, occ = STATION_EXAMPLE_ACTOR, STATION_EXAMPLE_ROOM, STATION_EXAMPLE_OCCLUDER
+    return (
+        f"In the {room}, {actor} {verb} {behind} the {occ} to the {FAR_SIDE_ALCOVE_STATION}.",
+        f"In the {room}, {actor} {verb} back {around} the {occ} to the {CONTAINER_BAY_STATION}.",
+    )
+
+
+def format_occluded_see_example() -> str:
+    """Card ul: one worked sentence for an occluded see, in the possessive form `format_occluded_see_clause`
+    prescribes (the occluder blocked the actor's sight of the container from the far-side alcove)."""
+    blocked = OCCLUDED_SEE_BLOCKED_PHRASES[0]
+    sight = OCCLUDED_SEE_SIGHT_NOUNS[0]
+    actor, room = STATION_EXAMPLE_ACTOR, STATION_EXAMPLE_ROOM
+    occ, tgt = STATION_EXAMPLE_OCCLUDER, STATION_EXAMPLE_CONTAINER
+    return f"In the {room}, the {occ} {blocked} {actor}'s {sight} of the {tgt} from the {FAR_SIDE_ALCOVE_STATION}."
+
+
+def format_station_change_clause() -> str:
+    """Card ue: the station-change clause of `c_fidelity_event_order`, rendered from the same constants the
+    checker's station-move branch enforces (`STATION_MOVE_DIRECTION_WORDS`, `STATION_MOVE_VERB`, the stations).
+    Card ul appends the two worked examples from `format_station_change_examples`."""
+    behind, around = STATION_MOVE_DIRECTION_WORDS
+    verb = STATION_MOVE_VERB
+    example_step, example_return = format_station_change_examples()
     return (
         f"a move of the room's occluder between {CONTAINER_BAY_STATION} and {FAR_SIDE_ALCOVE_STATION} means the actor "
         f"{verb} {behind} (or back {around}) the <occluder>; write '<actor> {verb} {behind} the <occluder> to the "
         f"{FAR_SIDE_ALCOVE_STATION}' (or '<actor> {verb} back {around} the <occluder> to the {CONTAINER_BAY_STATION}'), "
-        f"never that the actor moved the <occluder>"
+        f"never that the actor moved the <occluder>; e.g. '{example_step}' and '{example_return}' "
+        f"({STATION_EXAMPLE_NOTE})"
     )
 
 
 def format_occluded_see_clause() -> str:
     """Card ue: the occluded-see clause of `c_fidelity_event_order`, rendered from the same constants the
     checker's occluded-see branch enforces (`OCCLUDED_SEE_BLOCKED_PHRASES`, `OCCLUDED_SEE_COULD_NOT_SEE`,
-    `OCCLUDED_SEE_SIGHT_NOUNS`, the far-side alcove)."""
+    `OCCLUDED_SEE_SIGHT_NOUNS`, the far-side alcove). Card ul appends the worked example from
+    `format_occluded_see_example`."""
     blocked = OCCLUDED_SEE_BLOCKED_PHRASES[0]
     sight = OCCLUDED_SEE_SIGHT_NOUNS[0]
     return (
         f"on occluded see, write that the <occluder> {blocked} <actor>'s {sight} of the <container> from the "
         f"{FAR_SIDE_ALCOVE_STATION}, or '<actor> {OCCLUDED_SEE_COULD_NOT_SEE} the <container> from the "
-        f"{FAR_SIDE_ALCOVE_STATION}, {blocked} by the <occluder>'; never that the actor saw or observed it"
+        f"{FAR_SIDE_ALCOVE_STATION}, {blocked} by the <occluder>'; never that the actor saw or observed it; "
+        f"e.g. '{format_occluded_see_example()}' ({STATION_EXAMPLE_NOTE})"
     )
+
+
+def get_station_and_occlusion_worked_examples() -> tuple[tuple[str, Event], ...]:
+    """Card ul: the three worked examples paired with the synthetic events they state (a station step, the
+    return, an occluded see), for the checker to accept."""
+    actor, room = STATION_EXAMPLE_ACTOR, STATION_EXAMPLE_ROOM
+    occ, tgt = STATION_EXAMPLE_OCCLUDER, STATION_EXAMPLE_CONTAINER
+    example_step, example_return = format_station_change_examples()
+    ev_step = Event(
+        step=1,
+        kind="move",
+        actor=actor,
+        room=room,
+        target_object=occ,
+        from_location=CONTAINER_BAY_STATION,
+        to_location=FAR_SIDE_ALCOVE_STATION,
+    )
+    ev_return = Event(
+        step=2,
+        kind="move",
+        actor=actor,
+        room=room,
+        target_object=occ,
+        from_location=FAR_SIDE_ALCOVE_STATION,
+        to_location=CONTAINER_BAY_STATION,
+    )
+    ev_see = Event(step=3, kind="see", actor=actor, room=room, target_object=tgt, occluded=True, occluder=occ)
+    return (
+        (example_step, ev_step),
+        (example_return, ev_return),
+        (format_occluded_see_example(), ev_see),
+    )
+
+
+def get_station_and_occlusion_mutated_examples() -> tuple[tuple[str, Event], ...]:
+    """Card ul: one mutation per worked example that the checker must refuse: the literal furniture form of the
+    step, the wrong station on the return, and a sighting claim on the occluded see."""
+    (_, ev_step), (_, ev_return), (_, ev_see) = get_station_and_occlusion_worked_examples()
+    _, around = STATION_MOVE_DIRECTION_WORDS
+    actor, room = STATION_EXAMPLE_ACTOR, STATION_EXAMPLE_ROOM
+    occ, tgt = STATION_EXAMPLE_OCCLUDER, STATION_EXAMPLE_CONTAINER
+    return (
+        (
+            f"In the {room}, {actor} moved the {occ} from the {CONTAINER_BAY_STATION} to the {FAR_SIDE_ALCOVE_STATION}.",
+            ev_step,
+        ),
+        (
+            f"In the {room}, {actor} {STATION_MOVE_VERB} back {around} the {occ} to the {FAR_SIDE_ALCOVE_STATION}.",
+            ev_return,
+        ),
+        (f"In the {room}, {actor} saw the {tgt} from the {FAR_SIDE_ALCOVE_STATION}.", ev_see),
+    )
+
+
+def verify_station_and_occlusion_examples_pass_checker() -> None:
+    """Card ul: every worked example in the prompt passes `_sentence_matches_event` for its event, and every
+    mutated copy is refused. Called by `verify_prompt_and_checker_requirements_aligned`."""
+    for sentence, ev in get_station_and_occlusion_worked_examples():
+        if not _sentence_matches_event(sentence, ev, DEFAULT_EXAMPLE_NOISE_THRESHOLD, world=None):
+            raise ValueError(f"Worked example in the writer prompt does not pass the checker: {sentence!r}")
+    for sentence, ev in get_station_and_occlusion_mutated_examples():
+        if _sentence_matches_event(sentence, ev, DEFAULT_EXAMPLE_NOISE_THRESHOLD, world=None):
+            raise ValueError(f"Mutated worked example passes the checker but must be refused: {sentence!r}")
+
+
+DEFAULT_EXAMPLE_NOISE_THRESHOLD: int = 60
 
 
 def get_station_and_occlusion_checker_forms() -> tuple[str, ...]:
@@ -1055,6 +1164,11 @@ def verify_prompt_and_checker_requirements_aligned(
             raise ValueError(
                 f"Writer prompt c_fidelity_event_order rule lacks the checker form {form!r}"
             )
+    # Card ul: the worked examples in those clauses pass the checker, and their mutations are refused.
+    for example, _ in get_station_and_occlusion_worked_examples():
+        if example not in event_order_text:
+            raise ValueError(f"Writer prompt c_fidelity_event_order rule lacks the worked example {example!r}")
+    verify_station_and_occlusion_examples_pass_checker()
     return parsed_prompt_reqs
 
 
@@ -3277,6 +3391,151 @@ def compute_num_ctx(
     return round_up_num_ctx(prompt_tokens_estimate + num_predict + margin, step=step)
 
 
+def prompt_fits_num_ctx_cap(
+    prompt_tokens: int,
+    num_predict: int,
+    max_num_ctx: int,
+    margin: int = NUM_CTX_MARGIN_TOKENS,
+) -> bool:
+    """Card ul: the cap check. A call fits iff `prompt_tokens + num_predict + margin <= max_num_ctx`."""
+    return prompt_tokens + num_predict + margin <= max_num_ctx
+
+
+def decide_num_ctx(
+    prompt_tokens: int,
+    num_predict: int,
+    *,
+    max_num_ctx: int,
+    margin: int = NUM_CTX_MARGIN_TOKENS,
+    step: int = NUM_CTX_STEP_TOKENS,
+) -> int:
+    """Card ul: `num_ctx = round_up(prompt_tokens + num_predict + margin, step)`, and when that rounding would
+    exceed `max_num_ctx` although the sum itself fits, `max_num_ctx` (9216) is used. The caller checks the fit
+    with `prompt_fits_num_ctx_cap` first; this never raises."""
+    return min(int(max_num_ctx), compute_num_ctx(prompt_tokens, num_predict, margin=margin, step=step))
+
+
+# ---------------------------------------------------------------------------
+# Card ul: exact prompt-token count. The chat-templated prompt is rendered exactly as Ollama 0.40.9 renders it
+# for `qwen3.6:35b` (config layer `renderer: qwen3.5` -> model/renderers/qwen35.go, no template layer in the
+# manifest, LeadingBOS "") and tokenised on CPU with llama.cpp's `llama-tokenize` against the pinned GGUF blob.
+# Ollama hands the rendered string to llama-server `/completion`, which tokenises it verbatim with
+# add_special=true (no BOS: this vocab carries no add_bos_token key, gpt2 default false) and parse_special=true;
+# `llama-tokenize --no-escape` reproduces that byte for byte (its default `--escape` rewrites the template's
+# literal "\n\n" and loses a token). Verified exact on 22 of 22 recorded attempt-0 calls (card ul reply).
+# ---------------------------------------------------------------------------
+
+OLLAMA_QWEN35_IM_START: str = "<|im_start|>"
+OLLAMA_QWEN35_IM_END: str = "<|im_end|>"
+OLLAMA_QWEN35_THINK_OPEN: str = "<think>\n"
+OLLAMA_QWEN35_EMPTY_THINK: str = "<think>\n\n</think>\n\n"
+OLLAMA_QWEN35_THINK_CLOSE_TAG: str = "</think>"
+LLAMA_TOKENIZE_ARGS: tuple[str, ...] = ("--stdin", "-ngl", "0", "--no-escape", "--show-count", "--log-disable")
+_LLAMA_TOKENIZE_COUNT_RE = re.compile(r"^Total number of tokens:\s*(\d+)\s*$", re.MULTILINE)
+PromptTokenCounter = Callable[[str], int]
+
+
+def render_ollama_qwen35_prompt(messages: Sequence[Mapping[str, str]], *, think: bool) -> str:
+    """Render `messages` as Ollama 0.40.9's `qwen3.5` renderer does for the shapes this writer sends: user turns
+    and a non-final assistant turn, no system turn, tools or images. Content is whitespace-trimmed per turn
+    (`strings.TrimSpace`); a prior assistant turn carries no think block and drops tagged reasoning; the
+    generation prompt ends `<|im_start|>assistant\\n` + `<think>\\n` (think) or `<think>\\n\\n</think>\\n\\n`."""
+    if not messages:
+        raise ValueError("messages must not be empty")
+    out: list[str] = []
+    last_index = len(messages) - 1
+    for i, m in enumerate(messages):
+        role = str(m.get("role", ""))
+        content = str(m.get("content", "")).strip()
+        if role == "user":
+            out.append(f"{OLLAMA_QWEN35_IM_START}user\n{content}{OLLAMA_QWEN35_IM_END}\n")
+        elif role == "assistant":
+            if i == last_index:
+                raise ValueError("An assistant prefill turn is not a shape this writer sends.")
+            close_idx = content.find(OLLAMA_QWEN35_THINK_CLOSE_TAG)
+            if close_idx != -1:
+                content = content[close_idx + len(OLLAMA_QWEN35_THINK_CLOSE_TAG) :].lstrip("\n")
+            out.append(f"{OLLAMA_QWEN35_IM_START}assistant\n{content}{OLLAMA_QWEN35_IM_END}\n")
+        else:
+            raise ValueError(f"Unsupported message role {role!r} for the qwen3.5 renderer (user/assistant only).")
+        if i == last_index:
+            out.append(f"{OLLAMA_QWEN35_IM_START}assistant\n")
+            out.append(OLLAMA_QWEN35_THINK_OPEN if think else OLLAMA_QWEN35_EMPTY_THINK)
+    return "".join(out)
+
+
+@dataclass(frozen=True)
+class LlamaTokenizeCounter:
+    """Exact prompt-token counter: runs `llama-tokenize` on CPU (`-ngl 0`, `CUDA_VISIBLE_DEVICES=-1`) against the
+    pinned GGUF blob, feeding the rendered prompt verbatim on stdin with `--no-escape`. Both paths come from the
+    CLI or environment, never from the source."""
+
+    tokenize_exe: Path
+    gguf_path: Path
+    timeout_s: float = 600.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tokenize_exe", Path(self.tokenize_exe))
+        object.__setattr__(self, "gguf_path", Path(self.gguf_path))
+        if not self.tokenize_exe.is_file():
+            raise FileNotFoundError(f"llama-tokenize executable not found: {self.tokenize_exe.name}")
+        if not self.gguf_path.is_file():
+            raise FileNotFoundError(f"GGUF blob not found: {self.gguf_path.name}")
+
+    @property
+    def gguf_digest(self) -> str | None:
+        """The sha256 the blob's file name carries (`sha256-<hex>` in the Ollama blobs dir), if any."""
+        m = re.fullmatch(r"sha256-([0-9a-f]{64})", self.gguf_path.name)
+        return m.group(1) if m else None
+
+    def verify_pinned_digest(self, model_layer_digest: str) -> None:
+        """Refuse a blob whose name does not carry the pinned model-layer digest."""
+        if self.gguf_digest != model_layer_digest:
+            raise ValueError(
+                f"REFUSED (TOKENIZER_BLOB_PIN): GGUF blob {self.gguf_path.name!r} is not the pinned model layer "
+                f"sha256-{model_layer_digest}."
+            )
+
+    def count(self, text: str) -> int:
+        env = dict(os.environ)
+        env["CUDA_VISIBLE_DEVICES"] = "-1"
+        proc = subprocess.run(
+            [str(self.tokenize_exe), "-m", str(self.gguf_path), *LLAMA_TOKENIZE_ARGS],
+            input=text.encode("utf-8"),
+            capture_output=True,
+            env=env,
+            timeout=self.timeout_s,
+            check=False,
+        )
+        m = _LLAMA_TOKENIZE_COUNT_RE.search(proc.stdout.decode("utf-8", "replace"))
+        if proc.returncode != 0 or m is None:
+            tail = proc.stderr.decode("utf-8", "replace")[-400:]
+            raise RuntimeError(f"llama-tokenize failed (rc={proc.returncode}): {tail}")
+        return int(m.group(1))
+
+    def __call__(self, text: str) -> int:
+        return self.count(text)
+
+    def describe(self) -> dict[str, object]:
+        return {
+            "tool": self.tokenize_exe.name,
+            "gguf": self.gguf_path.name,
+            "gguf_digest": self.gguf_digest,
+            "args": list(LLAMA_TOKENIZE_ARGS),
+            "cuda_visible_devices": "-1",
+        }
+
+
+def count_prompt_tokens_exact(
+    messages: Sequence[Mapping[str, str]],
+    *,
+    think: bool,
+    counter: PromptTokenCounter,
+) -> int:
+    """Exact token count of `messages` as Ollama evaluates them: render with the qwen3.5 renderer, then count."""
+    return int(counter(render_ollama_qwen35_prompt(messages, think=think)))
+
+
 def require_loopback_ollama_url(url: str) -> str:
     """Enforce loopback-only Ollama endpoint: only plain `http://127.0.0.1:<port>` is permitted."""
     raw = url.strip() if isinstance(url, str) else ""
@@ -3946,6 +4205,9 @@ class GenerationCallRecord:
     retry_fallback_reason: str = ""
     retry_unchanged_sentences: int | None = None
     retry_attempt0_sentences: int | None = None
+    # Card ul: the exact prompt-token count that decided `num_ctx` (None when no tokenizer was configured, and
+    # on retries, which are sized from the measured attempt-0 counts).
+    prompt_tokens_exact: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -3978,11 +4240,13 @@ class GenerationCallRecord:
             "retry_attempt0_sentences": self.retry_attempt0_sentences,
             "tokens": {
                 "prompt_tokens_estimate": self.prompt_tokens_estimate,
+                "prompt_tokens_exact": self.prompt_tokens_exact,
                 "prompt_eval_count": self.prompt_eval_count,
                 "eval_count": self.eval_count,
                 "thinking_words": self.thinking_words,
             },
             "prompt_tokens_estimate": self.prompt_tokens_estimate,
+            "prompt_tokens_exact": self.prompt_tokens_exact,
             "prompt_eval_count": self.prompt_eval_count,
             "eval_count": self.eval_count,
             "thinking_words": self.thinking_words,
@@ -4042,6 +4306,15 @@ class MaxNumCtxRefusalError(RenderCheckError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, check_id="max_num_ctx_exceeded")
+
+
+class CtxOverCapRefusalError(MaxNumCtxRefusalError):
+    """Card ul: a rendering whose exact prompt tokens + num_predict + margin exceed `max_num_ctx`. The build loop
+    never raises it: the rendering is recorded as `c_ctx_over_cap` and the run continues. It is raised only when a
+    caller forbids refusal (`allow_refusal=False`)."""
+
+    def __init__(self, message: str) -> None:
+        RenderCheckError.__init__(self, message, check_id=CTX_OVER_CAP_CHECK_ID)
 
 
 class GpuGuardMonitor:
@@ -4485,6 +4758,11 @@ class WriterCheckpointManager:
                         licence_id=str(c_dict["licence_id"]),
                         prompt_sha256=str(c_dict["prompt_sha256"]),
                         prompt_tokens_estimate=int(c_dict["prompt_tokens_estimate"]),
+                        prompt_tokens_exact=(
+                            int(c_dict["prompt_tokens_exact"])
+                            if c_dict.get("prompt_tokens_exact") is not None
+                            else None
+                        ),
                         prompt_eval_count=int(c_dict["prompt_eval_count"]),
                         eval_count=int(c_dict["eval_count"]),
                         thinking_words=int(c_dict["thinking_words"]),
@@ -4595,9 +4873,13 @@ class OllamaWriter:
         popen_factory: Callable[..., Any] | None = None,
         server_port: int | None = None,
         ollama_models_dir: Path | str | None = None,
+        prompt_token_counter: PromptTokenCounter | None = None,
     ) -> None:
         if max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
+        # Card ul: the exact counter (llama-tokenize on CPU against the pinned blob). When None (CPU tests with
+        # fake transports) the bytes/3 estimate stands in for the decision.
+        self._prompt_token_counter: PromptTokenCounter | None = prompt_token_counter
         resolved_think = bool(model_pin.think if think is None else think)
         resolved_num_predict = (
             int(num_predict)
@@ -4632,6 +4914,15 @@ class OllamaWriter:
                 "without an explicit GPU grant id (--grant-id or UDLAB_GPU_GRANT_ID)."
             )
         self._grant_id = resolved_grant or "test-transport-no-gpu"
+        # Card ul: a live run sizes num_ctx from the exact count, so it needs the tokenizer (--llama-tokenize and
+        # --writer-gguf, or UDLAB_LLAMA_TOKENIZE and UDLAB_WRITER_GGUF). A fake transport (CPU tests) may run
+        # without one, on the bytes/3 estimate.
+        if is_real_transport and prompt_token_counter is None:
+            raise PermissionError(
+                "REFUSED (EXACT_COUNT_REQUIRED): Refused to run OllamaWriter with live HTTP transport without "
+                "the exact prompt-token counter (--llama-tokenize and --writer-gguf, or UDLAB_LLAMA_TOKENIZE "
+                "and UDLAB_WRITER_GGUF)."
+            )
 
         raw_transport = http_transport if http_transport is not None else default_ollama_http_transport
         should_own_server = (
@@ -4741,6 +5032,34 @@ class OllamaWriter:
         return self._max_retries
 
     @property
+    def prompt_token_counter(self) -> PromptTokenCounter | None:
+        return self._prompt_token_counter
+
+    def _count_prompt_tokens_exact(self, messages: Sequence[Mapping[str, str]]) -> int | None:
+        """Card ul: the exact count of `messages` as Ollama evaluates them, or None without a counter."""
+        if self._prompt_token_counter is None:
+            return None
+        return count_prompt_tokens_exact(messages, think=self._think, counter=self._prompt_token_counter)
+
+    def _count_repair_turn_tokens(self, repair_line: str, *, retry_form: str) -> int:
+        """Card ul: the tokens a repair line adds to a retry prompt on top of the measured attempt-0 counts
+        (prompt_eval_count + eval_count). With a counter, the exact count of the turn framing as the renderer
+        emits it. Multi-turn: the assistant-turn header (which the attempt-0 count does not cover, since that
+        prompt ends in the empty think block), the closing of the assistant turn and the new user turn, less one
+        for the EOS token that eval_count counts but the retry does not re-send; checked exact (residual 0) on
+        the 12 recorded multi-turn retries of writer-stub-3d and -10a. Single-turn: the line appended after a
+        newline. Without a counter, the bytes/3 estimate of the line."""
+        if self._prompt_token_counter is None:
+            return estimate_prompt_tokens(repair_line)
+        if retry_form == "multi_turn":
+            framed = (
+                f"{OLLAMA_QWEN35_IM_START}assistant\n{OLLAMA_QWEN35_IM_END}\n"
+                f"{OLLAMA_QWEN35_IM_START}user\n{repair_line.strip()}{OLLAMA_QWEN35_IM_END}\n"
+            )
+            return int(self._prompt_token_counter(framed)) - 1
+        return int(self._prompt_token_counter(f"\n{repair_line}"))
+
+    @property
     def unload_records(self) -> tuple[OllamaUnloadRecord, ...]:
         return tuple(self._unload_records)
 
@@ -4825,34 +5144,36 @@ class OllamaWriter:
             }
         ]
         prompt_sha = _sha256_bytes(_canonical_json_line(messages).encode("utf-8"))
+        # Card ul: the bytes/3 estimate is a cheap pre-filter figure and is recorded as before; when a tokenizer
+        # is configured, the exact count of the chat-templated prompt (as Ollama renders and llama-server
+        # tokenises it) decides `num_ctx` and the cap check. Without one the estimate stands in.
         prompt_tokens_estimate = estimate_prompt_tokens(messages)
-        if self._think and prompt_tokens_estimate + self._num_predict <= self._max_num_ctx:
-            num_ctx = min(
-                self._max_num_ctx,
-                compute_num_ctx(
-                    prompt_tokens_estimate,
-                    self._num_predict,
-                    margin=NUM_CTX_MARGIN_TOKENS,
-                    step=NUM_CTX_STEP_TOKENS,
-                ),
-            )
-        else:
-            num_ctx = compute_num_ctx(
-                prompt_tokens_estimate,
-                self._num_predict,
-                margin=NUM_CTX_MARGIN_TOKENS,
-                step=NUM_CTX_STEP_TOKENS,
-            )
+        prompt_tokens_exact = self._count_prompt_tokens_exact(messages)
+        decision_tokens = prompt_tokens_exact if prompt_tokens_exact is not None else prompt_tokens_estimate
+        decision_basis = "exact" if prompt_tokens_exact is not None else "estimated"
+        num_ctx = decide_num_ctx(
+            decision_tokens,
+            self._num_predict,
+            max_num_ctx=self._max_num_ctx,
+            margin=NUM_CTX_MARGIN_TOKENS,
+            step=NUM_CTX_STEP_TOKENS,
+        )
 
         base_seed = int(world.seed)
 
-        if num_ctx > self._max_num_ctx or (prompt_tokens_estimate + self._num_predict > self._max_num_ctx):
+        if not prompt_fits_num_ctx_cap(
+            decision_tokens, self._num_predict, self._max_num_ctx, margin=NUM_CTX_MARGIN_TOKENS
+        ):
+            # Card ul: an over-cap rendering is refused with its own check id and the run continues; nothing
+            # is raised unless the caller forbids refusal.
+            needed = decision_tokens + self._num_predict + NUM_CTX_MARGIN_TOKENS
             call_index = len(self._call_records) + 1
             call_id = f"{scenario_id}:r{rendering_index}:call_{call_index:04d}"
             reason_msg = (
-                f"Writer call '{call_id}' requires num_ctx={num_ctx} "
-                f"(prompt_tokens_estimate={prompt_tokens_estimate} + num_predict={self._num_predict} + "
-                f"margin={NUM_CTX_MARGIN_TOKENS}), which exceeds max_num_ctx={self._max_num_ctx}."
+                f"Writer call '{call_id}' needs {needed} tokens "
+                f"({decision_basis} prompt_tokens={decision_tokens} + num_predict={self._num_predict} + "
+                f"margin={NUM_CTX_MARGIN_TOKENS}), which exceeds max_num_ctx={self._max_num_ctx}; "
+                f"rendering refused ({CTX_OVER_CAP_CHECK_ID}), the run continues."
             )
             rec = GenerationCallRecord(
                 call_id=call_id,
@@ -4867,22 +5188,23 @@ class OllamaWriter:
                 licence_id=self._model_pin.licence_id,
                 prompt_sha256=prompt_sha,
                 prompt_tokens_estimate=prompt_tokens_estimate,
+                prompt_tokens_exact=prompt_tokens_exact,
                 prompt_eval_count=0,
                 eval_count=0,
                 thinking_words=0,
                 num_predict=self._num_predict,
-                num_ctx=num_ctx,
+                num_ctx=round_up_num_ctx(needed, step=NUM_CTX_STEP_TOKENS),
                 max_num_ctx=self._max_num_ctx,
                 think=self._think,
                 temperature=0.0,
-                done_reason="max_num_ctx_exceeded",
+                done_reason=CTX_OVER_CAP_CHECK_ID,
                 seconds=0.0,
                 vram_peak_mib=self._gpu_guard.peak_vram_mib,
                 vram_halt_mib=self._gpu_guard.vram_halt_mib,
                 grant_id=self._grant_id,
                 checks_passed=False,
-                refusal_reasons=(format_non_sealed_refusal_reason(check_id="max_num_ctx_exceeded"),),
-                check_id="max_num_ctx_exceeded",
+                refusal_reasons=(format_non_sealed_refusal_reason(check_id=CTX_OVER_CAP_CHECK_ID),),
+                check_id=CTX_OVER_CAP_CHECK_ID,
                 attempt=0,
                 seed=base_seed,
             )
@@ -4892,11 +5214,13 @@ class OllamaWriter:
                     scenario_id=scenario_id,
                     rendering_index=rendering_index,
                     focal_agent=focal_agent,
-                    check_id="max_num_ctx_exceeded",
+                    check_id=CTX_OVER_CAP_CHECK_ID,
                     reason=reason_msg,
                 )
             )
-            raise MaxNumCtxRefusalError(reason_msg)
+            if allow_refusal:
+                return None
+            raise CtxOverCapRefusalError(reason_msg)
 
         chat_url = f"{self._base_url}/api/chat"
         last_exc: RenderCheckError | None = None
@@ -4910,7 +5234,7 @@ class OllamaWriter:
             call_seed = base_seed
             if attempt > 0 and last_exc is not None:
                 mt_repair_line = format_repair_retry_line(last_exc, retry_form="multi_turn")
-                mt_repair_tokens = estimate_prompt_tokens(mt_repair_line)
+                mt_repair_tokens = self._count_repair_turn_tokens(mt_repair_line, retry_form="multi_turn")
                 p0_tokens = (
                     attempt_0_eval_pair[0]
                     if attempt_0_eval_pair[0] > 0
@@ -4980,7 +5304,7 @@ class OllamaWriter:
                     retry_form = "single_turn"
                     repair_line = format_repair_retry_line(last_exc, retry_form="single_turn")
                     repair_line_sha = _sha256_bytes(repair_line.encode("utf-8"))
-                    st_repair_tokens = estimate_prompt_tokens(repair_line)
+                    st_repair_tokens = self._count_repair_turn_tokens(repair_line, retry_form="single_turn")
                     retry_fallback_reason = (
                         f"multiturn_need_exceeds_max_num_ctx: need={multiturn_need} "
                         f"(prompt_eval_count={p0_tokens} + eval_count={e0_tokens} + "
@@ -5018,6 +5342,8 @@ class OllamaWriter:
                 attempt_num_ctx = num_ctx
             attempt_prompt_sha = _sha256_bytes(_canonical_json_line(attempt_messages).encode("utf-8"))
             attempt_prompt_est = estimate_prompt_tokens(attempt_messages)
+            # Card ul: retries are sized from the measured attempt-0 counts, so only attempt 0 carries the exact count.
+            attempt_prompt_exact = prompt_tokens_exact if attempt == 0 else None
             payload: dict[str, Any] = {
                 "model": self.ollama_tag,
                 "messages": attempt_messages,
@@ -5086,6 +5412,7 @@ class OllamaWriter:
                     licence_id=self._model_pin.licence_id,
                     prompt_sha256=attempt_prompt_sha,
                     prompt_tokens_estimate=attempt_prompt_est,
+                prompt_tokens_exact=attempt_prompt_exact,
                     prompt_eval_count=prompt_eval_count,
                     eval_count=eval_count,
                     thinking_words=thinking_words,
@@ -5161,6 +5488,7 @@ class OllamaWriter:
                     licence_id=self._model_pin.licence_id,
                     prompt_sha256=attempt_prompt_sha,
                     prompt_tokens_estimate=attempt_prompt_est,
+                prompt_tokens_exact=attempt_prompt_exact,
                     prompt_eval_count=prompt_eval_count,
                     eval_count=eval_count,
                     thinking_words=thinking_words,
@@ -5235,6 +5563,7 @@ class OllamaWriter:
                 licence_id=self._model_pin.licence_id,
                 prompt_sha256=attempt_prompt_sha,
                 prompt_tokens_estimate=attempt_prompt_est,
+                prompt_tokens_exact=attempt_prompt_exact,
                 prompt_eval_count=prompt_eval_count,
                 eval_count=eval_count,
                 thinking_words=thinking_words,

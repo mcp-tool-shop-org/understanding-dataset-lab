@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, replace
 import hashlib
 import json
@@ -34,19 +34,22 @@ from udlab_generator.render import (
     NUM_CTX_STEP_TOKENS,
     SEALED_RESPONSES_FILENAME,
     GenerationCallRecord,
+    LlamaTokenizeCounter,
     MaxNumCtxRefusalError,
     MockWriter,
     OllamaHttpTransport,
     OllamaWriter,
+    PromptTokenCounter,
     RenderCheckError,
     RenderedScenario,
     SealedResponseEntry,
     WriterCheckpointManager,
     append_sealed_response,
     check_rendered_prose,
-    compute_num_ctx,
     compute_sealed_response_digests,
     count_duplicate_stake_statements,
+    count_prompt_tokens_exact,
+    decide_num_ctx,
     estimate_prompt_tokens,
     format_non_sealed_refusal_reason,
     kill_pid_tree,
@@ -606,6 +609,43 @@ def format_verify_written_console_refusals(output_dir: Path) -> list[str]:
     return lines
 
 
+# Card ul: the exact prompt-token counter's paths come from the CLI or these environment variables, never from
+# the source.
+LLAMA_TOKENIZE_ENV: str = "UDLAB_LLAMA_TOKENIZE"
+WRITER_GGUF_ENV: str = "UDLAB_WRITER_GGUF"
+
+
+def describe_prompt_token_counter(counter: PromptTokenCounter | None) -> dict[str, object] | str | None:
+    """Card ul: what sized `num_ctx`: the llama-tokenize counter's description (tool and blob names, args), the
+    word 'custom' for any other callable (tests), or None when the bytes/3 estimate stood in."""
+    if counter is None:
+        return None
+    if isinstance(counter, LlamaTokenizeCounter):
+        return counter.describe()
+    return "custom"
+
+
+def resolve_prompt_token_counter(
+    tokenize_exe: Path | None,
+    gguf_path: Path | None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> LlamaTokenizeCounter | None:
+    """Card ul: build the exact counter from `--llama-tokenize`/`--writer-gguf` or the environment. Both or
+    neither; the blob's file name must carry the pinned model-layer digest. A live `--writer ollama` run
+    without one is refused by `OllamaWriter` (EXACT_COUNT_REQUIRED), the way a missing grant is."""
+    env: Mapping[str, str] = os.environ if environ is None else environ
+    exe = tokenize_exe if tokenize_exe is not None else (Path(env[LLAMA_TOKENIZE_ENV]) if env.get(LLAMA_TOKENIZE_ENV) else None)
+    gguf = gguf_path if gguf_path is not None else (Path(env[WRITER_GGUF_ENV]) if env.get(WRITER_GGUF_ENV) else None)
+    if exe is None and gguf is None:
+        return None
+    if exe is None or gguf is None:
+        raise ValueError("--llama-tokenize and --writer-gguf go together (both or neither).")
+    counter = LlamaTokenizeCounter(exe, gguf)
+    counter.verify_pinned_digest(DEFAULT_WRITER_MODEL_PIN.model_layer_digest)
+    return counter
+
+
 def build_and_probe_dataset(
     *,
     count: int = 300,
@@ -627,8 +667,12 @@ def build_and_probe_dataset(
     halt_pid: int | None = None,
     pid_killer: Callable[[int], None] = kill_pid_tree,
     popen_factory: Callable[..., Any] | None = None,
+    prompt_token_counter: PromptTokenCounter | None = None,
 ) -> dict[str, object]:
-    """Generate `count` scenarios, render via `mock` or `ollama` writer with checkpointing, seal, verify, and probe."""
+    """Generate `count` scenarios, render via `mock` or `ollama` writer with checkpointing, seal, verify, and probe.
+
+    Card ul: `prompt_token_counter` (llama-tokenize on CPU against the pinned blob) gives the exact prompt-token
+    count that decides `num_ctx` and the cap check; without it the bytes/3 estimate stands in (CPU tests)."""
     if writer_kind not in ("mock", "ollama"):
         raise ValueError(f"writer_kind must be 'mock' or 'ollama', got {writer_kind!r}.")
     if max_retries < 0:
@@ -718,6 +762,7 @@ def build_and_probe_dataset(
             max_retries=max_retries,
             start_owned_server=should_own_server,
             popen_factory=popen_factory,
+            prompt_token_counter=prompt_token_counter,
         )
         if resume:
             ollama_writer.restore_call_records(restored_calls)
@@ -770,23 +815,19 @@ def build_and_probe_dataset(
                 ).hexdigest()
                 resp_sha, think_sha = compute_sealed_response_digests(rend.prose, "")
                 p_est = estimate_prompt_tokens(messages)
-                if resolved_think and p_est + resolved_num_predict <= max_num_ctx:
-                    n_ctx = min(
-                        max_num_ctx,
-                        compute_num_ctx(
-                            p_est,
-                            resolved_num_predict,
-                            margin=NUM_CTX_MARGIN_TOKENS,
-                            step=NUM_CTX_STEP_TOKENS,
-                        ),
-                    )
-                else:
-                    n_ctx = compute_num_ctx(
-                        p_est,
-                        resolved_num_predict,
-                        margin=NUM_CTX_MARGIN_TOKENS,
-                        step=NUM_CTX_STEP_TOKENS,
-                    )
+                # Card ul: the exact count decides num_ctx when a tokenizer is configured; the estimate otherwise.
+                p_exact = (
+                    count_prompt_tokens_exact(messages, think=resolved_think, counter=prompt_token_counter)
+                    if prompt_token_counter is not None
+                    else None
+                )
+                n_ctx = decide_num_ctx(
+                    p_exact if p_exact is not None else p_est,
+                    resolved_num_predict,
+                    max_num_ctx=max_num_ctx,
+                    margin=NUM_CTX_MARGIN_TOKENS,
+                    step=NUM_CTX_STEP_TOKENS,
+                )
                 rec = GenerationCallRecord(
                     call_id=call_id,
                     call_index=call_index,
@@ -800,7 +841,8 @@ def build_and_probe_dataset(
                     licence_id=effective_writer_pin.licence_id,
                     prompt_sha256=prompt_sha,
                     prompt_tokens_estimate=p_est,
-                    prompt_eval_count=p_est,
+                    prompt_tokens_exact=p_exact,
+                    prompt_eval_count=p_exact if p_exact is not None else p_est,
                     eval_count=len(rend.prose.split()),
                     thinking_words=0,
                     num_predict=resolved_num_predict,
@@ -869,6 +911,7 @@ def build_and_probe_dataset(
         "max_retries": max_retries,
         "vram_halt_mib": vram_halt_mib,
         "grant_id": effective_grant_id,
+        "prompt_token_counter": describe_prompt_token_counter(prompt_token_counter),
         "generations_file": GENERATIONS_FILENAME,
         "generations_sha256": generations_sha256,
         "responses_sealed_file": SEALED_RESPONSES_FILENAME,
@@ -906,6 +949,7 @@ def build_and_probe_dataset(
         "writer_pin": effective_writer_pin.to_dict(),
         "max_retries": max_retries,
         "grant_id": effective_grant_id,
+        "prompt_token_counter": describe_prompt_token_counter(prompt_token_counter),
         "vram_halt_mib": vram_halt_mib,
         "vram_peak_mib": peak_vram_mib,
         "ollama_server": server_info,
@@ -1004,6 +1048,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Publisher GPU grant ID required when running --writer ollama.",
     )
     parser.add_argument(
+        "--llama-tokenize",
+        type=Path,
+        default=None,
+        help=(
+            f"Path to llama.cpp's llama-tokenize executable (or env {LLAMA_TOKENIZE_ENV}). With --writer-gguf it "
+            "gives the exact prompt-token count (CPU, -ngl 0) that sizes num_ctx; required for --writer ollama."
+        ),
+    )
+    parser.add_argument(
+        "--writer-gguf",
+        type=Path,
+        default=None,
+        help=(
+            f"Path to the pinned writer GGUF blob, named sha256-<model_layer_digest> in the Ollama blobs dir "
+            f"(or env {WRITER_GGUF_ENV})."
+        ),
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="Resume an interrupted writer build from the verified per-scenario sealed checkpoint.",
@@ -1057,6 +1119,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if probe_passed else 1
 
         resolved_private_seed = args.private_seed or os.environ.get("UDLAB_PRIVATE_SEED") or None
+        try:
+            prompt_token_counter = resolve_prompt_token_counter(args.llama_tokenize, args.writer_gguf)
+        except (ValueError, FileNotFoundError) as exc:
+            parser.error(str(exc))
         summary = build_and_probe_dataset(
             count=args.count,
             base_seed=args.seed,
@@ -1070,6 +1136,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_retries=args.max_retries,
             grant_id=args.grant_id,
             resume=args.resume,
+            prompt_token_counter=prompt_token_counter,
         )
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
