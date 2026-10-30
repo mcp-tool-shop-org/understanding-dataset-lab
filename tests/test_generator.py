@@ -866,3 +866,407 @@ def test_11_p_step_parity_and_label_axis_independence() -> None:
     assert a0_steps_who == a0_steps_why, (
         f"a0 step count differs across u_is_who: u_is_who=True has {a0_steps_who} vs u_is_who=False has {a0_steps_why}"
     )
+
+
+def test_12_topology_validator_over_all_300_scenarios() -> None:
+    """Test 12: Every leave/enter hop in all 300 scenarios is a doorway in world.doorways, and validate_topology passes."""
+    import udlab_generator as ug
+
+    validate_topology_fn = getattr(ug, "validate_topology", None)
+    configs = make_balanced_configs(300, base_seed=20261030)
+
+    off_edge_scenarios = 0
+    off_edge_events = 0
+    for cfg in configs:
+        w = generate_world(cfg)
+        scen_off = 0
+        for ev in w.events:
+            if ev.kind in ("leave", "enter"):
+                if not (
+                    ev.from_location is not None
+                    and ev.to_location is not None
+                    and are_rooms_adjacent(ev.from_location, ev.to_location, w.doorways)
+                ):
+                    scen_off += 1
+                    off_edge_events += 1
+        if scen_off > 0:
+            off_edge_scenarios += 1
+
+    assert off_edge_scenarios == 0 and off_edge_events == 0, (
+        f"Off-edge movements found in {off_edge_scenarios}/300 scenarios ({off_edge_events} events)."
+    )
+    assert callable(validate_topology_fn), "validate_topology must be exported by udlab_generator."
+    for cfg in configs:
+        w = generate_world(cfg)
+        validate_topology_fn(w)
+
+
+def test_13_hand_built_off_edge_world_raises(tmp_path: Path) -> None:
+    """Test 13: A hand-built off-edge world or discontinuous-location world must raise in validate_topology and verify_sealed_part."""
+    import udlab_generator as ug
+
+    validate_topology_fn = getattr(ug, "validate_topology", None)
+    assert callable(validate_topology_fn), "validate_topology must be exported by udlab_generator."
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    # Find two distinct rooms in w.rooms that do NOT share a doorway in w.doorways
+    non_adj_pair = next(
+        (r_a, r_b)
+        for r_a in w.rooms
+        for r_b in w.rooms
+        if r_a != r_b and not are_rooms_adjacent(r_a, r_b, w.doorways)
+    )
+    actor = w.agents[0]
+    start_room = w.initial_agent_rooms[actor]
+    far_room = non_adj_pair[1] if non_adj_pair[0] == start_room else non_adj_pair[0]
+    if are_rooms_adjacent(start_room, far_room, w.doorways):
+        # Use non_adj_pair directly by placing actor at non_adj_pair[0]
+        start_room, far_room = non_adj_pair
+
+    init_rooms = dict(w.initial_agent_rooms, **{actor: start_room})
+    off_edge_events = (
+        Event(
+            step=1,
+            kind="leave",
+            actor=actor,
+            room=start_room,
+            from_location=start_room,
+            to_location=far_room,
+        ),
+        Event(
+            step=2,
+            kind="enter",
+            actor=actor,
+            room=far_room,
+            from_location=start_room,
+            to_location=far_room,
+        ),
+    )
+    off_edge_world = replace(w, initial_agent_rooms=init_rooms, events=off_edge_events)
+    with pytest.raises(ValueError, match="doorway|adjacent|topology"):
+        validate_topology_fn(off_edge_world)
+
+    # Also check discontinuous location sequence: agent leaves a room it is not in
+    wrong_room = next(r for r in w.rooms if r != start_room and are_rooms_adjacent(r, start_room, w.doorways))
+    discontinuous_events = (
+        Event(
+            step=1,
+            kind="leave",
+            actor=actor,
+            room=wrong_room,
+            from_location=wrong_room,
+            to_location=start_room,
+        ),
+        Event(
+            step=2,
+            kind="enter",
+            actor=actor,
+            room=start_room,
+            from_location=wrong_room,
+            to_location=start_room,
+        ),
+    )
+    discontinuous_world = replace(w, initial_agent_rooms=init_rooms, events=discontinuous_events)
+    with pytest.raises(ValueError, match="not in room|location|continuous|topology"):
+        validate_topology_fn(discontinuous_world)
+
+    # Verify verify_sealed_part also raises when a sealed scenario world violates topology
+    writer = MockWriter()
+    pub_dir = tmp_path / "pub_off_edge"
+    seal_dir = tmp_path / "seal_off_edge"
+    valid_pairs = [writer.render_scenario_pair(generate_world(c)) for c in make_balanced_configs(8, base_seed=20261030)]
+    receipt = write_sealed_dataset(valid_pairs, pub_dir, seal_dir, private_seed_hex="ab" * 32)
+    meta = json.loads(receipt.sealing_meta_path.read_text(encoding="utf-8"))
+    meta["scenarios"]["scen_0000"]["doorways"] = []
+    receipt.sealing_meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(SealingError, match="topology|doorway|validation failed"):
+        verify_sealed_part(pub_dir, seal_dir)
+
+
+def test_14_contradictory_occlusion_world_raises() -> None:
+    """Test 14: All 300 worlds have consistent occlusion, and a contradictory-occlusion world raises in validate_occlusion."""
+    import udlab_generator as ug
+
+    validate_occlusion_fn = getattr(ug, "validate_occlusion", None)
+    configs = make_balanced_configs(300, base_seed=20261030)
+
+    # Check scen_0000 and all 300 scenarios for contradictory visibility or cross-room container inspections
+    for cfg in configs:
+        w = generate_world(cfg)
+        all_containers = {c for pair in w.containers_by_room.values() for c in pair}
+        stations = {ag: "container bay" for ag in w.agents}
+        occupants = dict(w.initial_agent_rooms)
+        for ev in w.events:
+            if ev.kind == "enter":
+                occupants[ev.actor] = ev.room
+                stations[ev.actor] = "container bay"
+            elif ev.kind == "leave":
+                occupants.pop(ev.actor, None)
+            elif (
+                ev.kind == "move"
+                and ev.from_location in ("container bay", "far-side alcove")
+                and ev.to_location in ("container bay", "far-side alcove")
+            ):
+                stations[ev.actor] = str(ev.to_location)
+            elif ev.kind in ("move", "see"):
+                room_conts = set(w.containers_by_room[ev.room])
+                for loc in (ev.target_object, ev.from_location, ev.to_location):
+                    if loc in all_containers:
+                        assert loc in room_conts, (
+                            f"{w.scenario_id} step {ev.step}: {ev.actor} in {ev.room} references container '{loc}' from another room."
+                        )
+                if ev.kind == "see" and ev.target_object in room_conts:
+                    expected_occ = stations.get(ev.actor) == "far-side alcove"
+                    assert bool(ev.occluded) == expected_occ, (
+                        f"{w.scenario_id} step {ev.step}: contradictory occlusion for {ev.actor} on '{ev.target_object}' "
+                        f"at station '{stations.get(ev.actor)}' (occluded={ev.occluded})."
+                    )
+
+    assert callable(validate_occlusion_fn), "validate_occlusion must be exported by udlab_generator."
+    for cfg in configs:
+        w = generate_world(cfg)
+        validate_occlusion_fn(w)
+        prose = render_world_template(w, w.agents[0])
+        assert "between the far-side alcove and the container bay" in prose
+        for sent in prose.split("\n\n")[-1].split(". "):
+            assert not ("in open view" in sent and "blocked" in sent), (
+                f"{w.scenario_id}: sentence says both 'in open view' and 'blocked': {sent}"
+            )
+
+    # Build a contradictory-occlusion world (agent in open view at container bay sees move in open view,
+    # then at the next step is blocked by the occluder on the same container without changing station)
+    w0 = generate_world(configs[0])
+    r_work = next(ev.room for ev in w0.events if ev.kind == "move" and ev.fact_variable == w0.primary_variable)
+    c0, _ = w0.containers_by_room[r_work]
+    contradictory_see = Event(
+        step=len(w0.events) + 1,
+        kind="see",
+        actor=w0.agents[2],
+        room=r_work,
+        target_object=c0,
+        from_location="container bay",
+        to_location="container bay",
+        occluded=True,
+        occluder=w0.occluders_by_room[r_work],
+    )
+    # Place agents[2] in r_work at container bay right before contradictory_see
+    enter_work = (
+        Event(
+            step=len(w0.events) + 1,
+            kind="leave",
+            actor=w0.agents[0],
+            room=w0.initial_agent_rooms[w0.agents[0]],
+            from_location=w0.initial_agent_rooms[w0.agents[0]],
+            to_location=r_work,
+        ),
+        Event(
+            step=len(w0.events) + 2,
+            kind="enter",
+            actor=w0.agents[0],
+            room=r_work,
+            from_location=w0.initial_agent_rooms[w0.agents[0]],
+            to_location=r_work,
+        ),
+        replace(contradictory_see, step=len(w0.events) + 3, actor=w0.agents[0]),
+    )
+    bad_occ_world = replace(
+        w0,
+        events=w0.events + enter_work,
+        unknowable_spec=replace(
+            w0.unknowable_spec,
+            trace_a=w0.events + enter_work,
+            trace_b=w0.events + enter_work,
+        ),
+    )
+    with pytest.raises(ValueError, match="occlusion|contradictory|container bay|open view"):
+        validate_occlusion_fn(bad_occ_world)
+
+
+def test_15_independent_recount_hearing_and_knowledge_keys() -> None:
+    """Test 15: Independent recount of every hearing and knowledge key from the event log across all 300 scenarios."""
+    import udlab_generator as ug
+
+    validate_hearing_fn = getattr(ug, "validate_hearing", None)
+
+    def _independent_recount(w: ug.World) -> dict[str, object]:
+        edges = {
+            (a, b) for a, b in w.doorways
+        } | {
+            (b, a) for a, b in w.doorways
+        }
+        room_of: dict[str, str | None] = {ag: w.initial_agent_rooms[ag] for ag in w.agents}
+        station_of: dict[str, str] = {ag: "container bay" for ag in w.agents}
+        all_parties = list(w.agents) + list(w.absent_parties)
+        seen: dict[str, list[int]] = {p: [] for p in all_parties}
+        heard: dict[str, list[int]] = {p: [] for p in all_parties}
+        messaged: dict[str, list[int]] = {p: [] for p in all_parties}
+        admissible: dict[str, list[int]] = {p: [] for p in all_parties}
+        grounded_val: dict[str, dict[str, str]] = {p: {} for p in all_parties}
+        true_val_by_var: dict[str, str] = {}
+        last_change_step_by_var: dict[str, int] = {}
+        obs_by_party_var: dict[tuple[str, str], tuple[str, int]] = {}
+        b2_joint_val: str | None = None
+
+        for ev in w.events:
+            if ev.kind == "leave":
+                assert room_of.get(ev.actor) == ev.room == ev.from_location, (
+                    f"{w.scenario_id} step {ev.step}: {ev.actor} leaves {ev.room} while in {room_of.get(ev.actor)}"
+                )
+                assert (ev.from_location, ev.to_location) in edges, (
+                    f"{w.scenario_id} step {ev.step}: off-edge leave {ev.from_location} -> {ev.to_location}"
+                )
+            elif ev.kind == "enter":
+                assert room_of.get(ev.actor) is None, (
+                    f"{w.scenario_id} step {ev.step}: {ev.actor} enters {ev.room} without leaving previous room"
+                )
+                assert (ev.from_location, ev.to_location) in edges and ev.room == ev.to_location, (
+                    f"{w.scenario_id} step {ev.step}: off-edge enter {ev.from_location} -> {ev.to_location}"
+                )
+                room_of[ev.actor] = ev.room
+                station_of[ev.actor] = "container bay"
+            else:
+                assert room_of.get(ev.actor) == ev.room, (
+                    f"{w.scenario_id} step {ev.step}: {ev.actor} acts in {ev.room} while in {room_of.get(ev.actor)}"
+                )
+
+            is_station_move = (
+                ev.kind == "move"
+                and ev.from_location in ("container bay", "far-side alcove")
+                and ev.to_location in ("container bay", "far-side alcove")
+            )
+            if is_station_move:
+                station_of[ev.actor] = str(ev.to_location)
+
+            room_conts = set(w.containers_by_room.get(ev.room, ()))
+            is_cont_ev = (
+                ev.kind in ("move", "see")
+                and not is_station_move
+                and (
+                    ev.target_object in room_conts
+                    or ev.from_location in room_conts
+                    or ev.to_location in room_conts
+                )
+            )
+
+            if not ev.is_bluff and ev.kind in ("move", "see") and ev.fact_variable and ev.fact_value is not None:
+                if true_val_by_var.get(ev.fact_variable) != ev.fact_value:
+                    last_change_step_by_var[ev.fact_variable] = ev.step
+                true_val_by_var[ev.fact_variable] = ev.fact_value
+
+            speaker_ok = not ev.is_bluff
+            if speaker_ok and ev.kind in ("say", "message") and ev.fact_variable and ev.fact_value is not None:
+                if grounded_val[ev.actor].get(ev.fact_variable) != ev.fact_value:
+                    speaker_ok = False
+
+            for p in all_parties:
+                p_room = room_of.get(p) if p in w.agents else None
+                # Sight check from the single room + station occlusion rule
+                p_saw = False
+                if p_room is not None and p_room == ev.room and ev.kind not in ("say", "message"):
+                    if is_station_move:
+                        p_saw = True
+                    else:
+                        far_side = station_of.get(p) == "far-side alcove"
+                        blocked = bool(ev.occluded) or (is_cont_ev and far_side)
+                        if ev.kind == "see":
+                            p_saw = not blocked
+                        else:
+                            p_saw = (p == ev.actor) or (not blocked)
+
+                # Hearing check from doorway adjacency and noise threshold
+                p_heard = False
+                if p_room is not None and ev.kind == "say":
+                    if p_room == ev.room:
+                        p_heard = True
+                    elif (p_room, ev.room) in edges and ev.noise_level < w.noise_threshold:
+                        p_heard = True
+
+                # Direct message check
+                p_msg = ev.kind == "message" and (p == ev.recipient or p == ev.actor)
+
+                if p_saw:
+                    seen[p].append(ev.step)
+                if p_heard:
+                    heard[p].append(ev.step)
+                if p_msg:
+                    messaged[p].append(ev.step)
+                if p_saw or ((p_heard or p_msg) and speaker_ok):
+                    admissible[p].append(ev.step)
+                    if ev.fact_variable and ev.fact_value is not None:
+                        grounded_val[p][ev.fact_variable] = ev.fact_value
+                        obs_by_party_var[(p, ev.fact_variable)] = (ev.fact_value, ev.step)
+
+            if (
+                ev.fact_variable == w.primary_variable
+                and ev.fact_value is not None
+                and ev.step in admissible[w.b2_observer]
+                and ev.step in admissible[w.b2_actor]
+            ):
+                if (
+                    room_of.get(w.b2_observer) == room_of.get(w.b2_actor) == ev.room
+                    and station_of.get(w.b2_observer) == "container bay"
+                    and station_of.get(w.b2_actor) == "container bay"
+                    and not ev.occluded
+                ):
+                    b2_joint_val = ev.fact_value
+
+            if ev.kind == "leave":
+                room_of[ev.actor] = None
+
+        def _knows(party: str, var: str) -> bool:
+            if var not in true_val_by_var or (party, var) not in obs_by_party_var:
+                return False
+            val, st = obs_by_party_var[(party, var)]
+            return val == true_val_by_var[var] and st >= last_change_step_by_var[var]
+
+        known_facts = {
+            p: tuple(sorted(fid for fid, fspec in w.facts.items() if _knows(p, fspec.variable)))
+            for p in all_parties
+        }
+        p_key = "yes" if last_change_step_by_var[w.primary_variable] in seen[w.p_agent] else "no"
+        k_key = "yes" if _knows(w.k_agent, w.secondary_variable) else "no"
+        b1_key = obs_by_party_var[(w.b1_agent, w.primary_variable)][0]
+        assert b2_joint_val is not None
+        b2_key = b2_joint_val
+        x_unnotified = [
+            edge.agent
+            for edge in w.stake_edges
+            if edge.variable == w.primary_variable and not _knows(edge.agent, w.primary_variable)
+        ]
+        x_key = x_unnotified[0] if x_unnotified else "none"
+        d_key = tuple(
+            sorted(
+                (set(known_facts[w.d_helper]) - set(known_facts[w.d_target]))
+                & set(w.goals[w.d_target].causal_preconditions)
+            )
+        )
+        return {
+            "seen": {p: tuple(seen[p]) for p in all_parties},
+            "heard": {p: tuple(heard[p]) for p in all_parties},
+            "messaged": {p: tuple(messaged[p]) for p in all_parties},
+            "admissible": {p: tuple(admissible[p]) for p in all_parties},
+            "known_facts": known_facts,
+            "P": p_key,
+            "K": k_key,
+            "B1": b1_key,
+            "B2": b2_key,
+            "X": x_key,
+            "D": d_key,
+        }
+
+    for cfg in make_balanced_configs(300, base_seed=20261030):
+        w = generate_world(cfg)
+        recounted = _independent_recount(w)
+        assert callable(validate_hearing_fn), "validate_hearing must be exported by udlab_generator."
+        validate_hearing_fn(w)
+        skeys = compute_scenario_keys(w)
+        for p, rec in skeys.perceptual_records.items():
+            assert rec.heard_steps == recounted["heard"][p]  # type: ignore[index]
+            assert rec.seen_steps == recounted["seen"][p]  # type: ignore[index]
+            assert rec.messaged_steps == recounted["messaged"][p]  # type: ignore[index]
+            assert rec.admissible_steps == recounted["admissible"][p]  # type: ignore[index]
+        assert skeys.known_facts_by_agent == recounted["known_facts"]
+        q_map = {q.question_type: q.key for q in skeys.questions}
+        for qtype in ("P", "K", "B1", "B2", "X", "D"):
+            assert q_map[qtype] == recounted[qtype], f"{w.scenario_id} {qtype} mismatch"
+

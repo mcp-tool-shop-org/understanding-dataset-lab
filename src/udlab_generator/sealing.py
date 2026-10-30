@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import hmac
 import json
@@ -16,8 +16,22 @@ from udlab_generator.keys import (
     build_pressure_probe_turn2,
     build_public_pressure_probe_map,
     build_public_pressure_probe_template,
+    compute_scenario_keys,
+    validate_hearing,
+    validate_occlusion,
+    validate_topology,
 )
 from udlab_generator.render import RenderedScenario
+from udlab_generator.world import (
+    AgentGoal,
+    Event,
+    FactSpec,
+    ScenarioConfig,
+    SettledTwinSpec,
+    StakeEdge,
+    UnknowableSpec,
+    World,
+)
 
 FORBIDDEN_PUBLIC_FIELDS: frozenset[str] = frozenset(
     {
@@ -218,6 +232,88 @@ def check_not_in_key_order(
                                 )
 
 
+def _serialize_world(world: World) -> dict[str, Any]:
+    """Serialize a `World` dataclass to a JSON-compatible dictionary for sealed verification."""
+    return asdict(world)
+
+
+def _deserialize_world(data: dict[str, Any]) -> World:
+    """Reconstruct a `World` dataclass from a dictionary stored in `sealing.sealed.json`."""
+    events = tuple(Event(**ev) for ev in data["events"])
+    u_raw = data["unknowable_spec"]
+    unknowable_spec = UnknowableSpec(
+        subtype=u_raw["subtype"],
+        question_text=u_raw["question_text"],
+        alternative_a=u_raw["alternative_a"],
+        alternative_b=u_raw["alternative_b"],
+        target_agent=u_raw["target_agent"],
+        side_action_desc=u_raw["side_action_desc"],
+        trace_a=tuple(Event(**ev) for ev in u_raw["trace_a"]),
+        trace_b=tuple(Event(**ev) for ev in u_raw["trace_b"]),
+        latent_state_a=dict(u_raw["latent_state_a"]) if u_raw.get("latent_state_a") is not None else None,
+        latent_state_b=dict(u_raw["latent_state_b"]) if u_raw.get("latent_state_b") is not None else None,
+    )
+    s_raw = data["settled_twin_spec"]
+    settled_twin_spec = SettledTwinSpec(**s_raw)
+    cfg_raw = data.get("config")
+    config = ScenarioConfig(**cfg_raw) if cfg_raw is not None else None
+
+    return World(
+        scenario_id=str(data["scenario_id"]),
+        seed=int(data["seed"]),
+        domain_name=str(data["domain_name"]),
+        rooms=tuple(data["rooms"]),
+        doorways=tuple(( str(edge[0]), str(edge[1]) ) for edge in data["doorways"]),
+        objects=(
+            str(data["objects"][0]),
+            str(data["objects"][1]),
+            str(data["objects"][2]),
+        ),
+        containers_by_room={
+            str(r): tuple(str(c) for c in pair)
+            for r, pair in data["containers_by_room"].items()
+        },
+        occluders_by_room={str(r): str(occ) for r, occ in data["occluders_by_room"].items()},
+        fixtures_by_room={str(r): str(fix) for r, fix in data["fixtures_by_room"].items()},
+        noise_threshold=int(data["noise_threshold"]),
+        agents=tuple(str(a) for a in data["agents"]),
+        absent_parties=tuple(str(a) for a in data["absent_parties"]),
+        initial_agent_rooms={str(a): str(r) for a, r in data["initial_agent_rooms"].items()},
+        stake_edges=tuple(StakeEdge(**se) for se in data["stake_edges"]),
+        goals={
+            str(ag): AgentGoal(
+                agent=str(g["agent"]),
+                goal_text=str(g["goal_text"]),
+                causal_preconditions=tuple(str(fid) for fid in g["causal_preconditions"]),
+            )
+            for ag, g in data["goals"].items()
+        },
+        facts={str(fid): FactSpec(**f) for fid, f in data["facts"].items()},
+        events=events,
+        unknowable_spec=unknowable_spec,
+        settled_twin_spec=settled_twin_spec,
+        primary_object=str(data["primary_object"]),
+        primary_variable=str(data["primary_variable"]),
+        secondary_object=str(data["secondary_object"]),
+        secondary_variable=str(data["secondary_variable"]),
+        aux_object=str(data["aux_object"]),
+        aux_variable=str(data["aux_variable"]),
+        bluff_event_step=int(data["bluff_event_step"]),
+        bluffer_agent=str(data["bluffer_agent"]),
+        bluff_listener=str(data["bluff_listener"]),
+        bluff_claimed_location=str(data["bluff_claimed_location"]),
+        p_agent=str(data["p_agent"]),
+        k_agent=str(data["k_agent"]),
+        b1_agent=str(data["b1_agent"]),
+        b2_observer=str(data["b2_observer"]),
+        b2_actor=str(data["b2_actor"]),
+        d_helper=str(data["d_helper"]),
+        d_target=str(data["d_target"]),
+        primary_absent=str(data["primary_absent"]),
+        config=config,
+    )
+
+
 def _render_public_from_sealed(
     sealed_rows: Sequence[dict[str, Any]],
     sealing_meta: dict[str, Any],
@@ -379,6 +475,15 @@ def write_sealed_dataset(
     keys_sha = hashlib.sha256(keys_bytes).hexdigest()
 
     commitment_hmac = _hmac_hex(seed_hex, f"commitment:{keys_sha}", 64)
+    serialized_worlds: dict[str, dict[str, Any]] = {}
+    for r0, r1 in rendered_pairs:
+        w_obj = r0.world or r1.world
+        if w_obj is not None:
+            validate_topology(w_obj)
+            validate_occlusion(w_obj)
+            validate_hearing(w_obj)
+            serialized_worlds[w_obj.scenario_id] = _serialize_world(w_obj)
+
     sealing_meta: dict[str, Any] = {
         "schema_version": "udlab.sealing.v1",
         "private_seed_hex": seed_hex,
@@ -387,6 +492,7 @@ def write_sealed_dataset(
         "keys_sealed_file": "keys.sealed.jsonl",
         "keys_sealed_sha256": keys_sha,
         "commitment_hmac_sha256": commitment_hmac,
+        "scenarios": serialized_worlds,
     }
     sealing_meta_bytes = _canonical_json_doc(sealing_meta).encode("utf-8")
 
@@ -482,3 +588,34 @@ def verify_sealed_part(public_dir: Path, sealed_dir: Path) -> None:
         expected_part_doc,
         private_seed_hex=seed_hex,
     )
+
+    # Validate topology, occlusion, and hearing for every scenario stored in the sealed metadata,
+    # and verify that sealed keys match the validated world state.
+    scenarios_meta = sealing_meta.get("scenarios", {})
+    if isinstance(scenarios_meta, dict):
+        validated_keys_by_scen: dict[str, Any] = {}
+        for scen_id, w_dict in sorted(scenarios_meta.items()):
+            w_obj = _deserialize_world(w_dict)
+            try:
+                validate_topology(w_obj)
+                validate_occlusion(w_obj)
+                validate_hearing(w_obj)
+            except ValueError as exc:
+                raise SealingError(f"Sealed world validation failed for {scen_id}: {exc}") from exc
+            validated_keys_by_scen[scen_id] = compute_scenario_keys(w_obj)
+
+        for s_row in sealed_rows:
+            scen_id = str(s_row.get("scenario_id", ""))
+            if scen_id in validated_keys_by_scen:
+                expected_skeys = validated_keys_by_scen[scen_id]
+                expected_q_by_slot = {qk.slot_id: qk for qk in expected_skeys.questions}
+                for q_dict in s_row.get("questions", []):
+                    slot_id = str(q_dict.get("slot_id", ""))
+                    if slot_id not in expected_q_by_slot:
+                        raise SealingError(f"Unknown slot_id '{slot_id}' in {scen_id}.")
+                    exp_q = expected_q_by_slot[slot_id]
+                    exp_key_ser = list(exp_q.key) if isinstance(exp_q.key, tuple) else exp_q.key
+                    if q_dict.get("key") != exp_key_ser:
+                        raise SealingError(
+                            f"Sealed key mismatch in {scen_id} {slot_id}: got {q_dict.get('key')!r}, expected {exp_key_ser!r}."
+                        )

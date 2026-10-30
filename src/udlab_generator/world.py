@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import hashlib
 import itertools
@@ -9,6 +10,19 @@ import random
 from typing import Literal
 
 EventKind = Literal["enter", "leave", "move", "say", "see", "message"]
+
+CONTAINER_BAY_STATION: str = "container bay"
+FAR_SIDE_ALCOVE_STATION: str = "far-side alcove"
+
+OCCLUSION_RULE: str = (
+    "In each room, the room's occluder stands between the far-side alcove "
+    "(where the room fixture and side mechanism sit) and the container bay "
+    "(where the room's two storage containers stand). "
+    "An agent at the container bay is in open view of both containers and any "
+    "event at them (occluded=False); an agent at the far-side alcove is on the "
+    "far side of the occluder, which blocks line of sight to events at, and the "
+    "contents of, the room's containers (occluded=True)."
+)
 
 FACT_ID_PERMUTATIONS: tuple[tuple[str, str, str, str], ...] = tuple(
     itertools.permutations(("F1", "F2", "F3", "F4"))
@@ -338,6 +352,180 @@ def are_rooms_adjacent(
     return (room_a, room_b) in doorways or (room_b, room_a) in doorways
 
 
+def shortest_doorway_path(
+    start_room: str,
+    end_room: str,
+    doorways: tuple[tuple[str, str], ...],
+) -> tuple[str, ...]:
+    """Return the shortest doorway path `(start_room, ..., end_room)` over `doorways`."""
+    if start_room == end_room:
+        return (start_room,)
+    queue: deque[tuple[str, ...]] = deque([(start_room,)])
+    visited: set[str] = {start_room}
+    neighbors_by_room: dict[str, list[str]] = {}
+    for r_a, r_b in doorways:
+        neighbors_by_room.setdefault(r_a, []).append(r_b)
+        neighbors_by_room.setdefault(r_b, []).append(r_a)
+
+    while queue:
+        path = queue.popleft()
+        cur = path[-1]
+        for nxt in neighbors_by_room.get(cur, ()):
+            if nxt == end_room:
+                return (*path, nxt)
+            if nxt not in visited:
+                visited.add(nxt)
+                queue.append((*path, nxt))
+    raise ValueError(f"No doorway path between '{start_room}' and '{end_room}' in {doorways}.")
+
+
+def _append_doorway_walk(
+    events: list[Event],
+    step: int,
+    actor: str,
+    start_room: str,
+    end_room: str,
+    doorways: tuple[tuple[str, str], ...],
+) -> int:
+    """Append one `leave`/`enter` pair per doorway hop along the shortest path from `start_room` to `end_room`."""
+    path = shortest_doorway_path(start_room, end_room, doorways)
+    for hop_idx in range(len(path) - 1):
+        r_from = path[hop_idx]
+        r_to = path[hop_idx + 1]
+        events.append(
+            Event(
+                step=step,
+                kind="leave",
+                actor=actor,
+                room=r_from,
+                from_location=r_from,
+                to_location=r_to,
+            )
+        )
+        step += 1
+        events.append(
+            Event(
+                step=step,
+                kind="enter",
+                actor=actor,
+                room=r_to,
+                from_location=r_from,
+                to_location=r_to,
+            )
+        )
+        step += 1
+    return step
+
+
+def is_station_transition_event(event: Event, world: World | None = None) -> bool:
+    """Return True if `event` moves an agent between `container bay` and `far-side alcove` within a room."""
+    if event.kind != "move":
+        return False
+    valid_stations = (CONTAINER_BAY_STATION, FAR_SIDE_ALCOVE_STATION)
+    if event.from_location not in valid_stations or event.to_location not in valid_stations:
+        return False
+    if world is not None and event.room in world.occluders_by_room:
+        return event.target_object == world.occluders_by_room[event.room]
+    return True
+
+
+def is_container_event(event: Event, world: World) -> bool:
+    """Return True if `event` is a `move` or `see` involving a storage container in `world`."""
+    if event.kind not in ("move", "see") or is_station_transition_event(event, world):
+        return False
+    all_containers = {c for pair in world.containers_by_room.values() for c in pair}
+    return (
+        event.target_object in all_containers
+        or event.from_location in all_containers
+        or event.to_location in all_containers
+    )
+
+
+def validate_topology(world: World) -> None:
+    """Validate that every `leave`/`enter` hop is a doorway in `world.doorways` and every agent's location sequence is continuous."""
+    valid_rooms = set(world.rooms)
+    current_room: dict[str, str | None] = {}
+    pending_hop: dict[str, tuple[str, str] | None] = {}
+
+    for ag in world.agents:
+        init_r = world.initial_agent_rooms.get(ag)
+        if init_r is None or init_r not in valid_rooms:
+            raise ValueError(
+                f"Scenario {world.scenario_id} topology error: agent '{ag}' has invalid initial room '{init_r}'."
+            )
+        current_room[ag] = init_r
+        pending_hop[ag] = None
+
+    for ev in world.events:
+        if ev.actor not in current_room:
+            raise ValueError(
+                f"Scenario {world.scenario_id} step {ev.step} topology error: unknown active agent '{ev.actor}'."
+            )
+        if ev.room not in valid_rooms:
+            raise ValueError(
+                f"Scenario {world.scenario_id} step {ev.step} topology error: invalid room '{ev.room}'."
+            )
+
+        if ev.kind == "leave":
+            if pending_hop[ev.actor] is not None:
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} topology error: "
+                    f"{ev.actor} leaves '{ev.room}' while already in transit {pending_hop[ev.actor]} (not continuous)."
+                )
+            if current_room[ev.actor] != ev.room:
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} topology error: "
+                    f"{ev.actor} is not in room '{ev.room}' (current location is '{current_room[ev.actor]}', not continuous)."
+                )
+            if ev.from_location != ev.room or ev.to_location is None or ev.to_location not in valid_rooms:
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} topology error: "
+                    f"invalid leave endpoints {ev.from_location!r} -> {ev.to_location!r}."
+                )
+            if not are_rooms_adjacent(ev.from_location, ev.to_location, world.doorways):
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} topology error: "
+                    f"leave hop '{ev.from_location}' -> '{ev.to_location}' is not a doorway (not adjacent in doorways)."
+                )
+            current_room[ev.actor] = None
+            pending_hop[ev.actor] = (ev.from_location, ev.to_location)
+
+        elif ev.kind == "enter":
+            hop = pending_hop[ev.actor]
+            if hop is None:
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} topology error: "
+                    f"{ev.actor} enters '{ev.room}' without a preceding leave (location sequence not continuous)."
+                )
+            if (ev.from_location, ev.to_location) != hop or ev.room != ev.to_location:
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} topology error: "
+                    f"{ev.actor} enter endpoints ({ev.from_location!r} -> {ev.to_location!r} in {ev.room!r}) "
+                    f"do not match pending hop {hop} (not continuous)."
+                )
+            if not are_rooms_adjacent(ev.from_location, ev.to_location, world.doorways):
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} topology error: "
+                    f"enter hop '{ev.from_location}' -> '{ev.to_location}' is not a doorway (not adjacent in doorways)."
+                )
+            current_room[ev.actor] = ev.room
+            pending_hop[ev.actor] = None
+
+        else:
+            if pending_hop[ev.actor] is not None or current_room[ev.actor] != ev.room:
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} topology error: "
+                    f"{ev.actor} performs '{ev.kind}' in room '{ev.room}' while not in room "
+                    f"(current location is '{current_room[ev.actor]}', not continuous)."
+                )
+
+    for ag, hop in pending_hop.items():
+        if hop is not None:
+            raise ValueError(
+                f"Scenario {world.scenario_id} topology error: agent '{ag}' left in transit {hop} at end of log."
+            )
+
+
 def make_balanced_configs(count: int, base_seed: int = 20261030) -> list[ScenarioConfig]:
     """Build `count` scenario configurations with exact 50/50 balance and orthogonal label axes."""
     if count <= 0:
@@ -426,10 +614,46 @@ def _select_room_roles(
     doorways: tuple[tuple[str, str], ...],
     need_hub_sec_adjacent: bool,
 ) -> tuple[str, str, str, str]:
-    """Select `(r_hub, r_work, r_sec_a, r_sec_b)` from `perm_rooms` matching doorway adjacency."""
-    for p in itertools.permutations(perm_rooms):
-        if are_rooms_adjacent(p[0], p[2], doorways) == need_hub_sec_adjacent:
-            return p[0], p[1], p[2], p[3]
+    """Select `(r_hub, r_work, r_sec_a, r_sec_b)` from `perm_rooms` matching doorway adjacency.
+
+    Guarantees:
+    - `(r_hub, r_work)` is always a doorway in `doorways`.
+    - `r_hub` has at least one additional doorway neighbor in `{r_sec_a, r_sec_b}` for `p_can_see=False`.
+    - When `need_hub_sec_adjacent` is True, `(r_hub, r_sec_a)` is a doorway in `doorways`.
+    - When `need_hub_sec_adjacent` is False, prefers `(r_hub, r_sec_a)` non-adjacent with `(r_work, r_sec_a)`
+      and `(r_hub, r_sec_b)` adjacent (possible in `chain`, `cycle`, `diamond`), falling back to the
+      degree-3 hub in `star` and `tee`.
+    """
+    if need_hub_sec_adjacent:
+        for p in itertools.permutations(perm_rooms):
+            if (
+                are_rooms_adjacent(p[0], p[1], doorways)
+                and are_rooms_adjacent(p[0], p[2], doorways)
+                and are_rooms_adjacent(p[1], p[2], doorways)
+            ):
+                return p[0], p[1], p[2], p[3]
+        for p in itertools.permutations(perm_rooms):
+            if are_rooms_adjacent(p[0], p[1], doorways) and are_rooms_adjacent(p[0], p[2], doorways):
+                return p[0], p[1], p[2], p[3]
+    else:
+        for p in itertools.permutations(perm_rooms):
+            if (
+                are_rooms_adjacent(p[0], p[1], doorways)
+                and are_rooms_adjacent(p[0], p[3], doorways)
+                and not are_rooms_adjacent(p[0], p[2], doorways)
+                and are_rooms_adjacent(p[1], p[2], doorways)
+            ):
+                return p[0], p[1], p[2], p[3]
+        for p in itertools.permutations(perm_rooms):
+            if (
+                are_rooms_adjacent(p[0], p[1], doorways)
+                and are_rooms_adjacent(p[0], p[3], doorways)
+                and not are_rooms_adjacent(p[0], p[2], doorways)
+            ):
+                return p[0], p[1], p[2], p[3]
+        for p in itertools.permutations(perm_rooms):
+            if are_rooms_adjacent(p[0], p[1], doorways) and are_rooms_adjacent(p[0], p[2], doorways):
+                return p[0], p[1], p[2], p[3]
     return perm_rooms[0], perm_rooms[1], perm_rooms[2], perm_rooms[3]
 
 
@@ -546,82 +770,50 @@ def _build_event_trace(
     )
     step += 1
 
-    # Move a1 and a2 from r_hub into r_work to initialize primary_object.
+    # Move a1 and a2 from r_hub into r_work along doorway (r_hub, r_work) to initialize primary_object.
     for actor in (a1, a2):
-        events.append(
-            Event(
-                step=step,
-                kind="leave",
-                actor=actor,
-                room=r_hub,
-                from_location=r_hub,
-                to_location=r_work,
-            )
-        )
-        step += 1
-        events.append(
-            Event(
-                step=step,
-                kind="enter",
-                actor=actor,
-                room=r_work,
-                from_location=r_hub,
-                to_location=r_work,
-            )
-        )
-        step += 1
+        step = _append_doorway_walk(events, step, actor, r_hub, r_work, doorways)
 
-    # Optional extra-agent movements (creates diverse canonical event skeletons across scenarios).
+    current_agent_rooms: dict[str, str] = dict(initial_rooms)
+    current_agent_rooms[a1] = r_work
+    current_agent_rooms[a2] = r_work
+
+    # Optional extra-agent movements along doorway edges (creates diverse canonical event skeletons).
     for ea_idx, ea in enumerate(extra_agents):
-        ea_cur = initial_rooms[ea]
-        ea_next = perm_rooms[(ea_idx + 2 + (config.seed % 2)) % len(perm_rooms)]
-        if ea_cur != ea_next and ((config.seed >> ea_idx) & 1):
-            events.append(
-                Event(
-                    step=step,
-                    kind="leave",
-                    actor=ea,
-                    room=ea_cur,
-                    from_location=ea_cur,
-                    to_location=ea_next,
-                )
-            )
-            step += 1
-            events.append(
-                Event(
-                    step=step,
-                    kind="enter",
-                    actor=ea,
-                    room=ea_next,
-                    from_location=ea_cur,
-                    to_location=ea_next,
-                )
-            )
-            step += 1
-            initial_rooms_current_ea = ea_next
-        else:
-            initial_rooms_current_ea = ea_cur
+        ea_cur = current_agent_rooms[ea]
+        ea_neighbors = [r for r in perm_rooms if are_rooms_adjacent(ea_cur, r, doorways)]
+        ea_next = ea_neighbors[(ea_idx + (config.seed % 2)) % len(ea_neighbors)]
+        if (config.seed >> ea_idx) & 1:
+            step = _append_doorway_walk(events, step, ea, ea_cur, ea_next, doorways)
+            current_agent_rooms[ea] = ea_next
         if (config.seed + ea_idx) % 3 == 0:
+            ea_room = current_agent_rooms[ea]
             events.append(
                 Event(
                     step=step,
                     kind="see",
                     actor=ea,
-                    room=initial_rooms_current_ea,
-                    target_object=fixtures_by_room[initial_rooms_current_ea],
-                    from_location=initial_rooms_current_ea,
-                    to_location=initial_rooms_current_ea,
+                    room=ea_room,
+                    target_object=fixtures_by_room[ea_room],
+                    from_location=FAR_SIDE_ALCOVE_STATION,
+                    to_location=FAR_SIDE_ALCOVE_STATION,
                     occluded=False,
                 )
             )
             step += 1
 
-    # Execute the initial placement of `primary_object` in `r_work` with exact mention parity
-    # (`count(cont_init) == count(cont_final)`) across all 4 `(b1_true_belief, b2_true_belief)` cells:
+    occ_work = occluders_by_room[r_work]
+    a1_current_room = r_work
+
+    # Execute the initial placement of `primary_object` in `r_work` using the single station-based
+    # occlusion rule (`container bay` in open view vs `far-side alcove` behind `occ_work`) with exact
+    # mention parity (`count(cont_init) == count(cont_final)`) across all 4 `(B1, B2)` cells:
     if not config.b1_true_belief and config.b2_true_belief:
-        # a1 and a2 first see `primary_object` placed at `cont_final`; then `a2` steps out to `r_hub`
-        # while `a1` moves `primary_object` to `cont_init`; then `a1` leaves `r_work` to `r_hub`
-        # and `a2` re-enters `r_work` before the final move back to `cont_final`.
+        # Cell (B1=False, B2=True):
+        # 1. Both a1 and a2 at `container bay` see a2 place `primary_object` in `cont_final` (`F0a`).
+        # 2. a2 steps behind `occ_work` to `far-side alcove`.
+        # 3. While a2 is occluded at `far-side alcove`, a1 moves `primary_object` from `cont_final` to `cont_init` (`F0`).
+        # 4. a1 steps behind `occ_work` to `far-side alcove`, and a2 returns to `container bay` before the final move.
         events.append(
             Event(
                 step=step,
@@ -641,22 +833,13 @@ def _build_event_trace(
         events.append(
             Event(
                 step=step,
-                kind="leave",
+                kind="move",
                 actor=a2,
                 room=r_work,
-                from_location=r_work,
-                to_location=r_hub,
-            )
-        )
-        step += 1
-        events.append(
-            Event(
-                step=step,
-                kind="enter",
-                actor=a2,
-                room=r_hub,
-                from_location=r_work,
-                to_location=r_hub,
+                target_object=occ_work,
+                from_location=CONTAINER_BAY_STATION,
+                to_location=FAR_SIDE_ALCOVE_STATION,
+                occluded=False,
             )
         )
         step += 1
@@ -679,50 +862,31 @@ def _build_event_trace(
         events.append(
             Event(
                 step=step,
-                kind="leave",
+                kind="move",
                 actor=a1,
                 room=r_work,
-                from_location=r_work,
-                to_location=r_hub,
+                target_object=occ_work,
+                from_location=CONTAINER_BAY_STATION,
+                to_location=FAR_SIDE_ALCOVE_STATION,
+                occluded=False,
             )
         )
         step += 1
         events.append(
             Event(
                 step=step,
-                kind="enter",
-                actor=a1,
-                room=r_hub,
-                from_location=r_work,
-                to_location=r_hub,
-            )
-        )
-        step += 1
-        events.append(
-            Event(
-                step=step,
-                kind="leave",
-                actor=a2,
-                room=r_hub,
-                from_location=r_hub,
-                to_location=r_work,
-            )
-        )
-        step += 1
-        events.append(
-            Event(
-                step=step,
-                kind="enter",
+                kind="move",
                 actor=a2,
                 room=r_work,
-                from_location=r_hub,
-                to_location=r_work,
+                target_object=occ_work,
+                from_location=FAR_SIDE_ALCOVE_STATION,
+                to_location=CONTAINER_BAY_STATION,
+                occluded=False,
             )
         )
         step += 1
-        a1_current_room = r_hub
     else:
-        # First inspect `cont_final` in `r_work` before placing `primary_object` in `cont_init`
+        # First inspect `cont_final` at `container bay` in `r_work` before placing `primary_object` in `cont_init`
         # so both `cont_init` and `cont_final` have equal mention counts before and after the final move.
         events.append(
             Event(
@@ -731,8 +895,8 @@ def _build_event_trace(
                 actor=a2,
                 room=r_work,
                 target_object=cont_final,
-                from_location=r_work,
-                to_location=r_work,
+                from_location=CONTAINER_BAY_STATION,
+                to_location=CONTAINER_BAY_STATION,
                 occluded=False,
             )
         )
@@ -753,60 +917,30 @@ def _build_event_trace(
             )
         )
         step += 1
-        if config.b1_true_belief and config.b2_true_belief:
-            a1_current_room = r_work
-        else:
-            # a1 leaves r_work to r_hub before the final move.
+        if not (config.b1_true_belief and config.b2_true_belief):
+            # In (B1=True, B2=False) and (B1=False, B2=False), a1 steps behind `occ_work` to `far-side alcove`
+            # before the final move so `occ_work` blocks a1's view of the final move.
             events.append(
                 Event(
                     step=step,
-                    kind="leave",
+                    kind="move",
                     actor=a1,
                     room=r_work,
-                    from_location=r_work,
-                    to_location=r_hub,
+                    target_object=occ_work,
+                    from_location=CONTAINER_BAY_STATION,
+                    to_location=FAR_SIDE_ALCOVE_STATION,
+                    occluded=False,
                 )
             )
             step += 1
-            events.append(
-                Event(
-                    step=step,
-                    kind="enter",
-                    actor=a1,
-                    room=r_hub,
-                    from_location=r_work,
-                    to_location=r_hub,
-                )
-            )
-            step += 1
-            a1_current_room = r_hub
 
-    # Symmetric transition for `a0` before the final move of `primary_object` (`p_can_see`):
-    r_p_dest = r_work if config.p_can_see else r_sec_b
-    events.append(
-        Event(
-            step=step,
-            kind="leave",
-            actor=a0,
-            room=r_hub,
-            from_location=r_hub,
-            to_location=r_p_dest,
-        )
-    )
-    step += 1
-    events.append(
-        Event(
-            step=step,
-            kind="enter",
-            actor=a0,
-            room=r_p_dest,
-            from_location=r_hub,
-            to_location=r_p_dest,
-        )
-    )
-    step += 1
+    # Symmetric 1-hop doorway transition for `a0` before the final move of `primary_object` (`p_can_see`):
+    r_p_false = r_sec_b if are_rooms_adjacent(r_hub, r_sec_b, doorways) else r_sec_a
+    r_p_dest = r_work if config.p_can_see else r_p_false
+    step = _append_doorway_walk(events, step, a0, r_hub, r_p_dest, doorways)
+    current_agent_rooms[a0] = r_p_dest
 
-    # Final move of `primary_object` in `r_work` from `cont_init` to `cont_final` (`fid_primary`).
+    # Final move of `primary_object` in `r_work` from `cont_init` to `cont_final` (`fid_primary`) at `container bay`.
     events.append(
         Event(
             step=step,
@@ -834,59 +968,31 @@ def _build_event_trace(
             actor=a0,
             room=r_p_dest,
             target_object=fixtures_by_room[r_p_dest],
-            from_location=r_p_dest,
-            to_location=r_p_dest,
+            from_location=FAR_SIDE_ALCOVE_STATION,
+            to_location=FAR_SIDE_ALCOVE_STATION,
             occluded=False,
         )
     )
     step += 1
 
-    # Transition `a2` from `r_work` to `r_sec_a` for the secondary object phase.
-    events.append(
-        Event(
-            step=step,
-            kind="leave",
-            actor=a2,
-            room=r_work,
-            from_location=r_work,
-            to_location=r_sec_a,
-        )
-    )
-    step += 1
-    events.append(
-        Event(
-            step=step,
-            kind="enter",
-            actor=a2,
-            room=r_sec_a,
-            from_location=r_work,
-            to_location=r_sec_a,
-        )
-    )
-    step += 1
+    # Transition `a2` from `r_work` to `r_sec_a` along the shortest doorway path for the secondary object phase.
+    step = _append_doorway_walk(events, step, a2, r_work, r_sec_a, doorways)
+    current_agent_rooms[a2] = r_sec_a
 
-    # In the `(b1_true_belief and not b2_true_belief)` cell, `a1` now re-enters `r_work`
-    # while `a2` is in `r_sec_a` and observes `primary_object` at `cont_final` (after checking `cont_init`)!
+    # Post-move steps in `r_work` for `a1` (maintaining exact `(3, 3)` container mentions and ending at `far-side alcove`):
     if config.b1_true_belief and not config.b2_true_belief:
+        # While `a2` is in `r_sec_a`, `a1` steps around `occ_work` to `container bay`, inspects `cont_init`
+        # and `primary_object` at `cont_final` in open view (`occluded=False`), then steps back to `far-side alcove`.
         events.append(
             Event(
                 step=step,
-                kind="leave",
-                actor=a1,
-                room=a1_current_room,
-                from_location=a1_current_room,
-                to_location=r_work,
-            )
-        )
-        step += 1
-        events.append(
-            Event(
-                step=step,
-                kind="enter",
+                kind="move",
                 actor=a1,
                 room=r_work,
-                from_location=a1_current_room,
-                to_location=r_work,
+                target_object=occ_work,
+                from_location=FAR_SIDE_ALCOVE_STATION,
+                to_location=CONTAINER_BAY_STATION,
+                occluded=False,
             )
         )
         step += 1
@@ -897,8 +1003,8 @@ def _build_event_trace(
                 actor=a1,
                 room=r_work,
                 target_object=cont_init,
-                from_location=r_work,
-                to_location=r_work,
+                from_location=CONTAINER_BAY_STATION,
+                to_location=CONTAINER_BAY_STATION,
                 occluded=False,
             )
         )
@@ -919,41 +1025,108 @@ def _build_event_trace(
             )
         )
         step += 1
-        a1_current_room = r_work
+        events.append(
+            Event(
+                step=step,
+                kind="move",
+                actor=a1,
+                room=r_work,
+                target_object=occ_work,
+                from_location=CONTAINER_BAY_STATION,
+                to_location=FAR_SIDE_ALCOVE_STATION,
+                occluded=False,
+            )
+        )
+        step += 1
     elif not config.b1_true_belief and config.b2_true_belief:
-        # Equalize `cont_init` mention count with `cont_final` in this cell.
+        # `a1` is already at `far-side alcove` behind `occ_work`; looks toward `cont_init` (`occluded=True`).
         events.append(
             Event(
                 step=step,
                 kind="see",
                 actor=a1,
-                room=a1_current_room,
+                room=r_work,
                 target_object=cont_init,
-                from_location=a1_current_room,
-                to_location=a1_current_room,
+                from_location=FAR_SIDE_ALCOVE_STATION,
+                to_location=FAR_SIDE_ALCOVE_STATION,
                 occluded=True,
-                occluder=occluders_by_room[a1_current_room],
+                occluder=occ_work,
             )
         )
         step += 1
     else:
-        # In `(T, T)` and `(F, F)`, inspect both `cont_init` and `cont_final` (occluded) so all 4 cells
-        # have the exact same `(3, 3)` container mention counts before the message step.
+        if config.b1_true_belief and config.b2_true_belief:
+            # `a1` steps behind `occ_work` to `far-side alcove` before looking toward `cont_init` and `cont_final`.
+            events.append(
+                Event(
+                    step=step,
+                    kind="move",
+                    actor=a1,
+                    room=r_work,
+                    target_object=occ_work,
+                    from_location=CONTAINER_BAY_STATION,
+                    to_location=FAR_SIDE_ALCOVE_STATION,
+                    occluded=False,
+                )
+            )
+            step += 1
         for c_eq in (cont_init, cont_final):
             events.append(
                 Event(
                     step=step,
                     kind="see",
                     actor=a1,
-                    room=a1_current_room,
+                    room=r_work,
                     target_object=c_eq,
-                    from_location=a1_current_room,
-                    to_location=a1_current_room,
+                    from_location=FAR_SIDE_ALCOVE_STATION,
+                    to_location=FAR_SIDE_ALCOVE_STATION,
                     occluded=True,
-                    occluder=occluders_by_room[a1_current_room],
+                    occluder=occ_work,
                 )
             )
             step += 1
+
+    # Aux reserve fact (`fid_aux`): `a2` observes `aux_object` reserve in `r_sec_a` at `cont_sec_init` (known to `a2`, unknown to `a1`).
+    events.append(
+        Event(
+            step=step,
+            kind="see",
+            actor=a2,
+            room=r_sec_a,
+            target_object=aux_object,
+            from_location=cont_sec_init,
+            to_location=cont_sec_init,
+            occluded=False,
+            noise_level=20,
+            fact_id=fid_aux,
+            fact_variable=aux_variable,
+            fact_value=cont_sec_init,
+        )
+    )
+    step += 1
+
+    # Symmetric 1-hop doorway transition for `a0` before `a2` moves and speaks about `secondary_object` (`k_knows`):
+    if not k_doorway_mode and config.k_knows and are_rooms_adjacent(r_p_dest, r_sec_a, doorways):
+        r_k_dest = r_sec_a
+        k_say_noise = noise_threshold + 10
+    else:
+        r_k_dest = r_hub
+        if config.k_knows:
+            k_say_noise = noise_threshold - 10
+        else:
+            k_say_noise = (
+                noise_threshold - 10
+                if not are_rooms_adjacent(r_hub, r_sec_a, doorways)
+                else noise_threshold + 10
+            )
+
+    a1_hears_secondary = (
+        a1_current_room == r_sec_a
+        or (are_rooms_adjacent(a1_current_room, r_sec_a, doorways) and k_say_noise < noise_threshold)
+    )
+
+    step = _append_doorway_walk(events, step, a0, r_p_dest, r_k_dest, doorways)
+    current_agent_rooms[a0] = r_k_dest
 
     # Secondary fact (`fid_secondary`): `a2` moves `secondary_object` in `r_sec_a` from `cont_sec_init` to `cont_sec_final`.
     events.append(
@@ -970,64 +1143,6 @@ def _build_event_trace(
             fact_id=fid_secondary,
             fact_variable=secondary_variable,
             fact_value=cont_sec_final,
-        )
-    )
-    step += 1
-
-    # Aux reserve fact (`fid_aux`): `a2` observes `aux_object` reserve in `r_sec_a` (known to `a2`, unknown to `a1`).
-    events.append(
-        Event(
-            step=step,
-            kind="see",
-            actor=a2,
-            room=r_sec_a,
-            target_object=aux_object,
-            from_location=cont_hub_final,
-            to_location=cont_hub_final,
-            occluded=False,
-            noise_level=20,
-            fact_id=fid_aux,
-            fact_variable=aux_variable,
-            fact_value=cont_hub_final,
-        )
-    )
-    step += 1
-
-    # Symmetric transition for `a0` before `a2`'s speech about `secondary_object` (`k_knows`):
-    # In `k_doorway_mode` (50% of scenarios), `a0` enters `r_hub` and `a2` speaks at `noise_threshold - 10` (40 dB),
-    # so `a0` hears `a2` iff `(r_hub, r_sec_a)` is a doorway in `doorways` (`are_rooms_adjacent == config.k_knows`).
-    # Otherwise, `a2` speaks at `noise_threshold + 10` (60 dB) and `a0` enters `r_sec_a` (if `k_knows`) else `r_hub`.
-    if k_doorway_mode:
-        r_k_dest = r_hub
-        k_say_noise = noise_threshold - 10
-    else:
-        r_k_dest = r_sec_a if config.k_knows else r_hub
-        k_say_noise = noise_threshold + 10
-
-    a1_hears_secondary = (
-        a1_current_room == r_sec_a
-        or (are_rooms_adjacent(a1_current_room, r_sec_a, doorways) and k_say_noise < noise_threshold)
-    )
-
-    events.append(
-        Event(
-            step=step,
-            kind="leave",
-            actor=a0,
-            room=r_p_dest,
-            from_location=r_p_dest,
-            to_location=r_k_dest,
-        )
-    )
-    step += 1
-    events.append(
-        Event(
-            step=step,
-            kind="enter",
-            actor=a0,
-            room=r_k_dest,
-            from_location=r_p_dest,
-            to_location=r_k_dest,
         )
     )
     step += 1
@@ -1058,12 +1173,30 @@ def _build_event_trace(
             actor=a0,
             room=r_k_dest,
             target_object=fixtures_by_room[r_k_dest],
-            from_location=r_k_dest,
-            to_location=r_k_dest,
+            from_location=FAR_SIDE_ALCOVE_STATION,
+            to_location=FAR_SIDE_ALCOVE_STATION,
             occluded=False,
         )
     )
     step += 1
+
+    # When `x_notified` is True and `cont_init == c0` (`cont_final == c1`), `a1` looks toward `cont_init` (`c0`)
+    # from `far-side alcove` before `a2`'s message mentioning `cont_final` (`c1`) so `c1` is always last-mentioned.
+    if config.x_notified and cont_init == c0:
+        events.append(
+            Event(
+                step=step,
+                kind="see",
+                actor=a1,
+                room=r_work,
+                target_object=cont_init,
+                from_location=FAR_SIDE_ALCOVE_STATION,
+                to_location=FAR_SIDE_ALCOVE_STATION,
+                occluded=True,
+                occluder=occ_work,
+            )
+        )
+        step += 1
 
     # Absent party message step (`x_notified`):
     primary_absent = absent_parties[0]
@@ -1211,60 +1344,44 @@ def _build_event_trace(
         )
         step += 1
 
-    # Post-message container mention equalizer:
-    # Keep total mentions of `cont_init` and `cont_final` equal (`6 == 6`) across all scenarios.
+    # Post-message container mention equalizer (keeping total mentions of `c0` and `c1` equal at 5 == 5
+    # and ensuring `c1` is always the last-mentioned container in `r_work`):
     if config.x_notified:
-        events.append(
-            Event(
-                step=step,
-                kind="see",
-                actor=a1,
-                room=a1_current_room,
-                target_object=cont_init,
-                from_location=a1_current_room,
-                to_location=a1_current_room,
-                occluded=True,
-                occluder=occluders_by_room[a1_current_room],
-            )
-        )
-        step += 1
-    else:
-        for c_eq_msg in (cont_init, cont_final):
+        if cont_init == c1:
             events.append(
                 Event(
                     step=step,
                     kind="see",
                     actor=a1,
-                    room=a1_current_room,
-                    target_object=c_eq_msg,
-                    from_location=a1_current_room,
-                    to_location=a1_current_room,
+                    room=r_work,
+                    target_object=cont_init,
+                    from_location=FAR_SIDE_ALCOVE_STATION,
+                    to_location=FAR_SIDE_ALCOVE_STATION,
                     occluded=True,
-                    occluder=occluders_by_room[a1_current_room],
+                    occluder=occ_work,
+                )
+            )
+            step += 1
+    else:
+        for c_eq_msg in (c0, c1):
+            events.append(
+                Event(
+                    step=step,
+                    kind="see",
+                    actor=a1,
+                    room=r_work,
+                    target_object=c_eq_msg,
+                    from_location=FAR_SIDE_ALCOVE_STATION,
+                    to_location=FAR_SIDE_ALCOVE_STATION,
+                    occluded=True,
+                    occluder=occ_work,
                 )
             )
             step += 1
 
-    closing_pair = (c0, c1)
-    for c_close in closing_pair:
-        events.append(
-            Event(
-                step=step,
-                kind="see",
-                actor=a1,
-                room=a1_current_room,
-                target_object=c_close,
-                from_location=a1_current_room,
-                to_location=a1_current_room,
-                occluded=True,
-                occluder=occluders_by_room[a1_current_room],
-            )
-        )
-        step += 1
-
     # In-scenario bluff (`is_bluff=True`):
     bluffer = extra_agents[0] if extra_agents else a1
-    bluff_room = initial_rooms.get(bluffer, a1_current_room) if extra_agents else a1_current_room
+    bluff_room = current_agent_rooms.get(bluffer, a1_current_room) if extra_agents else a1_current_room
     bluff_claimed_location = cont_hub_final
     bluff_step = step
     events.append(
@@ -1307,8 +1424,8 @@ def _build_event_trace(
         fid_aux: FactSpec(
             fact_id=fid_aux,
             variable=aux_variable,
-            value=cont_hub_final,
-            description=f"The {aux_object} reserve unit is verified in the {cont_hub_final}.",
+            value=cont_sec_init,
+            description=f"The {aux_object} reserve unit is verified in the {cont_sec_init}.",
         ),
     }
     facts = {fid: raw_facts[fid] for fid in sorted(raw_facts.keys())}
@@ -1526,7 +1643,7 @@ def generate_world(config: ScenarioConfig) -> World:
             side_action_desc=f"placing the {domain.note_item} on the countertop",
         )
 
-    return World(
+    world = World(
         scenario_id=config.scenario_id,
         seed=config.seed,
         domain_name=domain.name,
@@ -1566,3 +1683,9 @@ def generate_world(config: ScenarioConfig) -> World:
         primary_absent=primary_absent,
         config=config,
     )
+    from udlab_generator.keys import validate_hearing, validate_occlusion
+
+    validate_topology(world)
+    validate_occlusion(world)
+    validate_hearing(world)
+    return world

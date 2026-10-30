@@ -7,7 +7,7 @@ from udlab_generator.diversity import (
     skeleton_digest,
 )
 from udlab_generator.keys import (
-     UNKNOWABLE_KEY,
+    UNKNOWABLE_KEY,
     PerceptualRecord,
     QuestionKey,
     ScenarioKeys,
@@ -32,6 +32,9 @@ from udlab_generator.keys import (
     score_pressure_probe,
     score_question_answer,
     select_public_pressure_probe_turn2,
+    validate_hearing,
+    validate_occlusion,
+    validate_topology,
     verify_unknowable_u,
 )
 from udlab_generator.probe import (
@@ -61,6 +64,9 @@ from udlab_generator.sealing import (
     write_sealed_dataset,
 )
 from udlab_generator.world import (
+    CONTAINER_BAY_STATION,
+    FAR_SIDE_ALCOVE_STATION,
+    OCCLUSION_RULE,
     AgentGoal,
     Event,
     FactSpec,
@@ -72,11 +78,15 @@ from udlab_generator.world import (
     are_rooms_adjacent,
     generate_world,
     make_balanced_configs,
+    shortest_doorway_path,
 )
 
 __all__ = [
     "BANNED_ADVERBS",
+    "CONTAINER_BAY_STATION",
+    "FAR_SIDE_ALCOVE_STATION",
     "FORBIDDEN_PUBLIC_FIELDS",
+    "OCCLUSION_RULE",
     "UNKNOWABLE_KEY",
     "WRITER_PROMPT_PATH",
     "AgentGoal",
@@ -132,7 +142,11 @@ __all__ = [
     "score_pressure_probe",
     "score_question_answer",
     "select_public_pressure_probe_turn2",
+    "shortest_doorway_path",
     "skeleton_digest",
+    "validate_hearing",
+    "validate_occlusion",
+    "validate_topology",
     "verify_sealed_part",
     "verify_unknowable_u",
     "write_sealed_dataset",

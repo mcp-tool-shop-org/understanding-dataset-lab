@@ -9,7 +9,14 @@ import re
 from typing import Callable
 
 from udlab_generator.keys import ScenarioKeys, compute_scenario_keys
-from udlab_generator.world import Event, World
+from udlab_generator.world import (
+    CONTAINER_BAY_STATION,
+    FAR_SIDE_ALCOVE_STATION,
+    OCCLUSION_RULE,
+    Event,
+    World,
+    is_station_transition_event,
+)
 
 BANNED_ADVERBS: tuple[str, ...] = (
     "nervously",
@@ -66,6 +73,7 @@ class RenderedScenario:
     prose: str
     writer_prompt: str
     keys: ScenarioKeys
+    world: World | None = None
 
 
 def load_writer_prompt_template(path: Path | None = None) -> str:
@@ -160,10 +168,20 @@ def _render_event_sentence(event: Event, focal_agent: str, noise_threshold: int)
         return f"{prefix}, {event.actor} exited the {event.room} heading toward the {event.to_location}."
 
     if event.kind == "move":
+        if is_station_transition_event(event):
+            direction_prep = (
+                "behind" if event.to_location == FAR_SIDE_ALCOVE_STATION else "around"
+            )
+            return (
+                f"{prefix}, in the {event.room}, {event.actor} stepped from the {event.from_location} "
+                f"{direction_prep} the {event.target_object} into the {event.to_location}."
+            )
         occ_clause = (
             f" behind the {event.occluder}, which blocked the line of sight for other occupants in the {event.room}"
             if event.occluded and event.occluder
-            else " in open view of anyone present in the room"
+            else f" in open view at the {CONTAINER_BAY_STATION}"
+            if event.from_location not in ("latch position A", "dispatch folder")
+            else " in open view"
         )
         fact_tag = f" [establishing {event.fact_id}]" if event.fact_id and event.fact_id.startswith("F") and event.fact_id in ("F1", "F2", "F3", "F4") else ""
         return (
@@ -174,18 +192,22 @@ def _render_event_sentence(event: Event, focal_agent: str, noise_threshold: int)
     if event.kind == "see":
         if event.occluded and event.occluder:
             return (
-                f"{prefix}, in the {event.room}, {event.actor} looked toward the {event.target_object}, "
+                f"{prefix}, in the {event.room}, from the {FAR_SIDE_ALCOVE_STATION} behind the {event.occluder}, "
+                f"{event.actor} looked toward the {event.target_object}, "
                 f"but the {event.occluder} blocked the line of sight."
             )
         fact_tag = f" [establishing {event.fact_id}]" if event.fact_id and event.fact_id in ("F1", "F2", "F3", "F4") else ""
         loc_clause = (
             f" at the {event.to_location}"
-            if event.to_location and event.to_location != event.room
+            if event.to_location
+            and event.to_location not in (event.room, CONTAINER_BAY_STATION, FAR_SIDE_ALCOVE_STATION)
+            else f" in the {event.to_location}"
+            if event.to_location in (CONTAINER_BAY_STATION, FAR_SIDE_ALCOVE_STATION)
             else ""
         )
         return (
             f"{prefix}, in the {event.room}, {event.actor} observed the {event.target_object}"
-            f"{loc_clause} with clear line of sight{fact_tag}."
+            f"{loc_clause} in open view{fact_tag}."
         )
 
     if event.kind == "say":
@@ -220,7 +242,10 @@ def render_world_template(world: World, focal_agent: str) -> str:
         c_pair = world.containers_by_room[r]
         occ = world.occluders_by_room[r]
         room_setup_strs.append(
-            f"the {r} contains the {c_pair[0]} and the {c_pair[1]} (with a {occ} that can occlude sight)"
+            f"the {r} contains the {c_pair[0]} and the {c_pair[1]} in the {CONTAINER_BAY_STATION} "
+            f"(with a {occ} standing between the {FAR_SIDE_ALCOVE_STATION} and the {CONTAINER_BAY_STATION} "
+            f"that blocks an agent in the {FAR_SIDE_ALCOVE_STATION} from seeing events at or the contents of "
+            f"the containers behind it, while an agent in the {CONTAINER_BAY_STATION} sees them in open view)"
         )
 
     agent_pos_strs = [
@@ -312,7 +337,11 @@ class MockWriter:
                     kind=step_by_num[ev.step]["kind"],
                     actor=step_by_num[ev.step]["actor"],
                     room=step_by_num[ev.step]["room"],
+                    target_object=step_by_num[ev.step]["target_object"],
+                    from_location=step_by_num[ev.step]["from_location"],
+                    to_location=step_by_num[ev.step]["to_location"],
                     occluded=bool(step_by_num[ev.step]["occluded"]),
+                    occluder=step_by_num[ev.step]["occluder"],
                     noise_level=int(step_by_num[ev.step]["noise_level"]),
                     is_bluff=bool(step_by_num[ev.step]["is_bluff"]),
                     stated_reason=step_by_num[ev.step]["stated_reason"],
@@ -342,6 +371,7 @@ class MockWriter:
                 prose=prose_0,
                 writer_prompt=prompt_0,
                 keys=keys_0,
+                world=world,
             ),
             RenderedScenario(
                 scenario_id=world.scenario_id,
@@ -350,5 +380,6 @@ class MockWriter:
                 prose=prose_1,
                 writer_prompt=prompt_1,
                 keys=keys_1,
+                world=world,
             ),
         )

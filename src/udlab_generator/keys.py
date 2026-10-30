@@ -8,7 +8,18 @@ import itertools
 import re
 from typing import Any, Literal
 
-from udlab_generator.world import DOMAINS, Event, World, are_rooms_adjacent
+from udlab_generator.world import (
+    CONTAINER_BAY_STATION,
+    DOMAINS,
+    FAR_SIDE_ALCOVE_STATION,
+    OCCLUSION_RULE,
+    Event,
+    World,
+    are_rooms_adjacent,
+    is_container_event,
+    is_station_transition_event,
+    validate_topology,
+)
 
 QuestionType = Literal["P", "K", "B1", "B2", "X", "U", "S", "D"]
 UNKNOWABLE_KEY = "can't be known from what's given"
@@ -77,18 +88,19 @@ def can_agent_see_event(
     agent: str,
     event: Event,
     room_occupants: dict[str, str],
+    agent_stations: dict[str, str] | None = None,
+    world: World | None = None,
 ) -> bool:
-    """Determine by sight rules whether `agent` sees `event` at `event.step`.
+    """Determine by `OCCLUSION_RULE` whether `agent` sees `event` at `event.step`.
 
-    Sight rules (design section 4):
+    Sight & occlusion rules:
     - Absent parties never see any event.
     - Message and say events are auditory/channel events, not visual state observations.
     - Agent must be present in `event.room` at `event.step`.
-    - For `move`, `enter`, `leave`: the acting agent (`agent == event.actor`) perceives their
-      own physical action; any bystander in `event.room` sees it iff `not event.occluded`.
-    - For `see` (an inspection of an object/fixture): `agent` sees the target iff
-      `agent` is in `event.room` and `not event.occluded` (if `event.occluded` is True,
-      the occluder blocks line of sight even for the inspecting actor).
+    - In each room, the room's occluder stands between `far-side alcove` and `container bay`.
+      An agent at `container bay` is in open view of the room's containers (`occluded=False`);
+      an agent at `far-side alcove` is on the far side of the occluder, which blocks line of
+      sight to events at, and the contents of, the containers (`occluded=True`).
     """
     if agent not in room_occupants:
         return False
@@ -96,13 +108,21 @@ def can_agent_see_event(
         return False
     if room_occupants[agent] != event.room:
         return False
-    if event.kind == "see":
-        if event.occluded:
-            return False
-        return agent == event.actor or not event.occluded
-    if agent == event.actor:
+    if is_station_transition_event(event, world):
         return True
-    return not event.occluded
+
+    at_far_side = (
+        agent_stations is not None
+        and agent_stations.get(agent, CONTAINER_BAY_STATION) == FAR_SIDE_ALCOVE_STATION
+    )
+    cont_event = is_container_event(event, world) if world is not None else False
+    blocked = bool(event.occluded) or (cont_event and at_far_side)
+
+    if event.kind == "see":
+        return not blocked
+    if agent == event.actor:
+        return not (cont_event and at_far_side) and not event.occluded
+    return not blocked
 
 
 def can_agent_hear_event(
@@ -142,6 +162,7 @@ def does_agent_receive_message(agent: str, event: Event) -> bool:
 def compute_perceptual_records(world: World) -> dict[str, PerceptualRecord]:
     """Simulate the complete event log and compute each party's `PerceptualRecord`."""
     occupants: dict[str, str] = dict(world.initial_agent_rooms)
+    stations: dict[str, str] = {ag: CONTAINER_BAY_STATION for ag in world.agents}
     all_parties = list(world.agents) + list(world.absent_parties)
 
     seen_by: dict[str, list[int]] = {p: [] for p in all_parties}
@@ -155,9 +176,12 @@ def compute_perceptual_records(world: World) -> dict[str, PerceptualRecord]:
     grounded_state_by_agent: dict[str, dict[str, str]] = {p: {} for p in all_parties}
 
     for event in world.events:
-        # Update room occupancy on `enter` before checking who perceives the arrival.
+        # Update room occupancy and default station (`container bay`) on `enter` before checking who perceives the arrival.
         if event.kind == "enter" and event.actor in world.agents:
             occupants[event.actor] = event.room
+            stations[event.actor] = CONTAINER_BAY_STATION
+        elif is_station_transition_event(event, world) and event.actor in world.agents:
+            stations[event.actor] = str(event.to_location)
 
         # Check whether a spoken or messaged claim is epistemically grounded in the speaker's prior perception.
         speaker_grounded = True
@@ -169,7 +193,7 @@ def compute_perceptual_records(world: World) -> dict[str, PerceptualRecord]:
                 speaker_grounded = False
 
         for party in all_parties:
-            saw = can_agent_see_event(party, event, occupants)
+            saw = can_agent_see_event(party, event, occupants, stations, world)
             heard = can_agent_hear_event(party, event, occupants, world.doorways, world.noise_threshold)
             messaged = does_agent_receive_message(party, event)
 
@@ -272,11 +296,15 @@ def compute_second_order_belief(
     act_admissible = set(records[actor].admissible_steps)
 
     occupants: dict[str, str] = dict(world.initial_agent_rooms)
+    stations: dict[str, str] = {ag: CONTAINER_BAY_STATION for ag in world.agents}
     last_joint_val: str | None = None
 
     for event in world.events:
         if event.kind == "enter" and event.actor in world.agents:
             occupants[event.actor] = event.room
+            stations[event.actor] = CONTAINER_BAY_STATION
+        elif is_station_transition_event(event, world) and event.actor in world.agents:
+            stations[event.actor] = str(event.to_location)
 
         if (
             event.step in obs_admissible
@@ -284,13 +312,15 @@ def compute_second_order_belief(
             and event.fact_variable == variable
             and event.fact_value is not None
         ):
-            # Observer knows actor perceived `event` if they were co-present in `event.room`
-            # without occlusion, or if observer sent/heard a message/statement to actor in the same room.
+            # Observer knows actor perceived `event` if both were co-present in `event.room`
+            # in open view at `container bay` without occlusion, or via direct communication.
             obs_room = occupants.get(observer)
             act_room = occupants.get(actor)
             co_present = (
                 obs_room is not None
                 and obs_room == act_room == event.room
+                and stations.get(observer, CONTAINER_BAY_STATION) == CONTAINER_BAY_STATION
+                and stations.get(actor, CONTAINER_BAY_STATION) == CONTAINER_BAY_STATION
                 and not event.occluded
             )
             direct_comm = event.kind == "message" and (
@@ -758,3 +788,190 @@ def score_question_answer(qkey: QuestionKey, model_answer: Any) -> tuple[bool, b
     is_ego = qkey.asymmetric and (ans_norm == lure_norm)
     is_over_attr = (qkey.question_type == "U") and (not is_correct)
     return is_correct, is_ego, is_over_attr
+
+
+def validate_occlusion(world: World) -> None:
+    """Validate that no agent-container-step has contradictory visibility and that P, B1, and B2 agree with `OCCLUSION_RULE`."""
+    room_by_container: dict[str, str] = {
+        c: r for r, pair in world.containers_by_room.items() for c in pair
+    }
+    all_containers = set(room_by_container.keys())
+
+    occupants: dict[str, str | None] = dict(world.initial_agent_rooms)
+    stations: dict[str, str] = {ag: CONTAINER_BAY_STATION for ag in world.agents}
+    station_epochs: dict[str, int] = {ag: 0 for ag in world.agents}
+    # Track `(agent, container, station_epoch) -> occluded` so an agent cannot have both open-view and blocked
+    # visibility for the same container without changing station/room.
+    epoch_visibility: dict[tuple[str, str, int], bool] = {}
+
+    for ev in world.events:
+        if ev.kind == "enter" and ev.actor in world.agents:
+            occupants[ev.actor] = ev.room
+            stations[ev.actor] = CONTAINER_BAY_STATION
+            station_epochs[ev.actor] += 1
+        elif is_station_transition_event(ev, world) and ev.actor in world.agents:
+            cur_station = stations.get(ev.actor, CONTAINER_BAY_STATION)
+            if ev.from_location != cur_station or ev.from_location == ev.to_location:
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} occlusion error: "
+                    f"invalid station transition {ev.from_location!r} -> {ev.to_location!r} for {ev.actor} "
+                    f"(current station is {cur_station!r})."
+                )
+            stations[ev.actor] = str(ev.to_location)
+            station_epochs[ev.actor] += 1
+
+        if ev.occluded:
+            expected_occ = world.occluders_by_room.get(ev.room)
+            if not ev.occluder or ev.occluder != expected_occ:
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} occlusion error: "
+                    f"occluded event in '{ev.room}' has occluder={ev.occluder!r}, expected {expected_occ!r}."
+                )
+
+        if ev.kind in ("move", "see") and not is_station_transition_event(ev, world):
+            referenced_containers = [
+                loc
+                for loc in (ev.target_object, ev.from_location, ev.to_location)
+                if loc in all_containers
+            ]
+            for c_ref in referenced_containers:
+                if room_by_container.get(c_ref) != ev.room:
+                    raise ValueError(
+                        f"Scenario {world.scenario_id} step {ev.step} occlusion error: "
+                        f"contradictory cross-room container reference '{c_ref}' in room '{ev.room}' "
+                        f"(belongs to '{room_by_container.get(c_ref)}')."
+                    )
+
+            if referenced_containers:
+                actor_station = stations.get(ev.actor, CONTAINER_BAY_STATION)
+                expected_occluded = actor_station == FAR_SIDE_ALCOVE_STATION
+                if bool(ev.occluded) != expected_occluded:
+                    raise ValueError(
+                        f"Scenario {world.scenario_id} step {ev.step} occlusion error: "
+                        f"contradictory occlusion for {ev.actor} at station '{actor_station}' "
+                        f"(occluded={ev.occluded}, expected {expected_occluded} under open view / far-side rule)."
+                    )
+                if expected_occluded and ev.kind == "move":
+                    raise ValueError(
+                        f"Scenario {world.scenario_id} step {ev.step} occlusion error: "
+                        f"{ev.actor} at '{FAR_SIDE_ALCOVE_STATION}' cannot move objects at containers behind the occluder."
+                    )
+
+                checked_agents = (
+                    (ev.actor,)
+                    if ev.kind == "see"
+                    else tuple(ag for ag in world.agents if occupants.get(ag) == ev.room)
+                )
+                for ag in checked_agents:
+                    ag_station = stations.get(ag, CONTAINER_BAY_STATION)
+                    ag_blocked = bool(ev.occluded) or (ag_station == FAR_SIDE_ALCOVE_STATION)
+                    for c_ref in referenced_containers:
+                        ep_key = (ag, c_ref, station_epochs[ag])
+                        if ep_key in epoch_visibility and epoch_visibility[ep_key] != ag_blocked:
+                            raise ValueError(
+                                f"Scenario {world.scenario_id} step {ev.step} occlusion error: "
+                                f"contradictory visibility for {ag} on container '{c_ref}' within station '{ag_station}'."
+                            )
+                        epoch_visibility[ep_key] = ag_blocked
+
+        if ev.kind == "leave" and ev.actor in world.agents:
+            occupants[ev.actor] = None
+            station_epochs[ev.actor] += 1
+
+    records = compute_perceptual_records(world)
+    skeys = compute_scenario_keys(world)
+    q_by_type = {q.question_type: q.key for q in skeys.questions}
+    true_vals, change_steps = compute_true_world_state(world)
+
+    final_move_step = change_steps[world.primary_variable]
+    expected_p = "yes" if final_move_step in records[world.p_agent].seen_steps else "no"
+    if q_by_type["P"] != expected_p:
+        raise ValueError(
+            f"Scenario {world.scenario_id} occlusion error: P key {q_by_type['P']!r} != {expected_p!r}."
+        )
+    if world.config is not None:
+        cfg_p = "yes" if world.config.p_can_see else "no"
+        if q_by_type["P"] != cfg_p:
+            raise ValueError(
+                f"Scenario {world.scenario_id} occlusion error: P key {q_by_type['P']!r} disagrees with config.p_can_see ({cfg_p!r})."
+            )
+
+    expected_b1 = compute_first_order_belief(world, records, world.b1_agent, world.primary_variable)
+    if expected_b1 is None or q_by_type["B1"] != expected_b1:
+        raise ValueError(
+            f"Scenario {world.scenario_id} occlusion error: B1 key {q_by_type['B1']!r} != {expected_b1!r}."
+        )
+    if world.config is not None:
+        final_loc = true_vals[world.primary_variable]
+        if (q_by_type["B1"] == final_loc) != world.config.b1_true_belief:
+            raise ValueError(
+                f"Scenario {world.scenario_id} occlusion error: B1 key {q_by_type['B1']!r} disagrees with config.b1_true_belief."
+            )
+
+    expected_b2 = compute_second_order_belief(
+        world, records, world.b2_observer, world.b2_actor, world.primary_variable
+    )
+    if expected_b2 is None or q_by_type["B2"] != expected_b2:
+        raise ValueError(
+            f"Scenario {world.scenario_id} occlusion error: B2 key {q_by_type['B2']!r} != {expected_b2!r}."
+        )
+    if world.config is not None:
+        final_loc = true_vals[world.primary_variable]
+        if (q_by_type["B2"] == final_loc) != world.config.b2_true_belief:
+            raise ValueError(
+                f"Scenario {world.scenario_id} occlusion error: B2 key {q_by_type['B2']!r} disagrees with config.b2_true_belief."
+            )
+
+
+def validate_hearing(world: World) -> None:
+    """Validate that every heard event is in the speaker's room or doorway-adjacent below `world.noise_threshold`."""
+    records = compute_perceptual_records(world)
+    all_parties = list(world.agents) + list(world.absent_parties)
+    occupants: dict[str, str | None] = dict(world.initial_agent_rooms)
+
+    for ev in world.events:
+        if ev.kind == "enter" and ev.actor in world.agents:
+            occupants[ev.actor] = ev.room
+
+        for party in all_parties:
+            is_recorded_heard = ev.step in records[party].heard_steps
+            if ev.kind != "say" or party not in world.agents:
+                expected_heard = False
+            else:
+                p_room = occupants.get(party)
+                if p_room is None:
+                    expected_heard = False
+                elif p_room == ev.room:
+                    expected_heard = True
+                elif are_rooms_adjacent(p_room, ev.room, world.doorways) and ev.noise_level < world.noise_threshold:
+                    expected_heard = True
+                else:
+                    expected_heard = False
+
+            if is_recorded_heard != expected_heard:
+                raise ValueError(
+                    f"Scenario {world.scenario_id} step {ev.step} hearing error: "
+                    f"party '{party}' in room '{occupants.get(party)}' has heard={is_recorded_heard} "
+                    f"for event in '{ev.room}' at noise={ev.noise_level} dB (expected {expected_heard})."
+                )
+
+        if ev.kind == "leave" and ev.actor in world.agents:
+            occupants[ev.actor] = None
+
+    skeys = compute_scenario_keys(world)
+    q_by_type = {q.question_type: q.key for q in skeys.questions}
+    expected_k = (
+        "yes"
+        if compute_knowledge(world, records, world.k_agent, world.secondary_variable)
+        else "no"
+    )
+    if q_by_type["K"] != expected_k:
+        raise ValueError(
+            f"Scenario {world.scenario_id} hearing error: K key {q_by_type['K']!r} != {expected_k!r}."
+        )
+    if world.config is not None:
+        cfg_k = "yes" if world.config.k_knows else "no"
+        if q_by_type["K"] != cfg_k:
+            raise ValueError(
+                f"Scenario {world.scenario_id} hearing error: K key {q_by_type['K']!r} disagrees with config.k_knows ({cfg_k!r})."
+            )
