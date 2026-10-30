@@ -239,10 +239,9 @@ def test_2_perspective_flip_invariance() -> None:
         assert r0.prose != r1.prose
         assert r0.keys == r1.keys
 
-        # Every event step from the complete event log appears in both focalized renderings:
-        for ev in world.events:
-            assert f"step {ev.step}" in r0.prose
-            assert f"step {ev.step}" in r1.prose
+        # Every event from the complete event log appears in both focalized renderings (without "step N" markers):
+        check_rendered_prose(r0.prose, world, focal_agent=r0.focal_agent)
+        check_rendered_prose(r1.prose, world, focal_agent=r1.focal_agent)
 
         # Pre-fix failure mode: if keys are computed from a focal-filtered event log (omitting events
         # outside `focal_agent`'s room), keys diverge between focal_0 and focal_1:
@@ -262,8 +261,10 @@ def test_2_perspective_flip_invariance() -> None:
         assert recs_f0 != r0.keys.perceptual_records or recs_f1 != r1.keys.perceptual_records
 
         # Strengthened check: MockWriter must reject a renderer that omits non-focal events from prose
-        partial_writer = MockWriter(custom_renderer=lambda w, fa: f"Following {fa} at step 1 only.")
-        with pytest.raises(RenderCheckError, match="incomplete event log|missing step"):
+        partial_writer = MockWriter(
+            custom_renderer=lambda w, fa: render_world_template(w, fa).rsplit(". ", 1)[0] + "."
+        )
+        with pytest.raises(RenderCheckError, match="missing or altered event"):
             partial_writer.render_scenario_pair(world)
 
 
@@ -1850,5 +1851,380 @@ def test_22_scen_0111_old_unexplained_displacement_world_refused(tmp_path: Path)
     receipt.sealing_meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     with pytest.raises(SealingError, match="belief-forcing|unexplained displacement|validation failed"):
         verify_sealed_part(pub_dir, seal_dir)
+
+
+def test_23_ollama_writer_pinned_digest_loopback_vram_checkpoint_generations_and_length_stop(
+    tmp_path: Path,
+) -> None:
+    """Test 23 (Req 1): OllamaWriter enforces qwen3.6:35b digest pin, loopback-only server, --vram-halt-mib (default 26000) with PID-tree kill, per-scenario sealed checkpoint & --resume, generations.jsonl (§6.8), and length_stop refusal."""
+    import udlab_generator as ug
+    from udlab_generator.cli import build_and_probe_dataset
+
+    OllamaWriterCls = getattr(ug, "OllamaWriter", None)
+    assert callable(OllamaWriterCls), "OllamaWriter must be exported by udlab_generator."
+
+    w = generate_world(make_balanced_configs(2, base_seed=20261030)[0])
+    pinned_digest = "a7eb95c53bcf96b4bdd008d0fab4a5dac88047d9c1a7a9ab88ed453423fbd87c"
+
+    # 1. Non-loopback URLs must be refused
+    with pytest.raises(ValueError, match="NON_LOOPBACK_URL|127.0.0.1"):
+        OllamaWriterCls(
+            base_url="http://192.168.1.50:11434",
+            grant_id="test-grant",
+            http_transport=lambda m, u, b: {},
+        )
+    with pytest.raises(ValueError, match="NON_LOOPBACK_URL|127.0.0.1"):
+        OllamaWriterCls(
+            base_url="https://localhost:11434",
+            grant_id="test-grant",
+            http_transport=lambda m, u, b: {},
+        )
+
+    # 2. Live transport without explicit GPU grant ID must be refused
+    with pytest.raises(PermissionError, match="GPU_GRANT_REQUIRED"):
+        OllamaWriterCls(base_url="http://127.0.0.1:11434", grant_id=None)
+
+    # 3. Digest mismatch or missing model on GET /api/tags must be refused (and /api/pull is forbidden)
+    def _bad_digest_transport(method: str, url: str, body: dict | None = None) -> dict:
+        if method == "GET" and url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": "qwen3.6:35b",
+                        "model": "qwen3.6:35b",
+                        "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+                    }
+                ]
+            }
+        raise AssertionError(f"Unexpected call {method} {url}")
+
+    bad_digest_writer = OllamaWriterCls(
+        grant_id="test-grant",
+        http_transport=_bad_digest_transport,
+    )
+    assert bad_digest_writer.ollama_tag == "qwen3.6:35b"
+    assert bad_digest_writer.manifest_digest == pinned_digest
+    assert bad_digest_writer.vram_halt_mib == 26000
+    with pytest.raises(ValueError, match="DIGEST_MISMATCH"):
+        bad_digest_writer.render_scenario_pair(w)
+
+    # 4. Owned loopback server lifecycle + unload + generations.jsonl (§6.8)
+    fake_pids_stopped: list[int] = []
+
+    class _FakeChildProc:
+        pid = 42424
+        returncode = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = 0
+            fake_pids_stopped.append(self.pid)
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def _valid_transport(method: str, url: str, body: dict | None = None) -> dict:
+        if method == "GET" and url.endswith("/api/version"):
+            return {"version": "0.6.2-loopback-test"}
+        if method == "GET" and url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": "qwen3.6:35b",
+                        "model": "qwen3.6:35b",
+                        "digest": f"sha256:{pinned_digest}",
+                    }
+                ]
+            }
+        if method == "POST" and url.endswith("/api/chat"):
+            payload = dict(body or {})
+            if payload.get("keep_alive") == 0:
+                return {"model": "qwen3.6:35b", "done": True, "done_reason": "unload"}
+            prompt_content = payload["messages"][-1]["content"]
+            focal = prompt_content.split("Focal Agent: ", 1)[1].splitlines()[0].strip()
+            return {
+                "model": "qwen3.6:35b",
+                "message": {
+                    "role": "assistant",
+                    "content": render_world_template(w, focal),
+                    "thinking": "step one step two step three",
+                },
+                "done": True,
+                "done_reason": "stop",
+                "eval_count": 412,
+                "prompt_eval_count": 1680,
+            }
+        raise AssertionError(f"Unexpected call {method} {url}")
+
+    gen_file = tmp_path / "generations.jsonl"
+    writer = OllamaWriterCls(
+        grant_id="grant-rx-test",
+        http_transport=_valid_transport,
+        vram_probe=lambda: 25336,
+        generations_path=gen_file,
+        start_owned_server=True,
+        popen_factory=lambda *a, **kw: _FakeChildProc(),
+        server_port=11499,
+    )
+    assert writer.owned_server is not None
+    assert writer.owned_server.base_url == "http://127.0.0.1:11499"
+    r0, r1 = writer.render_scenario_pair(w)
+    writer.close()
+
+    assert 42424 in fake_pids_stopped
+    assert len(writer.unload_records) == 1
+    assert writer.owned_server.unloaded is True
+    assert gen_file.is_file()
+    gen_lines = [json.loads(line) for line in gen_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(gen_lines) == 2
+    for idx_g, g_row in enumerate(gen_lines):
+        assert g_row["call_id"].startswith(f"{w.scenario_id}:r{idx_g}:call_")
+        assert g_row["model"] == "qwen3.6:35b"
+        assert g_row["manifest_digest"] == pinned_digest
+        assert g_row["pins"]["manifest_digest"] == pinned_digest
+        assert g_row["eval_count"] == 412
+        assert g_row["prompt_eval_count"] == 1680
+        assert g_row["thinking_words"] == 6
+        assert g_row["vram_peak_mib"] == 25336
+        assert g_row["vram_halt_mib"] == 26000
+        assert g_row["seconds"] >= 0.0
+
+    # 5. length_stop refusal when done_reason == 'length'
+    def _length_stop_transport(method: str, url: str, body: dict | None = None) -> dict:
+        if method == "GET" and url.endswith("/api/tags"):
+            return {"models": [{"name": "qwen3.6:35b", "digest": pinned_digest}]}
+        if method == "POST" and url.endswith("/api/chat"):
+            return {
+                "model": "qwen3.6:35b",
+                "message": {"role": "assistant", "content": "truncated output", "thinking": "long thought"},
+                "done": True,
+                "done_reason": "length",
+                "eval_count": 8192,
+                "prompt_eval_count": 1700,
+            }
+        raise AssertionError(f"Unexpected call {method} {url}")
+
+    len_writer = OllamaWriterCls(grant_id="grant-rx-test", http_transport=_length_stop_transport)
+    with pytest.raises(RenderCheckError, match="done_reason='length'|length"):
+        len_writer.render_scenario_pair(w)
+    assert len(len_writer.refusals) == 1
+    assert len_writer.refusals[0].check_id == "length_stop"
+
+    # 6. VRAM ceiling halt (> vram_halt_mib) kills owned PID tree
+    killed_pids: list[int] = []
+    halt_writer = OllamaWriterCls(
+        grant_id="grant-rx-test",
+        vram_halt_mib=26000,
+        vram_probe=lambda: 26150,
+        halt_pid=98765,
+        pid_killer=lambda pid: killed_pids.append(pid),
+        http_transport=_valid_transport,
+    )
+    with pytest.raises(RuntimeError, match="VRAM_HALT_EXCEEDED|26150"):
+        halt_writer.render_scenario_pair(w)
+    assert killed_pids == [98765]
+
+    # 7. Per-scenario sealed checkpoint and --resume across an interrupted 4-scenario build
+    configs_4 = make_balanced_configs(4, base_seed=20261030)
+    worlds_by_sid = {c.scenario_id: generate_world(c) for c in configs_4}
+    chat_calls_made = 0
+
+    def _interrupting_transport(method: str, url: str, body: dict | None = None) -> dict:
+        nonlocal chat_calls_made
+        if method == "GET" and url.endswith("/api/tags"):
+            return {"models": [{"name": "qwen3.6:35b", "digest": pinned_digest}]}
+        if method == "POST" and url.endswith("/api/chat"):
+            payload = dict(body or {})
+            if payload.get("keep_alive") == 0:
+                return {"model": "qwen3.6:35b", "done": True, "done_reason": "unload"}
+            chat_calls_made += 1
+            if chat_calls_made == 5:
+                raise RuntimeError("Simulated mid-build interruption after 2 scenarios")
+            prompt_content = payload["messages"][-1]["content"]
+            focal = prompt_content.split("Focal Agent: ", 1)[1].splitlines()[0].strip()
+            sid = json.loads(prompt_content.split("World Setup:\n", 1)[1].split("\n\nComplete Event Log:", 1)[0])[
+                "scenario_id"
+            ]
+            return {
+                "model": "qwen3.6:35b",
+                "message": {"role": "assistant", "content": render_world_template(worlds_by_sid[sid], focal)},
+                "done": True,
+                "done_reason": "stop",
+                "eval_count": 390,
+                "prompt_eval_count": 1650,
+            }
+        raise AssertionError(f"Unexpected {method} {url}")
+
+    resume_dir = tmp_path / "ckpt_resume_run"
+    with pytest.raises(RuntimeError, match="Simulated mid-build interruption"):
+        build_and_probe_dataset(
+            count=4,
+            base_seed=20261030,
+            output_dir=resume_dir,
+            writer_kind="ollama",
+            grant_id="grant-rx-test",
+            start_owned_server=False,
+            http_transport=_interrupting_transport,
+            vram_probe=lambda: 25100,
+        )
+
+    ckpt_pub = json.loads((resume_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    ckpt_seal = json.loads((resume_dir / "sealed_store" / "checkpoint.sealed.json").read_text(encoding="utf-8"))
+    assert ckpt_pub["scenarios_completed"] == 2
+    assert ckpt_seal["scenarios_completed"] == 2
+
+    # Now resume: only the remaining 2 scenarios (4 calls) should execute
+    calls_before_resume = chat_calls_made
+    resumed_summary = build_and_probe_dataset(
+        count=4,
+        base_seed=20261030,
+        output_dir=resume_dir,
+        writer_kind="ollama",
+        grant_id="grant-rx-test",
+        resume=True,
+        start_owned_server=False,
+        http_transport=_interrupting_transport,
+        vram_probe=lambda: 25100,
+    )
+    assert chat_calls_made - calls_before_resume == 4
+    assert resumed_summary["num_scenarios"] == 4
+    assert resumed_summary["num_items"] == 8
+    gen_resumed = [
+        json.loads(line)
+        for line in (resume_dir / "generations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(gen_resumed) == 8
+
+
+def test_24_writer_prompt_carries_belief_persistence_rule_exactly_once() -> None:
+    """Test 24 (Req 2): Writer prompt template and formatted prompt carry BELIEF_PERSISTENCE_RULE byte-identically exactly once, with no leaked fact IDs."""
+    from udlab_generator.world import BELIEF_PERSISTENCE_RULE
+
+    template_text = load_writer_prompt_template()
+    assert template_text.count(BELIEF_PERSISTENCE_RULE) == 1
+
+    for cfg in make_balanced_configs(10, base_seed=20261030):
+        w = generate_world(cfg)
+        for fa in (w.agents[0], w.agents[1]):
+            prompt = format_writer_prompt(w, fa)
+            assert prompt.count(BELIEF_PERSISTENCE_RULE) == 1, (
+                f"{w.scenario_id} ({fa}): BELIEF_PERSISTENCE_RULE count is {prompt.count(BELIEF_PERSISTENCE_RULE)}, expected 1."
+            )
+            # Also verify no F0..F9 fact IDs or causal_preconditions leak into the formatted writer prompt
+            assert "causal_preconditions" not in prompt
+            assert '"fact_id"' not in prompt
+
+    # Duplicating or removing the rule sentence in a custom template must raise RenderCheckError
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    doubled_template = template_text + "\n" + BELIEF_PERSISTENCE_RULE
+    with pytest.raises(RenderCheckError, match="byte-identically once"):
+        format_writer_prompt(w0, w0.agents[0], template=doubled_template)
+
+
+def test_25_prose_checks_a_b_c_d_all_refusing_with_recorded_reasons() -> None:
+    """Test 25 (Req 3): Prose checks (a) no markers/fact IDs/step N, (b) banned adverbs, (c) render fidelity over event log, and (d) rule sentence + hearing threshold all refuse and record reasons."""
+    import udlab_generator as ug
+    from udlab_generator.world import BELIEF_PERSISTENCE_RULE
+
+    w = generate_world(make_balanced_configs(2, base_seed=20261030)[0])
+    fa = w.agents[0]
+    clean_prose = render_world_template(w, fa)
+
+    # Clean prose rendered by render_world_template must pass all checks (a)-(d)
+    assert check_rendered_prose(clean_prose, w, focal_agent=fa) == ()
+    assert "[establishing" not in clean_prose
+    assert "preconditions:" not in clean_prose
+    for fid in ("F0", "F0a", "F1", "F2", "F3", "F4"):
+        assert fid not in clean_prose
+    for ev in w.events:
+        assert f"step {ev.step}" not in clean_prose.lower()
+
+    # Check (a): Bracket markers, fact IDs, and "step N" must each refuse
+    for bad_marker, expected_cid in (
+        (f"{clean_prose} [establishing F1]", "a_no_markers_bracket"),
+        (clean_prose.replace("Stated goals:", "Stated goals (F1, F2):"), "a_no_markers_fact_id"),
+        (clean_prose.replace("Next,", "At step 2,", 1), "a_no_markers_step_number"),
+    ):
+        mw = MockWriter(custom_renderer=lambda _w, _fa, txt=bad_marker: txt)
+        with pytest.raises(RenderCheckError) as exc_info:
+            mw.render_scenario_pair(w)
+        assert exc_info.value.check_id == expected_cid
+        assert len(mw.refusals) == 1
+        assert mw.refusals[0].check_id == expected_cid
+
+    # Check (b): Banned adverbs refuse and record reason
+    mw_adv = MockWriter(custom_renderer=lambda _w, _fa: f"{clean_prose} {fa} furtively looked around.")
+    with pytest.raises(RenderCheckError) as exc_adv:
+        mw_adv.render_scenario_pair(w)
+    assert exc_adv.value.check_id == "b_banned_adverbs"
+    assert mw_adv.refusals[0].check_id == "b_banned_adverbs"
+
+    # Check (c): Render fidelity (missing event, out-of-order events, wrong actor/object/room, unlogged party, unlogged event sentence)
+    paras = clean_prose.split("\n\n")
+    setup_p, events_p = paras[0], paras[1]
+    ev_sents = [s.strip() for s in events_p.split(". ") if s.strip()]
+    ev_sents = [s if s.endswith(".") or s.endswith('"') else s + "." for s in ev_sents]
+
+    # (c.1) Missing event
+    missing_ev_prose = setup_p + "\n\n" + " ".join(ev_sents[:-1])
+    with pytest.raises(RenderCheckError, match="missing or altered event") as exc_c1:
+        check_rendered_prose(missing_ev_prose, w, focal_agent=fa)
+    assert exc_c1.value.check_id == "c_fidelity_missing_event"
+
+    # (c.2) Out-of-order events
+    swapped_sents = [ev_sents[1], ev_sents[0], *ev_sents[2:]]
+    swapped_prose = setup_p + "\n\n" + " ".join(swapped_sents)
+    with pytest.raises(RenderCheckError, match="out of relative chronological order|missing or altered event") as exc_c2:
+        check_rendered_prose(swapped_prose, w, focal_agent=fa)
+    assert exc_c2.value.check_id in ("c_fidelity_event_order", "c_fidelity_missing_event")
+
+    # (c.3) Unlogged extra event sentence asserted
+    extra_ev_prose = clean_prose + f" Next, in the {w.rooms[0]}, {fa} observed the {w.objects[0]} in open view."
+    with pytest.raises(RenderCheckError, match="unlogged event sentence") as exc_c3:
+        check_rendered_prose(extra_ev_prose, w, focal_agent=fa)
+    assert exc_c3.value.check_id == "c_fidelity_unlogged_event"
+
+    # (c.4) Unlogged party name from another pool asserted
+    unlogged_party = next(p for pool in ug.world.AGENT_NAME_POOLS for p in pool if p not in w.agents and p not in w.absent_parties)
+    unlogged_party_prose = clean_prose.replace("Stakes:", f"Stakes ({unlogged_party}):")
+    with pytest.raises(RenderCheckError, match="unlogged party name") as exc_c4:
+        check_rendered_prose(unlogged_party_prose, w, focal_agent=fa)
+    assert exc_c4.value.check_id == "c_fidelity_unlogged_party"
+
+    # Check (d): Missing BELIEF_PERSISTENCE_RULE or missing hearing threshold in setup prose refuses
+    no_rule_prose = clean_prose.replace(BELIEF_PERSISTENCE_RULE, "Agents remember what they see.")
+    with pytest.raises(RenderCheckError, match="BELIEF_PERSISTENCE_RULE") as exc_d1:
+        check_rendered_prose(no_rule_prose, w, focal_agent=fa)
+    assert exc_d1.value.check_id == "d_rule_sentence"
+
+    no_thresh_prose = clean_prose.replace(f"{w.noise_threshold} dB", "quiet level", 2)
+    with pytest.raises(RenderCheckError, match="hearing threshold") as exc_d2:
+        check_rendered_prose(no_thresh_prose, w, focal_agent=fa)
+    assert exc_d2.value.check_id == "d_hearing_threshold"
+
+
+def test_26_verify_written_cli_and_ten_scenario_mock_build(tmp_path: Path) -> None:
+    """Test 26 (Req 4 & 5): `udlab-gen --write --writer mock --count 10` and `udlab-gen --verify-written <dir>` run independent B2 derivation, all recounts, prose checks, and `--probe-only`."""
+    out_dir = tmp_path / "mock_10_run"
+    rc_write = cli_main(["--write", "--writer", "mock", "--count", "10", "--out-dir", str(out_dir)])
+    assert rc_write == 0
+    assert (out_dir / "generations.jsonl").is_file()
+    assert (out_dir / "checkpoint.json").is_file()
+    assert (out_dir / "sealed_store" / "checkpoint.sealed.json").is_file()
+
+    rc_verify = cli_main(["--verify-written", str(out_dir)])
+    assert rc_verify == 0
+    verify_doc = json.loads((out_dir / "verify_written_report.json").read_text(encoding="utf-8"))
+    assert verify_doc["passed"] is True
+    assert verify_doc["generations_count"] == 20
+    assert verify_doc["recount_verification"]["scenarios_recounted"] == 10
+    assert verify_doc["recount_verification"]["renderings_prose_checked"] == 20
+    assert verify_doc["recount_verification"]["independent_b2_verified"] is True
+    assert verify_doc["recount_verification"]["independent_recounts_verified"] is True
+    assert verify_doc["probe_only"]["probe_report"]["passed"] is True
+
 
 

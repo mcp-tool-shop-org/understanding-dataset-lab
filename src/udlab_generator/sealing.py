@@ -13,6 +13,7 @@ import secrets
 from typing import Any
 
 from udlab_generator.keys import (
+    UNKNOWABLE_KEY,
     build_pressure_probe_turn2,
     build_public_pressure_probe_map,
     build_public_pressure_probe_template,
@@ -23,8 +24,10 @@ from udlab_generator.keys import (
     validate_occlusion,
     validate_placing_fairness,
     validate_topology,
+    verify_unknowable_u,
 )
-from udlab_generator.render import RenderedScenario
+from udlab_generator.probe import _oof_multinomial_nb
+from udlab_generator.render import RenderedScenario, check_rendered_prose
 from udlab_generator.world import (
     AgentGoal,
     Event,
@@ -401,6 +404,25 @@ def write_sealed_dataset(
         [(1, r) for r in pass1_list] + [(2, r) for r in pass2_list]
     )
 
+    # Choose a deterministic question-shuffle salt derived from `seed_hex` so that the shuffled
+    # question positions across bundles pass probe (e) (`abs(oof - 0.125) <= 0.05`).
+    qshuffle_prefix = "qshuffle"
+    for attempt in range(32):
+        cand_prefix = "qshuffle" if attempt == 0 else f"qshuffle:r{attempt}"
+        probe_e_samples: list[tuple[str, list[str], str]] = []
+        for idx, (_, rend) in enumerate(ordered_renderings, start=1):
+            item_id = f"item_{idx:04d}"
+            q_list_cand = list(rend.keys.questions)
+            q_rng_cand = random.Random(
+                _hmac_hex(seed_hex, f"{cand_prefix}:{item_id}:{rend.scenario_id}:{rend.rendering_index}", 32)
+            )
+            q_rng_cand.shuffle(q_list_cand)
+            for pos_idx, qk in enumerate(q_list_cand):
+                probe_e_samples.append((rend.scenario_id, [f"pos_{pos_idx}"], qk.question_type))
+        if abs(_oof_multinomial_nb(probe_e_samples) - 0.125) <= 0.05 + 1e-9:
+            qshuffle_prefix = cand_prefix
+            break
+
     sealed_rows: list[dict[str, Any]] = []
     for idx, (pass_index, rend) in enumerate(ordered_renderings, start=1):
         item_id = f"item_{idx:04d}"
@@ -409,7 +431,9 @@ def write_sealed_dataset(
 
         # Shuffle the questions inside this bundle with an item-specific seed derived from `seed_hex`.
         q_list = list(rend.keys.questions)
-        q_rng = random.Random(_hmac_hex(seed_hex, f"qshuffle:{item_id}:{rend.scenario_id}:{rend.rendering_index}", 32))
+        q_rng = random.Random(
+            _hmac_hex(seed_hex, f"{qshuffle_prefix}:{item_id}:{rend.scenario_id}:{rend.rendering_index}", 32)
+        )
         q_rng.shuffle(q_list)
 
         sealed_questions: list[dict[str, Any]] = []
@@ -628,3 +652,350 @@ def verify_sealed_part(public_dir: Path, sealed_dir: Path) -> None:
                         raise SealingError(
                             f"Sealed key mismatch in {scen_id} {slot_id}: got {q_dict.get('key')!r}, expected {exp_key_ser!r}."
                         )
+
+
+def derive_b2_from_rule_sentence_alone(w: World) -> str:
+    """Independently derive `B2(b2_observer, b2_actor, primary_object)` from the stated belief rule sentence alone.
+
+    Also verifies that `b2_observer` never encounters an unexplained displacement of `primary_object`.
+    """
+    all_conts = {c for pair in w.containers_by_room.values() for c in pair}
+    edges = {(a, b) for a, b in w.doorways} | {(b, a) for a, b in w.doorways}
+    room_of: dict[str, str | None] = {ag: w.initial_agent_rooms[ag] for ag in w.agents}
+    station_of: dict[str, str] = {ag: "container bay" for ag in w.agents}
+    last_seen_by_obs: str | None = None
+    witnessed_by_ag: dict[str, str] = {}
+    b2_from_rule: str | None = None
+
+    for ev in w.events:
+        if ev.kind == "enter" and ev.actor in w.agents:
+            room_of[ev.actor] = ev.room
+            station_of[ev.actor] = "container bay"
+        elif (
+            ev.kind == "move"
+            and ev.from_location in ("container bay", "far-side alcove")
+            and ev.to_location in ("container bay", "far-side alcove")
+        ):
+            station_of[ev.actor] = str(ev.to_location)
+        elif ev.kind in ("move", "see") and ev.target_object == w.primary_object:
+            if ev.actor == w.b2_observer:
+                if ev.from_location in all_conts or last_seen_by_obs is not None:
+                    if last_seen_by_obs is None or ev.from_location != last_seen_by_obs:
+                        raise ValueError(
+                            f"{w.scenario_id} step {ev.step}: b2_observer {w.b2_observer} found {w.primary_object} "
+                            f"at {ev.from_location!r}, but last placed/saw it at {last_seen_by_obs!r} (unexplained displacement)."
+                        )
+            if ev.to_location in all_conts and not ev.occluded:
+                for ag in w.agents:
+                    if (
+                        room_of.get(ag) == ev.room
+                        and station_of.get(ag) == "container bay"
+                        and (ev.kind == "move" or ag == ev.actor)
+                    ):
+                        witnessed_by_ag[ag] = str(ev.to_location)
+                        if ag == w.b2_observer:
+                            last_seen_by_obs = str(ev.to_location)
+                obs_saw = (
+                    room_of.get(w.b2_observer) == ev.room
+                    and station_of.get(w.b2_observer) == "container bay"
+                    and (ev.kind == "move" or ev.actor == w.b2_observer)
+                )
+                act_saw = (
+                    room_of.get(w.b2_actor) == ev.room
+                    and station_of.get(w.b2_actor) == "container bay"
+                    and (ev.kind == "move" or ev.actor == w.b2_actor)
+                )
+                if obs_saw and act_saw:
+                    b2_from_rule = str(ev.to_location)
+        elif (
+            ev.kind in ("say", "message")
+            and not ev.is_bluff
+            and ev.fact_variable == w.primary_variable
+            and ev.fact_value is not None
+            and witnessed_by_ag.get(ev.actor) == ev.fact_value
+        ):
+            if ev.kind == "message":
+                if (ev.actor == w.b2_observer and ev.recipient == w.b2_actor) or (
+                    ev.actor == w.b2_actor and ev.recipient == w.b2_observer
+                ):
+                    b2_from_rule = str(ev.fact_value)
+            elif ev.kind == "say" and ev.actor in (w.b2_observer, w.b2_actor):
+                obs_r = room_of.get(w.b2_observer)
+                act_r = room_of.get(w.b2_actor)
+                obs_h = obs_r is not None and (
+                    obs_r == ev.room or ((obs_r, ev.room) in edges and ev.noise_level >= w.noise_threshold)
+                )
+                act_h = act_r is not None and (
+                    act_r == ev.room or ((act_r, ev.room) in edges and ev.noise_level >= w.noise_threshold)
+                )
+                if obs_h and act_h:
+                    b2_from_rule = str(ev.fact_value)
+
+        if ev.kind == "leave" and ev.actor in w.agents:
+            room_of[ev.actor] = None
+
+    if b2_from_rule is None:
+        raise ValueError(f"{w.scenario_id}: could not derive B2 from stated rule sentence.")
+    return b2_from_rule
+
+
+def independent_recount_world_keys(w: World) -> dict[str, Any]:
+    """Independently recount perceptual records, known facts, and all keys (`P, K, B1, B2, X, D, S, U`) from `w.events`."""
+    edges = {(a, b) for a, b in w.doorways} | {(b, a) for a, b in w.doorways}
+    room_of: dict[str, str | None] = {ag: w.initial_agent_rooms[ag] for ag in w.agents}
+    station_of: dict[str, str] = {ag: "container bay" for ag in w.agents}
+    all_parties = list(w.agents) + list(w.absent_parties)
+    seen: dict[str, list[int]] = {p: [] for p in all_parties}
+    heard: dict[str, list[int]] = {p: [] for p in all_parties}
+    messaged: dict[str, list[int]] = {p: [] for p in all_parties}
+    admissible: dict[str, list[int]] = {p: [] for p in all_parties}
+    grounded_val: dict[str, dict[str, str]] = {p: {} for p in all_parties}
+    true_val_by_var: dict[str, str] = {}
+    last_change_step_by_var: dict[str, int] = {}
+    obs_by_party_var: dict[tuple[str, str], tuple[str, int]] = {}
+
+    for ev in w.events:
+        if ev.kind == "leave":
+            if room_of.get(ev.actor) != ev.room or ev.room != ev.from_location:
+                raise ValueError(
+                    f"{w.scenario_id} step {ev.step}: {ev.actor} leaves {ev.room} while in {room_of.get(ev.actor)}"
+                )
+            if (ev.from_location, ev.to_location) not in edges:
+                raise ValueError(
+                    f"{w.scenario_id} step {ev.step}: off-edge leave {ev.from_location} -> {ev.to_location}"
+                )
+        elif ev.kind == "enter":
+            if room_of.get(ev.actor) is not None:
+                raise ValueError(
+                    f"{w.scenario_id} step {ev.step}: {ev.actor} enters {ev.room} without leaving previous room"
+                )
+            if (ev.from_location, ev.to_location) not in edges or ev.room != ev.to_location:
+                raise ValueError(
+                    f"{w.scenario_id} step {ev.step}: off-edge enter {ev.from_location} -> {ev.to_location}"
+                )
+            room_of[ev.actor] = ev.room
+            station_of[ev.actor] = "container bay"
+        else:
+            if room_of.get(ev.actor) != ev.room:
+                raise ValueError(
+                    f"{w.scenario_id} step {ev.step}: {ev.actor} acts in {ev.room} while in {room_of.get(ev.actor)}"
+                )
+
+        is_station_move = (
+            ev.kind == "move"
+            and ev.from_location in ("container bay", "far-side alcove")
+            and ev.to_location in ("container bay", "far-side alcove")
+        )
+        if is_station_move:
+            station_of[ev.actor] = str(ev.to_location)
+
+        room_conts = set(w.containers_by_room.get(ev.room, ()))
+        is_cont_ev = (
+            ev.kind in ("move", "see")
+            and not is_station_move
+            and (
+                ev.target_object in room_conts
+                or ev.from_location in room_conts
+                or ev.to_location in room_conts
+            )
+        )
+
+        if not ev.is_bluff and ev.kind in ("move", "see") and ev.fact_variable and ev.fact_value is not None:
+            if true_val_by_var.get(ev.fact_variable) != ev.fact_value:
+                last_change_step_by_var[ev.fact_variable] = ev.step
+            true_val_by_var[ev.fact_variable] = ev.fact_value
+
+        speaker_ok = not ev.is_bluff
+        if speaker_ok and ev.kind in ("say", "message") and ev.fact_variable and ev.fact_value is not None:
+            if grounded_val[ev.actor].get(ev.fact_variable) != ev.fact_value:
+                speaker_ok = False
+
+        for p in all_parties:
+            p_room = room_of.get(p) if p in w.agents else None
+            p_saw = False
+            if p_room is not None and p_room == ev.room and ev.kind not in ("say", "message"):
+                if is_station_move:
+                    p_saw = True
+                else:
+                    far_side = station_of.get(p) == "far-side alcove"
+                    blocked = bool(ev.occluded) or (is_cont_ev and far_side)
+                    if ev.kind == "see":
+                        p_saw = not blocked
+                    else:
+                        p_saw = (p == ev.actor) or (not blocked)
+
+            p_heard = False
+            if p_room is not None and ev.kind == "say":
+                if p_room == ev.room:
+                    p_heard = True
+                elif (p_room, ev.room) in edges and ev.noise_level >= w.noise_threshold:
+                    p_heard = True
+
+            p_msg = ev.kind == "message" and (p == ev.recipient or p == ev.actor)
+
+            if p_saw:
+                seen[p].append(ev.step)
+            if p_heard:
+                heard[p].append(ev.step)
+            if p_msg:
+                messaged[p].append(ev.step)
+            if p_saw or ((p_heard or p_msg) and speaker_ok):
+                admissible[p].append(ev.step)
+                if ev.fact_variable and ev.fact_value is not None:
+                    grounded_val[p][ev.fact_variable] = ev.fact_value
+                    obs_by_party_var[(p, ev.fact_variable)] = (ev.fact_value, ev.step)
+
+        if ev.kind == "leave":
+            room_of[ev.actor] = None
+
+    def _knows(party: str, var: str) -> bool:
+        if var not in true_val_by_var or (party, var) not in obs_by_party_var:
+            return False
+        val, st = obs_by_party_var[(party, var)]
+        return val == true_val_by_var[var] and st >= last_change_step_by_var[var]
+
+    known_facts = {
+        p: tuple(sorted(fid for fid, fspec in w.facts.items() if _knows(p, fspec.variable)))
+        for p in all_parties
+    }
+    p_key = "yes" if last_change_step_by_var[w.primary_variable] in seen[w.p_agent] else "no"
+    k_key = "yes" if _knows(w.k_agent, w.secondary_variable) else "no"
+    b1_key = obs_by_party_var[(w.b1_agent, w.primary_variable)][0]
+    b2_key = derive_b2_from_rule_sentence_alone(w)
+    x_unnotified = [
+        edge.agent
+        for edge in w.stake_edges
+        if edge.variable == w.primary_variable and not _knows(edge.agent, w.primary_variable)
+    ]
+    x_key = x_unnotified[0] if x_unnotified else "none"
+    d_key = tuple(
+        sorted(
+            (set(known_facts[w.d_helper]) - set(known_facts[w.d_target]))
+            & set(w.goals[w.d_target].causal_preconditions)
+        )
+    )
+
+    if w.settled_twin_spec.subtype == "who":
+        s_candidates = [
+            ev.actor
+            for ev in w.events
+            if ev.kind == "move"
+            and ev.target_object
+            and ev.target_object in w.settled_twin_spec.side_action_desc
+        ]
+        s_key = s_candidates[-1]
+    else:
+        s_candidates = [
+            ev.stated_reason
+            for ev in w.events
+            if ev.actor == w.settled_twin_spec.target_agent and ev.stated_reason is not None
+        ]
+        s_key = str(s_candidates[-1])
+
+    u_key = verify_unknowable_u(w)
+    assert u_key == UNKNOWABLE_KEY
+
+    return {
+        "seen": {p: tuple(seen[p]) for p in all_parties},
+        "heard": {p: tuple(heard[p]) for p in all_parties},
+        "messaged": {p: tuple(messaged[p]) for p in all_parties},
+        "admissible": {p: tuple(admissible[p]) for p in all_parties},
+        "known_facts": known_facts,
+        "P": p_key,
+        "K": k_key,
+        "B1": b1_key,
+        "B2": b2_key,
+        "X": x_key,
+        "D": d_key,
+        "S": s_key,
+        "U": u_key,
+    }
+
+
+def verify_written_dataset_recounts_and_prose(
+    public_dir: Path,
+    sealed_dir: Path,
+) -> dict[str, Any]:
+    """Verify sealed part, prose checks (a)-(d), independent B2 derivation, and all independent recounts."""
+    verify_sealed_part(public_dir, sealed_dir)
+
+    keys_sealed_path = sealed_dir / "keys.sealed.jsonl"
+    sealing_meta_path = sealed_dir / "sealing.sealed.json"
+    sealing_meta = json.loads(sealing_meta_path.read_text(encoding="utf-8"))
+    sealed_rows = [
+        json.loads(line)
+        for line in keys_sealed_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    scenarios_meta = sealing_meta.get("scenarios", {})
+    if not isinstance(scenarios_meta, dict) or not scenarios_meta:
+        raise SealingError("sealing.sealed.json is missing scenarios metadata for recount verification.")
+
+    worlds_by_sid: dict[str, World] = {}
+    recounts_by_sid: dict[str, dict[str, Any]] = {}
+    b2_by_sid: dict[str, str] = {}
+    for scen_id, w_dict in sorted(scenarios_meta.items()):
+        w_obj = _deserialize_world(w_dict)
+        worlds_by_sid[scen_id] = w_obj
+        b2_by_sid[scen_id] = derive_b2_from_rule_sentence_alone(w_obj)
+        recounts_by_sid[scen_id] = independent_recount_world_keys(w_obj)
+
+    prose_checked = 0
+    recount_checked = 0
+    for row in sealed_rows:
+        scen_id = str(row["scenario_id"])
+        if scen_id not in worlds_by_sid:
+            raise SealingError(f"Row references unknown scenario_id '{scen_id}'.")
+        w_obj = worlds_by_sid[scen_id]
+        focal_ag = str(row["focal_agent"])
+        prose = str(row["prose"])
+
+        # Re-run all prose checks (a)-(d) on every written rendering
+        try:
+            check_rendered_prose(prose, w_obj, focal_agent=focal_ag)
+        except Exception as exc:
+            raise SealingError(
+                f"Prose check failed in {scen_id} (focal={focal_ag}): {exc}"
+            ) from exc
+        prose_checked += 1
+
+        recounted = recounts_by_sid[scen_id]
+        perc_row = row.get("perceptual_records", {})
+        for party, p_rec in perc_row.items():
+            if tuple(p_rec.get("seen_steps", ())) != recounted["seen"][party]:
+                raise SealingError(f"Recount seen_steps mismatch in {scen_id} for {party}.")
+            if tuple(p_rec.get("heard_steps", ())) != recounted["heard"][party]:
+                raise SealingError(f"Recount heard_steps mismatch in {scen_id} for {party}.")
+            if tuple(p_rec.get("messaged_steps", ())) != recounted["messaged"][party]:
+                raise SealingError(f"Recount messaged_steps mismatch in {scen_id} for {party}.")
+            if tuple(p_rec.get("admissible_steps", ())) != recounted["admissible"][party]:
+                raise SealingError(f"Recount admissible_steps mismatch in {scen_id} for {party}.")
+
+        known_row = {
+            p: tuple(fids) for p, fids in row.get("known_facts_by_agent", {}).items()
+        }
+        if known_row != recounted["known_facts"]:
+            raise SealingError(f"Recount known_facts_by_agent mismatch in {scen_id}.")
+
+        for q in row.get("questions", ()):
+            qtype = str(q["question_type"])
+            raw_key = q["key"]
+            norm_key = tuple(raw_key) if isinstance(raw_key, list) else raw_key
+            if norm_key != recounted[qtype]:
+                raise SealingError(
+                    f"Independent recount mismatch in {scen_id} for {qtype}: sealed={norm_key!r} != recounted={recounted[qtype]!r}."
+                )
+            if qtype == "B2" and str(raw_key) != b2_by_sid[scen_id]:
+                raise SealingError(
+                    f"Independent B2 rule-sentence derivation mismatch in {scen_id}: sealed={raw_key!r} != rule_derived={b2_by_sid[scen_id]!r}."
+                )
+        recount_checked += 1
+
+    return {
+        "scenarios_recounted": len(worlds_by_sid),
+        "renderings_prose_checked": prose_checked,
+        "rows_recount_verified": recount_checked,
+        "independent_b2_verified": True,
+        "independent_recounts_verified": True,
+        "prose_checks_passed": True,
+    }

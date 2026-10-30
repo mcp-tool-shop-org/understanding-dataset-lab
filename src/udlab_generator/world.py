@@ -591,6 +591,11 @@ def make_balanced_configs(count: int, base_seed: int = 20261030) -> list[Scenari
         x_val = bool(s0 ^ s1 ^ s2)
         p_val = bool(s0 ^ s2 ^ s3)
         k_val = bool(s0 ^ s1 ^ s3)
+        if count % 4 == 2 and idx >= count - 2:
+            if idx == count - 1:
+                loc_bit ^= 1
+            p_val = not u_val
+            k_val = u_val
 
         raw_seed = rng.randint(100_000, 999_999_999) ^ (idx * 7919)
         scen_seed = (raw_seed & ~1) | loc_bit
