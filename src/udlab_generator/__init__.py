@@ -102,23 +102,30 @@ from udlab_generator.render import (
     format_action_verbs_by_kind_summary,
     format_blocking_phrases_summary,
     format_negation_phrases_summary,
+    format_non_sealed_refusal_reason,
     format_repair_retry_line,
     format_writer_prompt,
     get_checker_enforced_check_ids,
     indefinite_article,
     kill_pid_tree,
     load_writer_prompt_template,
+    locate_failing_sentence_in_response,
+    parse_generation_refusal_metadata,
     parse_writer_prompt_requirements,
     query_gpu_vram_peak_mib,
     render_world_template,
     render_writer_prompt_constraints,
     require_loopback_ollama_url,
+    resolve_sealed_failing_sentence,
     round_up_num_ctx,
     start_owned_ollama_server,
     verify_local_ollama_model_digest,
     verify_prompt_and_checker_requirements_aligned,
 )
-from udlab_generator.cli import recheck_saved_responses
+from udlab_generator.cli import (
+    format_verify_written_console_refusals,
+    recheck_saved_responses,
+)
 from udlab_generator.sealing import (
     FORBIDDEN_PUBLIC_FIELDS,
     SealedDatasetReceipt,

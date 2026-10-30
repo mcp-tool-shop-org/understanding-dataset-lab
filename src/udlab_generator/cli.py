@@ -38,7 +38,7 @@ from udlab_generator.render import (
     MockWriter,
     OllamaHttpTransport,
     OllamaWriter,
-     RenderCheckError,
+    RenderCheckError,
     RenderedScenario,
     SealedResponseEntry,
     WriterCheckpointManager,
@@ -47,7 +47,11 @@ from udlab_generator.render import (
     compute_num_ctx,
     compute_sealed_response_digests,
     estimate_prompt_tokens,
+    format_non_sealed_refusal_reason,
     kill_pid_tree,
+    locate_failing_sentence_in_response,
+    parse_generation_refusal_metadata,
+    resolve_sealed_failing_sentence,
 )
 from udlab_generator.sealing import (
     _deserialize_world,
@@ -202,6 +206,7 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
     refusals_by_check_id: Counter[str] = Counter()
     calls_kept = 0
     calls_refused = 0
+    legacy_refusal_format_calls = 0
     final_by_rendering: dict[tuple[str, int], bool] = {}
     scenarios_seen: list[str] = []
     seen_set: set[str] = set()
@@ -242,20 +247,78 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
             check_rendered_prose(response_text, world, focal_agent=focal_agent)
             passed = True
             check_id: str | None = None
+            event_index: int | None = None
+            event_kind: str | None = None
             failing_sentence: str | None = None
             reason: str | None = None
             calls_kept += 1
         except RenderCheckError as exc:
             passed = False
             check_id = exc.check_id
+            event_index = exc.event_index
+            event_kind = exc.event_kind
             failing_sentence = exc.failing_sentence
             reason = str(exc)
             calls_refused += 1
             refusals_by_check_id[exc.check_id] += 1
 
+        recomputed_fail_sha, recomputed_fail_off, recomputed_fail_len = (
+            locate_failing_sentence_in_response(response_text, failing_sentence)
+            if not passed
+            else ("", None, None)
+        )
+        recorded_refusal_format = "sealed_offset_v1"
+        failing_sentence_sha_verified = True
+        if gen_row is not None:
+            parsed_meta = parse_generation_refusal_metadata(gen_row)
+            recorded_refusal_format = str(parsed_meta["format"])
+            if recorded_refusal_format == "legacy_inline_v0":
+                legacy_refusal_format_calls += 1
+                fail_sha = recomputed_fail_sha
+                fail_off = recomputed_fail_off
+                fail_len = recomputed_fail_len
+                if fail_sha:
+                    resolved_sent, slice_ok = resolve_sealed_failing_sentence(
+                        response_text,
+                        failing_sentence_sha256=fail_sha,
+                        failing_sentence_offset=fail_off,
+                        failing_sentence_length=fail_len,
+                    )
+                    failing_sentence_sha_verified = slice_ok
+                    if slice_ok and resolved_sent is not None:
+                        failing_sentence = resolved_sent
+            else:
+                fail_sha = str(parsed_meta["failing_sentence_sha256"] or "")
+                fail_off = parsed_meta["failing_sentence_offset"]
+                fail_len = parsed_meta["failing_sentence_length"]
+                if not passed:
+                    resolved_sent, slice_ok = resolve_sealed_failing_sentence(
+                        response_text,
+                        failing_sentence_sha256=fail_sha,
+                        failing_sentence_offset=fail_off,
+                        failing_sentence_length=fail_len,
+                    )
+                    if (
+                        not slice_ok
+                        or fail_sha != recomputed_fail_sha
+                        or fail_off != recomputed_fail_off
+                        or fail_len != recomputed_fail_len
+                    ):
+                        failing_sentence_sha_verified = False
+                        sha_verified = False
+                    elif resolved_sent is not None:
+                        failing_sentence = resolved_sent
+                elif fail_sha or fail_off is not None or fail_len is not None:
+                    failing_sentence_sha_verified = False
+                    sha_verified = False
+        else:
+            fail_sha = recomputed_fail_sha
+            fail_off = recomputed_fail_off
+            fail_len = recomputed_fail_len
+
         final_by_rendering[(scen_id, r_idx)] = passed
         recorded_passed = bool(gen_row.get("checks_passed", True)) if gen_row is not None else passed
-        verdict_matches = (passed == recorded_passed) and sha_verified
+        verdict_matches = (passed == recorded_passed) and sha_verified and failing_sentence_sha_verified
         if not verdict_matches:
             all_verdicts_match = False
 
@@ -274,8 +337,15 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
                 "checks_passed": passed,
                 "recorded_checks_passed": recorded_passed,
                 "verdict_matches_recorded": verdict_matches,
+                "recorded_refusal_format": recorded_refusal_format,
                 "check_id": check_id,
+                "event_index": event_index,
+                "event_kind": event_kind,
                 "failing_sentence": failing_sentence,
+                "failing_sentence_sha256": fail_sha,
+                "failing_sentence_offset": fail_off,
+                "failing_sentence_length": fail_len,
+                "failing_sentence_sha256_verified": failing_sentence_sha_verified,
                 "reason": reason,
             }
         )
@@ -304,6 +374,7 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
         "kept": renderings_kept,
         "refused": renderings_refused,
         "refusals_by_check_id": dict(sorted(refusals_by_check_id.items())),
+        "legacy_refusal_format_calls": legacy_refusal_format_calls,
         "matches_recorded_verdicts": all_verdicts_match,
     }
 
@@ -331,16 +402,30 @@ def verify_written_dataset(output_dir: Path) -> dict[str, object]:
        from the stated rule sentence alone, and all independent recounts (`P, K, B1, B2, X, D, S, U`).
     2. Runs `--probe-only` (`run_probe_only`) on the written `sealed_store/keys.sealed.jsonl`.
     3. Validates `generations.jsonl` existence, record count (`>= num_rows`), pinned `manifest_digest`,
-       `done_reason == "stop"`, and `checks_passed == True` for every kept scenario rendering.
+       `done_reason == "stop"`, and `checks_passed == True` for every kept scenario rendering, and
+       verifies sealed slice SHA-256 for any refused rows without writing model sentence text into
+       `verify_written_report.json`.
     """
     public_dir = output_dir / "part_public"
     sealed_dir = output_dir / "sealed_store"
     keys_sealed_path = sealed_dir / "keys.sealed.jsonl"
+    responses_sealed_path = sealed_dir / SEALED_RESPONSES_FILENAME
     generations_path = output_dir / GENERATIONS_FILENAME
 
     recount_report = verify_written_dataset_recounts_and_prose(public_dir, sealed_dir)
     probe_only_result = run_probe_only(keys_sealed_path)
     num_rows = int(probe_only_result["num_rows"])  # type: ignore[arg-type]
+
+    sealed_responses_by_call_id: dict[str, dict[str, Any]] = {}
+    if responses_sealed_path.is_file():
+        for raw_resp_line in responses_sealed_path.read_text(encoding="utf-8").splitlines():
+            if raw_resp_line.strip():
+                try:
+                    resp_obj = json.loads(raw_resp_line)
+                    if isinstance(resp_obj, dict) and resp_obj.get("call_id"):
+                        sealed_responses_by_call_id[str(resp_obj["call_id"])] = resp_obj
+                except Exception:
+                    pass
 
     generations_sha256: str | None = None
     generations_count = 0
@@ -392,8 +477,37 @@ def verify_written_dataset(output_dir: Path) -> dict[str, object]:
                     f"Line {line_idx} ({sid}, r{r_idx}) has done_reason={rec_obj.get('done_reason')!r}, expected 'stop'."
                 )
             if rec_obj.get("checks_passed", True) is not True or rec_obj.get("refusal_reasons"):
+                parsed_meta = parse_generation_refusal_metadata(rec_obj)
+                cid = str(parsed_meta["check_id"] or "render_check")
+                ev_idx = parsed_meta["event_index"]
+                ev_kind = parsed_meta["event_kind"]
+                fail_sha = str(parsed_meta["failing_sentence_sha256"] or "")
+                fail_off = parsed_meta["failing_sentence_offset"]
+                fail_len = parsed_meta["failing_sentence_length"]
+                call_id_str = str(rec_obj.get("call_id") or "")
+                sealed_resp = sealed_responses_by_call_id.get(call_id_str)
+                if parsed_meta["format"] == "sealed_offset_v1" and sealed_resp is not None:
+                    resp_text = str(sealed_resp.get("response_text") or "")
+                    _, slice_ok = resolve_sealed_failing_sentence(
+                        resp_text,
+                        failing_sentence_sha256=fail_sha,
+                        failing_sentence_offset=fail_off,
+                        failing_sentence_length=fail_len,
+                    )
+                    if not slice_ok:
+                        generations_errors.append(
+                            f"Line {line_idx} ({sid}, r{r_idx}) failing_sentence_sha256 mismatch at offset={fail_off}, length={fail_len} in {SEALED_RESPONSES_FILENAME}."
+                        )
+                sanitized_refusal = format_non_sealed_refusal_reason(
+                    check_id=cid,
+                    event_index=ev_idx,
+                    event_kind=ev_kind,
+                    failing_sentence_sha256=fail_sha,
+                    failing_sentence_offset=fail_off,
+                    failing_sentence_length=fail_len,
+                )
                 generations_errors.append(
-                    f"Line {line_idx} ({sid}, r{r_idx}) did not pass prose checks (checks_passed={rec_obj.get('checks_passed')!r}, refusal_reasons={rec_obj.get('refusal_reasons')!r})."
+                    f"Line {line_idx} ({sid}, r{r_idx}) did not pass prose checks (checks_passed={rec_obj.get('checks_passed')!r}, refusal={sanitized_refusal!r})."
                 )
 
         if len(kept_by_rendering) < num_rows:
@@ -425,6 +539,63 @@ def verify_written_dataset(output_dir: Path) -> dict[str, object]:
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return result
+
+
+def format_verify_written_console_refusals(output_dir: Path) -> list[str]:
+    """Resolve and format refused calls' failing sentences from `sealed_store/responses.sealed.jsonl` for console-only `--verify-written` output."""
+    generations_path = output_dir / GENERATIONS_FILENAME
+    responses_sealed_path = output_dir / "sealed_store" / SEALED_RESPONSES_FILENAME
+    if not generations_path.is_file() or not responses_sealed_path.is_file():
+        return []
+    sealed_by_call_id: dict[str, dict[str, Any]] = {}
+    for line in responses_sealed_path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict) and obj.get("call_id"):
+                    sealed_by_call_id[str(obj["call_id"])] = obj
+            except Exception:
+                pass
+    lines: list[str] = []
+    for raw_line in generations_path.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            rec_obj = json.loads(raw_line)
+        except Exception:
+            continue
+        if not isinstance(rec_obj, dict):
+            continue
+        if rec_obj.get("checks_passed", True) is True and not rec_obj.get("refusal_reasons"):
+            continue
+        call_id = str(rec_obj.get("call_id") or "")
+        parsed = parse_generation_refusal_metadata(rec_obj)
+        cid = str(parsed["check_id"] or "render_check")
+        ev_idx = parsed["event_index"]
+        ev_kind = parsed["event_kind"]
+        fail_sha = str(parsed["failing_sentence_sha256"] or "")
+        fail_off = parsed["failing_sentence_offset"]
+        fail_len = parsed["failing_sentence_length"]
+        sealed_entry = sealed_by_call_id.get(call_id)
+        resolved_sent: str | None = None
+        sha_ok = False
+        if sealed_entry is not None:
+            resp_text = str(sealed_entry.get("response_text") or "")
+            if parsed["format"] == "sealed_offset_v1":
+                resolved_sent, sha_ok = resolve_sealed_failing_sentence(
+                    resp_text,
+                    failing_sentence_sha256=fail_sha,
+                    failing_sentence_offset=fail_off,
+                    failing_sentence_length=fail_len,
+                )
+            elif sealed_entry.get("failing_sentence"):
+                resolved_sent = str(sealed_entry["failing_sentence"])
+                sha_ok = True
+        lines.append(
+            f"[verify-written] {call_id}: FAIL check_id={cid} event_index={ev_idx} "
+            f"event_kind={ev_kind} sha256_verified={sha_ok} failing_sentence={(resolved_sent or '')!r}"
+        )
+    return lines
 
 
 def build_and_probe_dataset(
@@ -863,6 +1034,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.verify_written is not None:
         verify_res = verify_written_dataset(args.verify_written)
+        for console_line in format_verify_written_console_refusals(args.verify_written):
+            print(console_line)
         passed = bool(verify_res["passed"])
         print(json.dumps(verify_res, indent=2, sort_keys=True))
         return 0 if passed else 1

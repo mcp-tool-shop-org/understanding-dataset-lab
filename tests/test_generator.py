@@ -3425,9 +3425,16 @@ def test_43_fake_transport_keep_and_continue_and_max_retries(tmp_path: Path) -> 
     assert saved_rows_1[1]["response_sha256"] == gen_rows_1[1]["response_sha256"] == exp_r1_sha
     assert saved_rows_1[1]["thinking_sha256"] == gen_rows_1[1]["thinking_sha256"] == exp_t1_sha
     assert gen_rows_1[1]["checks_passed"] is False
+    exp_sent0_sha = hashlib.sha256(failing_r1_sent_0.encode("utf-8")).hexdigest()
+    assert gen_rows_1[1]["check_id"] == "c_fidelity_missing_event"
+    assert gen_rows_1[1]["failing_sentence_sha256"] == exp_sent0_sha
+    assert any(
+        "c_fidelity_missing_event" in r and exp_sent0_sha in r and failing_r1_sent_0 not in r
+        for r in gen_rows_1[1]["refusal_reasons"]
+    )
     assert any(
         "c_fidelity_missing_event" in r and failing_r1_sent_0 in r
-        for r in gen_rows_1[1]["refusal_reasons"]
+        for r in saved_rows_1[1]["refusal_reasons"]
     )
 
     # Also test --max-retries 1 on the same failing rendering: attempt 0 fails, attempt 1 (with seed + 1) passes!
@@ -5900,14 +5907,490 @@ def test_62_card_sx_retry_row_canonical_prompt_sha_and_fields(tmp_path: Path) ->
     assert row_st["repair_line_sha256"] == hashlib.sha256(row_st["repair_line"].encode("utf-8")).hexdigest()
 
 
+def test_67_card_tb_refusal_records_sealed_only_and_readers_resolve(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Test 67 (Card tb Req 1, 2, 4):
+    - Refusal records in `generations.jsonl` keep check_id, event_index and event_kind (where present),
+      failing_sentence_sha256, failing_sentence_offset, and failing_sentence_length, with NO sentence text.
+    - Full refusal message (with sentence) goes to `sealed_store/responses.sealed.jsonl`, keyed by `call_id`.
+    - `--recheck` and `--verify-written` resolve the sentence from `sealed_store/responses.sealed.jsonl`
+      at the recorded offset and verify `sha256(slice) == failing_sentence_sha256`.
+    - `verify_written_report.json` carries no sentence text; console output may print it.
+    - Legacy format (`generations.jsonl` with inline sentence and no offset/sha) is handled cleanly.
+    """
+    import hashlib
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+    )
+    from udlab_generator.cli import recheck_saved_responses, verify_written_dataset
+    import udlab_generator.render as ug_render
+    import udlab_generator.sealing as ug_sealing
+
+    assert hasattr(ug_render, "locate_failing_sentence_in_response")
+    assert hasattr(ug_render, "resolve_sealed_failing_sentence")
+    assert "failing_sentence" in ug_sealing.FORBIDDEN_PUBLIC_FIELDS
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    passing_r0 = render_world_template(w0, w0.agents[0])
+    passing_r1 = render_world_template(w0, w0.agents[1])
+
+    # r0 attempt 0 fails a setup check (c_fidelity_stake_edge, event_index=None, event_kind=None),
+    # then r0 attempt 1 passes.
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    orig_stake = w0.stake_edges[0].description
+    bad_stake_sent = (
+        "Gia is an absent party who depends on the location of the brass ledger "
+        "for tomorrow's courier handoff (SETUP_FAIL_SENT_TB_67)."
+    )
+    failing_r0_setup = f"{sj_setup.replace('whereas Gia is absent off-site', 'whereas the courier is absent off-site').replace(orig_stake, bad_stake_sent)}\n\n{' '.join(sj_sents)}"
+
+    # r1 attempt 0 and attempt 1 fail an event check (c_fidelity_missing_event, event_index=1, event_kind="see")
+    bad_ev1_sent = "In the bindery room, Eva observed the index reel in open view (EVENT1_FAIL_SENT_TB_67)."
+    failing_r1_ev1 = (
+        f"{sj_setup.replace('Following Eva', f'Following {w0.agents[1]}')}\n\n"
+        f"{' '.join([bad_ev1_sent, *sj_sents[1:]])}"
+    )
+
+    chat_responses = [failing_r0_setup, passing_r0, failing_r1_ev1, failing_r1_ev1]
+    call_counter = 0
+
+    def _transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal call_counter
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            txt = chat_responses[call_counter]
+            call_counter += 1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3050,
+                "eval_count": 810,
+                "logprobs": [{"token": "SECRET_LOGPROB_TOKEN_TB_67", "logprob": -0.05}],
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_dir = tmp_path / "tb_sealed_refusals"
+    build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        max_retries=1,
+        grant_id="test-grant-tb-67",
+        http_transport=_transport,
+        start_owned_server=False,
+    )
+
+    gen_raw = (out_dir / "generations.jsonl").read_text(encoding="utf-8")
+    assert bad_stake_sent not in gen_raw
+    assert bad_ev1_sent not in gen_raw
+    assert "SETUP_FAIL_SENT_TB_67" not in gen_raw
+    assert "EVENT1_FAIL_SENT_TB_67" not in gen_raw
+    assert "SECRET_LOGPROB_TOKEN_TB_67" not in gen_raw
+
+    gen_rows = [json.loads(line) for line in gen_raw.splitlines() if line.strip()]
+    sealed_rows = [
+        json.loads(line)
+        for line in (out_dir / "sealed_store" / "responses.sealed.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(gen_rows) == 4
+    assert len(sealed_rows) == 4
+
+    # Call 0 (r0 attempt 0): setup check failure (no event_index/event_kind)
+    exp_stake_sha = hashlib.sha256(bad_stake_sent.encode("utf-8")).hexdigest()
+    exp_stake_off = failing_r0_setup.index(bad_stake_sent)
+    exp_stake_len = len(bad_stake_sent)
+    assert gen_rows[0]["checks_passed"] is False
+    assert gen_rows[0]["check_id"] == "c_fidelity_stake_edge"
+    assert gen_rows[0]["event_index"] is None
+    assert gen_rows[0]["event_kind"] is None
+    assert gen_rows[0]["failing_sentence_sha256"] == exp_stake_sha
+    assert gen_rows[0]["failing_sentence_offset"] == exp_stake_off
+    assert gen_rows[0]["failing_sentence_length"] == exp_stake_len
+    assert failing_r0_setup[exp_stake_off : exp_stake_off + exp_stake_len] == bad_stake_sent
+    assert sealed_rows[0]["call_id"] == gen_rows[0]["call_id"]
+    assert sealed_rows[0]["failing_sentence"] == bad_stake_sent
+    assert any(bad_stake_sent in r for r in sealed_rows[0]["refusal_reasons"])
+
+    # Call 2 (r1 attempt 0): event check failure (event_index=1, event_kind='see')
+    exp_ev1_sha = hashlib.sha256(bad_ev1_sent.encode("utf-8")).hexdigest()
+    exp_ev1_off = failing_r1_ev1.index(bad_ev1_sent)
+    exp_ev1_len = len(bad_ev1_sent)
+    assert gen_rows[2]["checks_passed"] is False
+    assert gen_rows[2]["check_id"] == "c_fidelity_missing_event"
+    assert gen_rows[2]["event_index"] == 1
+    assert gen_rows[2]["event_kind"] == "see"
+    assert gen_rows[2]["failing_sentence_sha256"] == exp_ev1_sha
+    assert gen_rows[2]["failing_sentence_offset"] == exp_ev1_off
+    assert gen_rows[2]["failing_sentence_length"] == exp_ev1_len
+    assert failing_r1_ev1[exp_ev1_off : exp_ev1_off + exp_ev1_len] == bad_ev1_sent
+    assert sealed_rows[2]["call_id"] == gen_rows[2]["call_id"]
+    assert sealed_rows[2]["failing_sentence"] == bad_ev1_sent
+    assert any(bad_ev1_sent in r for r in sealed_rows[2]["refusal_reasons"])
+
+    # Verify --verify-written and --recheck resolve the sentence from sealed_store and check sha256:
+    capsys.readouterr()
+    rc_vw = cli_main(["--verify-written", str(out_dir)])
+    vw_out = capsys.readouterr().out
+    assert rc_vw == 1
+    vw_report_text = (out_dir / "verify_written_report.json").read_text(encoding="utf-8")
+    assert bad_stake_sent not in vw_report_text
+    assert bad_ev1_sent not in vw_report_text
+    assert "SETUP_FAIL_SENT_TB_67" not in vw_report_text
+    assert "EVENT1_FAIL_SENT_TB_67" not in vw_report_text
+    # Console output of --verify-written prints the resolved sentence:
+    assert bad_stake_sent in vw_out
+    assert bad_ev1_sent in vw_out
+
+    capsys.readouterr()
+    rc_rc = cli_main(["--recheck", str(out_dir)])
+    rc_out = capsys.readouterr().out
+    assert rc_rc == 0
+    assert bad_stake_sent in rc_out
+    assert bad_ev1_sent in rc_out
+
+    recheck_res = recheck_saved_responses(out_dir)
+    assert recheck_res["matches_recorded_verdicts"] is True
+    assert recheck_res["calls"][0]["failing_sentence"] == bad_stake_sent
+    assert recheck_res["calls"][0]["failing_sentence_sha256_verified"] is True
+    assert recheck_res["calls"][2]["failing_sentence"] == bad_ev1_sent
+    assert recheck_res["calls"][2]["failing_sentence_sha256_verified"] is True
+
+    # Tamper with failing_sentence_sha256 in generations.jsonl -> both recheck and verify_written detect mismatch
+    tampered_gen = list(gen_rows)
+    tampered_gen[0] = {**tampered_gen[0], "failing_sentence_sha256": "0" * 64}
+    (out_dir / "generations.jsonl").write_text(
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in tampered_gen),
+        encoding="utf-8",
+    )
+    recheck_tampered = recheck_saved_responses(out_dir)
+    assert recheck_tampered["matches_recorded_verdicts"] is False
+    assert recheck_tampered["calls"][0]["sha256_verified"] is False
+    assert recheck_tampered["calls"][0]["failing_sentence_sha256_verified"] is False
+    vw_tampered = verify_written_dataset(out_dir)
+    assert vw_tampered["passed"] is False
+    assert any("failing_sentence_sha256" in err for err in vw_tampered["generations_errors"])
 
 
+def test_68_card_tb_marker_tests_refused_retried_and_kept(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Test 68 (Card tb Req 3a & 3b):
+    - (a) A marker in a REFUSED attempt, and a marker in an attempt 0 that was later retried:
+      zero hits anywhere in non-sealed files (`part_public/` included) and build stdout/stderr written to files.
+    - (b) A marker in a KEPT rendering appears ONLY in `part_public/items.jsonl` and under `sealed_store/`.
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+    )
+
+    configs_2 = make_balanced_configs(2, base_seed=20261030)
+    w_s0, w_s1 = generate_world(configs_2[0]), generate_world(configs_2[1])
+
+    s0_r0_base = render_world_template(w_s0, w_s0.agents[0])
+    s0_r1_base = render_world_template(w_s0, w_s0.agents[1])
+    s1_r0_base = render_world_template(w_s1, w_s1.agents[0])
+    s1_r1_base = render_world_template(w_s1, w_s1.agents[1])
+
+    # Markers for (a) attempt 0 that is later retried and fixed in attempt 1 (on scenario 0, r0):
+    marker_attempt0_fail_sent = "MARKER_TB_ATTEMPT0_FAIL_SENT_91001"
+    marker_attempt0_body = "MARKER_TB_ATTEMPT0_BODY_91002"
+    s0_setup, s0_ev_part = s0_r0_base.split("\n\n", 1)
+    s0_bad_ev1 = f"In the room, {w_s0.agents[0]} furtively paused ({marker_attempt0_fail_sent})."
+    s0_r0_attempt0_fail = (
+        s0_setup.replace(
+            f"Following {w_s0.agents[0]} through the",
+            f"Following {w_s0.agents[0]} ({marker_attempt0_body}) through the",
+        )
+        + f"\n\n{s0_bad_ev1} {s0_ev_part}"
+    )
+
+    # Marker for (b) KEPT rendering (scenario 0, r0 attempt 1 and r1 attempt 0 are both kept):
+    marker_kept_rendering = "MARKER_TB_KEPT_RENDERING_92001"
+    s0_r0_attempt1_kept = s0_r0_base.replace(
+        f"Following {w_s0.agents[0]} through the",
+        f"Following {w_s0.agents[0]} ({marker_kept_rendering}) through the",
+    )
+    s0_r1_kept = s0_r1_base
+
+    # Markers for (a) REFUSED attempt (scenario 1, r0 fails both attempt 0 and attempt 1):
+    marker_refused_fail_sent = "MARKER_TB_REFUSED_FAIL_SENT_93001"
+    marker_refused_body = "MARKER_TB_REFUSED_BODY_93002"
+    s1_setup, s1_ev_part = s1_r0_base.split("\n\n", 1)
+    s1_bad_ev1 = f"In the room, {w_s1.agents[0]} secretly waited ({marker_refused_fail_sent})."
+    s1_r0_refused = (
+        s1_setup.replace(
+            f"Following {w_s1.agents[0]} through the",
+            f"Following {w_s1.agents[0]} ({marker_refused_body}) through the",
+        )
+        + f"\n\n{s1_bad_ev1} {s1_ev_part}"
+    )
+
+    # Sequence of calls across scenario 0 and scenario 1 (with max_retries=1):
+    # 1. s0 r0 attempt 0 -> fails (s0_r0_attempt0_fail)
+    # 2. s0 r0 attempt 1 -> passes (s0_r0_attempt1_kept)
+    # 3. s0 r1 attempt 0 -> passes (s0_r1_kept)
+    # 4. s1 r0 attempt 0 -> fails (s1_r0_refused)
+    # 5. s1 r0 attempt 1 -> fails (s1_r0_refused)
+    # 6. s1 r1 attempt 0 -> passes (s1_r1_base) [scenario 1 is refused overall because r0 failed]
+    scripted_outputs = [
+        s0_r0_attempt0_fail,
+        s0_r0_attempt1_kept,
+        s0_r1_kept,
+        s1_r0_refused,
+        s1_r0_refused,
+        s1_r1_base,
+    ]
+    call_idx = 0
+
+    def _fake_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal call_idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            txt = scripted_outputs[call_idx]
+            call_idx += 1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3050,
+                "eval_count": 800,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_dir = tmp_path / "tb_marker_out"
+    import udlab_generator.cli as ug_cli
+    orig_build = ug_cli.build_and_probe_dataset
+    ug_cli.build_and_probe_dataset = lambda **kw: orig_build(
+        **{**kw, "http_transport": _fake_transport, "start_owned_server": False}
+    )
+    try:
+        capsys.readouterr()
+        rc_build = cli_main(
+            [
+                "--write",
+                "--writer",
+                "ollama",
+                "--count",
+                "2",
+                "--seed",
+                "20261030",
+                "--max-retries",
+                "1",
+                "--grant-id",
+                "test-grant-tb-68",
+                "--out-dir",
+                str(out_dir),
+            ]
+        )
+        build_stdio = capsys.readouterr()
+    finally:
+        ug_cli.build_and_probe_dataset = orig_build
+    assert rc_build == 0
+
+    # Write captured build stdout/stderr to files in out_dir:
+    (out_dir / "writer_stdout.log").write_text(build_stdio.out, encoding="utf-8")
+    (out_dir / "writer_stderr.log").write_text(build_stdio.err, encoding="utf-8")
+
+    # Run --verify-written and --recheck first:
+    capsys.readouterr()
+    cli_main(["--verify-written", str(out_dir)])
+    verify_stdio = capsys.readouterr()
+
+    capsys.readouterr()
+    rc_recheck = cli_main(["--recheck", str(out_dir)])
+    recheck_stdio = capsys.readouterr()
+    assert rc_recheck == 0
+
+    # Collect every file under out_dir:
+    all_files = [p for p in out_dir.rglob("*") if p.is_file()]
+    non_sealed_files = [p for p in all_files if "sealed_store" not in p.parts]
+    sealed_files = [p for p in all_files if "sealed_store" in p.parts]
+    assert len(non_sealed_files) >= 8
+
+    # (a) Markers in REFUSED attempt and retried attempt 0: ZERO hits in any non-sealed file (part_public/ included):
+    forbidden_markers = (
+        marker_attempt0_fail_sent,
+        marker_attempt0_body,
+        marker_refused_fail_sent,
+        marker_refused_body,
+    )
+    for nf in non_sealed_files:
+        content = nf.read_text(encoding="utf-8")
+        for m in forbidden_markers:
+            assert m not in content, f"Forbidden marker {m!r} found in non-sealed file {nf}"
+
+    # Body markers also have zero hits in verify/recheck captured stdout/stderr:
+    for m_body in (marker_attempt0_body, marker_refused_body):
+        assert m_body not in verify_stdio.out and m_body not in verify_stdio.err
+        assert m_body not in recheck_stdio.out and m_body not in recheck_stdio.err
+
+    # All 4 markers ARE preserved in sealed_store/responses.sealed.jsonl:
+    sealed_resp_text = (out_dir / "sealed_store" / "responses.sealed.jsonl").read_text(encoding="utf-8")
+    for m in forbidden_markers:
+        assert m in sealed_resp_text
+
+    # (b) Marker in KEPT rendering appears ONLY in part_public/items.jsonl and under sealed_store/:
+    items_jsonl = out_dir / "part_public" / "items.jsonl"
+    assert marker_kept_rendering in items_jsonl.read_text(encoding="utf-8")
+    assert any(marker_kept_rendering in sf.read_text(encoding="utf-8") for sf in sealed_files)
+    for nf in non_sealed_files:
+        if nf.resolve() == items_jsonl.resolve():
+            continue
+        assert marker_kept_rendering not in nf.read_text(encoding="utf-8"), (
+            f"Kept marker {marker_kept_rendering!r} leaked into non-items file {nf}"
+        )
+    assert marker_kept_rendering not in verify_stdio.out and marker_kept_rendering not in verify_stdio.err
+    assert marker_kept_rendering not in recheck_stdio.out and marker_kept_rendering not in recheck_stdio.err
 
 
+def test_69_card_tb_legacy_format_recheck_and_verify(tmp_path: Path) -> None:
+    """Test 69 (Card tb Req 4):
+    - Legacy run dirs (old `generations.jsonl` format with inline `(candidate sentence: ...)` in `refusal_reasons`
+      and no `failing_sentence_offset`/`failing_sentence_length`/`failing_sentence_sha256`) still recheck cleanly
+      without modifying any file in the dir, and are explicitly identified as `legacy_inline_v0`.
+    - `verify_written_dataset` on a legacy `generations.jsonl` row strips the inline sentence so
+      `verify_written_report.json` carries no sentence text.
+    """
+    import hashlib
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+    )
+    from udlab_generator.cli import recheck_saved_responses, verify_written_dataset
 
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    passing_r0 = render_world_template(w0, w0.agents[0])
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    legacy_secret_sent = "In the bindery room, Eva observed the index reel in open view (LEGACY_SENT_MARKER_TB_69)."
+    failing_r1 = (
+        f"{sj_setup.replace('Following Eva', f'Following {w0.agents[1]}')}\n\n"
+        f"{' '.join([legacy_secret_sent, *sj_sents[1:]])}"
+    )
+    call_idx = 0
 
+    def _transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal call_idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            txt = passing_r0 if call_idx == 0 else failing_r1
+            call_idx += 1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3000,
+                "eval_count": 780,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
 
+    out_dir = tmp_path / "tb_legacy_dir"
+    build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        grant_id="test-grant-tb-69",
+        http_transport=_transport,
+        start_owned_server=False,
+    )
 
+    # Rewrite generations.jsonl into the old legacy format (inline sentence in refusal_reasons, no offset/sha keys):
+    gen_path = out_dir / "generations.jsonl"
+    gen_rows = [json.loads(line) for line in gen_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    legacy_row_1 = {
+        k: v
+        for k, v in gen_rows[1].items()
+        if k
+        not in (
+            "check_id",
+            "event_index",
+            "event_kind",
+            "failing_sentence_sha256",
+            "failing_sentence_offset",
+            "failing_sentence_length",
+        )
+    }
+    legacy_row_1["refusal_reasons"] = [
+        f"c_fidelity_missing_event: Render check (c) failed: missing or altered event #1 "
+        f"(step=1, kind=see, actor=Eva, room=bindery room; candidate sentence: {legacy_secret_sent!r})."
+    ]
+    gen_path.write_text(
+        json.dumps(gen_rows[0], sort_keys=True) + "\n" + json.dumps(legacy_row_1, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
+    # Snapshot every file digest in out_dir before recheck:
+    before_digests = {
+        p.relative_to(out_dir): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in out_dir.rglob("*")
+        if p.is_file()
+    }
+    recheck_res = recheck_saved_responses(out_dir)
+    after_digests = {
+        p.relative_to(out_dir): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in out_dir.rglob("*")
+        if p.is_file()
+    }
+    assert before_digests == after_digests, "--recheck must not rewrite or delete any file in legacy run dirs"
+    assert recheck_res["matches_recorded_verdicts"] is True
+    assert recheck_res["legacy_refusal_format_calls"] == 1
+    assert recheck_res["calls"][1]["recorded_refusal_format"] == "legacy_inline_v0"
+    assert recheck_res["calls"][1]["failing_sentence"] == legacy_secret_sent
 
+    # Even if verify_written_dataset is run on a dir with a legacy generations.jsonl row,
+    # verify_written_report.json must not copy the inline sentence:
+    verify_written_dataset(out_dir)
+    vw_report_raw = (out_dir / "verify_written_report.json").read_text(encoding="utf-8")
+    assert legacy_secret_sent not in vw_report_raw
+    assert "LEGACY_SENT_MARKER_TB_69" not in vw_report_raw
 

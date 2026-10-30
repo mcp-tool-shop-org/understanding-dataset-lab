@@ -61,6 +61,7 @@ FORBIDDEN_PUBLIC_FIELDS: frozenset[str] = frozenset(
         "thinking_text",
         "attempt_0_content",
         "attempt_messages",
+        "failing_sentence",
     }
 )
 

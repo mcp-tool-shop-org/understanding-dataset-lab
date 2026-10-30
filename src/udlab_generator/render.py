@@ -152,6 +152,9 @@ class ProseRefusalRecord:
     failing_sentence: str | None = None
     event_index: int | None = None
     event_kind: str | None = None
+    failing_sentence_sha256: str = ""
+    failing_sentence_offset: int | None = None
+    failing_sentence_length: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -163,6 +166,9 @@ class ProseRefusalRecord:
             "failing_sentence": self.failing_sentence,
             "event_index": self.event_index,
             "event_kind": self.event_kind,
+            "failing_sentence_sha256": self.failing_sentence_sha256,
+            "failing_sentence_offset": self.failing_sentence_offset,
+            "failing_sentence_length": self.failing_sentence_length,
         }
 
 
@@ -2696,6 +2702,15 @@ class SealedResponseEntry:
     thinking_text: str
     response_sha256: str
     thinking_sha256: str
+    checks_passed: bool = True
+    check_id: str | None = None
+    event_index: int | None = None
+    event_kind: str | None = None
+    failing_sentence: str | None = None
+    failing_sentence_sha256: str = ""
+    failing_sentence_offset: int | None = None
+    failing_sentence_length: int | None = None
+    refusal_reasons: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -2710,6 +2725,15 @@ class SealedResponseEntry:
             "thinking_text": self.thinking_text,
             "response_sha256": self.response_sha256,
             "thinking_sha256": self.thinking_sha256,
+            "checks_passed": self.checks_passed,
+            "check_id": self.check_id,
+            "event_index": self.event_index,
+            "event_kind": self.event_kind,
+            "failing_sentence": self.failing_sentence,
+            "failing_sentence_sha256": self.failing_sentence_sha256,
+            "failing_sentence_offset": self.failing_sentence_offset,
+            "failing_sentence_length": self.failing_sentence_length,
+            "refusal_reasons": list(self.refusal_reasons),
         }
 
 
@@ -2721,6 +2745,172 @@ def compute_sealed_response_digests(
     resp_sha = _sha256_bytes(response_text.encode("utf-8"))
     think_sha = _sha256_bytes(thinking_text.encode("utf-8")) if thinking_text else ""
     return resp_sha, think_sha
+
+
+def locate_failing_sentence_in_response(
+    response_text: str,
+    failing_sentence: str | None,
+) -> tuple[str, int | None, int | None]:
+    """Locate `failing_sentence` in `response_text` and return `(sha256_hex, offset, length)`."""
+    if not failing_sentence or failing_sentence == "no candidate sentence":
+        return "", None, None
+    idx = response_text.find(failing_sentence)
+    if idx < 0:
+        return "", None, None
+    length = len(failing_sentence)
+    sha256_hex = _sha256_bytes(failing_sentence.encode("utf-8"))
+    return sha256_hex, idx, length
+
+
+def resolve_sealed_failing_sentence(
+    response_text: str,
+    *,
+    failing_sentence_sha256: str | None,
+    failing_sentence_offset: int | None,
+    failing_sentence_length: int | None,
+) -> tuple[str | None, bool]:
+    """Slice `response_text[offset : offset + length]` and verify its SHA-256 matches `failing_sentence_sha256`."""
+    expected_sha = str(failing_sentence_sha256 or "").strip().lower()
+    if (
+        not expected_sha
+        and failing_sentence_offset is None
+        and failing_sentence_length is None
+    ):
+        return None, True
+    if (
+        not expected_sha
+        or not isinstance(failing_sentence_offset, int)
+        or isinstance(failing_sentence_offset, bool)
+        or not isinstance(failing_sentence_length, int)
+        or isinstance(failing_sentence_length, bool)
+        or failing_sentence_offset < 0
+        or failing_sentence_length < 0
+        or failing_sentence_offset + failing_sentence_length > len(response_text)
+    ):
+        return None, False
+    sliced = response_text[failing_sentence_offset : failing_sentence_offset + failing_sentence_length]
+    actual_sha = _sha256_bytes(sliced.encode("utf-8"))
+    if actual_sha != expected_sha:
+        return sliced, False
+    return sliced, True
+
+
+def format_non_sealed_refusal_reason(
+    *,
+    check_id: str,
+    event_index: int | None = None,
+    event_kind: str | None = None,
+    failing_sentence_sha256: str = "",
+    failing_sentence_offset: int | None = None,
+    failing_sentence_length: int | None = None,
+) -> str:
+    """Format a non-sealed refusal summary string containing only check_id, event number/kind, and sealed sentence sha/offset/length."""
+    parts = [
+        f"event_index={event_index}",
+        f"event_kind={event_kind}",
+        f"failing_sentence_sha256={failing_sentence_sha256}",
+        f"failing_sentence_offset={failing_sentence_offset}",
+        f"failing_sentence_length={failing_sentence_length}",
+    ]
+    return f"{check_id}: " + " ".join(parts)
+
+
+def parse_generation_refusal_metadata(gen_row: Mapping[str, Any]) -> dict[str, Any]:
+    """Parse refusal metadata from a `generations.jsonl` row, supporting both `sealed_offset_v1` and `legacy_inline_v0`."""
+    checks_passed = bool(gen_row.get("checks_passed", True))
+    if checks_passed:
+        return {
+            "format": "sealed_offset_v1",
+            "check_id": None,
+            "event_index": None,
+            "event_kind": None,
+            "failing_sentence_sha256": "",
+            "failing_sentence_offset": None,
+            "failing_sentence_length": None,
+        }
+    has_new_fields = (
+        "failing_sentence_sha256" in gen_row
+        or "failing_sentence_offset" in gen_row
+        or "failing_sentence_length" in gen_row
+        or "check_id" in gen_row
+    )
+    raw_reasons = gen_row.get("refusal_reasons") or ()
+    first_reason = str(raw_reasons[0]) if isinstance(raw_reasons, (list, tuple)) and raw_reasons else ""
+    has_inline_candidate = "candidate sentence:" in first_reason
+    if has_new_fields and not has_inline_candidate:
+        raw_cid = gen_row.get("check_id")
+        cid = (
+            str(raw_cid).strip()
+            if raw_cid is not None and str(raw_cid).strip()
+            else (first_reason.split(":", 1)[0].strip() if ":" in first_reason else first_reason.strip() or None)
+        )
+        raw_ev_idx = gen_row.get("event_index")
+        ev_idx = (
+            int(raw_ev_idx)
+            if isinstance(raw_ev_idx, int) and not isinstance(raw_ev_idx, bool)
+            else None
+        )
+        raw_ev_kind = gen_row.get("event_kind")
+        ev_kind = str(raw_ev_kind) if raw_ev_kind is not None and str(raw_ev_kind).strip() else None
+        raw_sha = str(gen_row.get("failing_sentence_sha256") or "")
+        raw_off = gen_row.get("failing_sentence_offset")
+        off = (
+            int(raw_off)
+            if isinstance(raw_off, int) and not isinstance(raw_off, bool)
+            else None
+        )
+        raw_len = gen_row.get("failing_sentence_length")
+        length = (
+            int(raw_len)
+            if isinstance(raw_len, int) and not isinstance(raw_len, bool)
+            else None
+        )
+        return {
+            "format": "sealed_offset_v1",
+            "check_id": cid,
+            "event_index": ev_idx,
+            "event_kind": ev_kind,
+            "failing_sentence_sha256": raw_sha,
+            "failing_sentence_offset": off,
+            "failing_sentence_length": length,
+        }
+
+    cid_legacy = (
+        first_reason.split(":", 1)[0].strip()
+        if ":" in first_reason
+        else (first_reason.strip() or None)
+    )
+    m_ev = re.search(r"event\s+#(\d+)", first_reason)
+    ev_idx_legacy = int(m_ev.group(1)) if m_ev else None
+    m_kind = re.search(r"\bkind=([a-z_]+)\b", first_reason)
+    ev_kind_legacy = m_kind.group(1) if m_kind else None
+    return {
+        "format": "legacy_inline_v0",
+        "check_id": cid_legacy,
+        "event_index": ev_idx_legacy,
+        "event_kind": ev_kind_legacy,
+        "failing_sentence_sha256": "",
+        "failing_sentence_offset": None,
+        "failing_sentence_length": None,
+    }
+
+
+def _sanitize_non_sealed_logprobs(raw_logprobs: Any) -> tuple[dict[str, object], ...]:
+    """Strip any model token strings from `logprobs` before storing in non-sealed `GenerationCallRecord`."""
+    if not isinstance(raw_logprobs, (list, tuple)):
+        return ()
+    sanitized: list[dict[str, object]] = []
+    for item in raw_logprobs[:5]:
+        if not isinstance(item, dict):
+            continue
+        clean_item: dict[str, object] = {}
+        for k, v in item.items():
+            if k in ("token", "bytes", "text", "piece") and isinstance(v, str):
+                clean_item["token_sha256"] = _sha256_bytes(v.encode("utf-8"))
+            elif isinstance(v, (int, float, bool)) or v is None:
+                clean_item[str(k)] = v
+        sanitized.append(clean_item)
+    return tuple(sanitized)
 
 
 def append_sealed_response(
@@ -2765,6 +2955,12 @@ class GenerationCallRecord:
     top5_logprobs: tuple[dict[str, object], ...] = ()
     checks_passed: bool = True
     refusal_reasons: tuple[str, ...] = ()
+    check_id: str | None = None
+    event_index: int | None = None
+    event_kind: str | None = None
+    failing_sentence_sha256: str = ""
+    failing_sentence_offset: int | None = None
+    failing_sentence_length: int | None = None
     attempt: int = 0
     seed: int = 0
     response_sha256: str = ""
@@ -2827,6 +3023,12 @@ class GenerationCallRecord:
             "grant_id": self.grant_id,
             "top5_logprobs": list(self.top5_logprobs),
             "checks_passed": self.checks_passed,
+            "check_id": self.check_id,
+            "event_index": self.event_index,
+            "event_kind": self.event_kind,
+            "failing_sentence_sha256": self.failing_sentence_sha256,
+            "failing_sentence_offset": self.failing_sentence_offset,
+            "failing_sentence_length": self.failing_sentence_length,
             "refusal_reasons": list(self.refusal_reasons),
         }
 
@@ -3312,6 +3514,32 @@ class WriterCheckpointManager:
                         top5_logprobs=tuple(c_dict.get("top5_logprobs") or ()),
                         checks_passed=bool(c_dict.get("checks_passed", True)),
                         refusal_reasons=tuple(str(x) for x in (c_dict.get("refusal_reasons") or ())),
+                        check_id=(
+                            str(c_dict["check_id"])
+                            if c_dict.get("check_id") is not None
+                            else None
+                        ),
+                        event_index=(
+                            int(c_dict["event_index"])
+                            if c_dict.get("event_index") is not None
+                            else None
+                        ),
+                        event_kind=(
+                            str(c_dict["event_kind"])
+                            if c_dict.get("event_kind") is not None
+                            else None
+                        ),
+                        failing_sentence_sha256=str(c_dict.get("failing_sentence_sha256") or ""),
+                        failing_sentence_offset=(
+                            int(c_dict["failing_sentence_offset"])
+                            if c_dict.get("failing_sentence_offset") is not None
+                            else None
+                        ),
+                        failing_sentence_length=(
+                            int(c_dict["failing_sentence_length"])
+                            if c_dict.get("failing_sentence_length") is not None
+                            else None
+                        ),
                         attempt=int(c_dict.get("attempt", 0)),
                         seed=int(c_dict.get("seed", 0)),
                         response_sha256=str(c_dict.get("response_sha256") or ""),
@@ -3462,6 +3690,8 @@ class OllamaWriter:
             self._sealed_responses: list[SealedResponseEntry] = []
             self._unload_records: list[OllamaUnloadRecord] = []
             self._refusals: list[ProseRefusalRecord] = []
+            self._pending_sealed_failing_sentence: str | None = None
+            self._pending_sealed_refusal_reasons: tuple[str, ...] = ()
         except Exception:
             if self._owned_server is not None:
                 self._owned_server.stop()
@@ -3564,7 +3794,18 @@ class OllamaWriter:
                 thinking_text=thinking_text,
                 response_sha256=rec.response_sha256,
                 thinking_sha256=rec.thinking_sha256,
+                checks_passed=rec.checks_passed,
+                check_id=rec.check_id,
+                event_index=rec.event_index,
+                event_kind=rec.event_kind,
+                failing_sentence=self._pending_sealed_failing_sentence,
+                failing_sentence_sha256=rec.failing_sentence_sha256,
+                failing_sentence_offset=rec.failing_sentence_offset,
+                failing_sentence_length=rec.failing_sentence_length,
+                refusal_reasons=self._pending_sealed_refusal_reasons,
             )
+            self._pending_sealed_failing_sentence = None
+            self._pending_sealed_refusal_reasons = ()
             self._sealed_responses.append(sealed_entry)
             if self._sealed_responses_path is not None:
                 append_sealed_response(self._sealed_responses_path, sealed_entry)
@@ -3653,7 +3894,8 @@ class OllamaWriter:
                 vram_halt_mib=self._gpu_guard.vram_halt_mib,
                 grant_id=self._grant_id,
                 checks_passed=False,
-                refusal_reasons=(f"max_num_ctx_exceeded: {reason_msg}",),
+                refusal_reasons=(format_non_sealed_refusal_reason(check_id="max_num_ctx_exceeded"),),
+                check_id="max_num_ctx_exceeded",
                 attempt=0,
                 seed=base_seed,
             )
@@ -3827,11 +4069,7 @@ class OllamaWriter:
             )
             thinking_words = len(thinking_text.split()) if thinking_text.strip() else 0
             raw_logprobs = resp.get("logprobs")
-            top5_logprobs: tuple[dict[str, object], ...] = (
-                tuple(x for x in raw_logprobs[:5] if isinstance(x, dict))
-                if isinstance(raw_logprobs, list)
-                else ()
-            )
+            top5_logprobs = _sanitize_non_sealed_logprobs(raw_logprobs)
             if attempt == 0:
                 attempt_0_content = content
                 attempt_0_response_sha256 = resp_sha
@@ -3876,7 +4114,8 @@ class OllamaWriter:
                     grant_id=self._grant_id,
                     top5_logprobs=top5_logprobs,
                     checks_passed=False,
-                    refusal_reasons=(f"length_stop: {reason_msg}",),
+                    refusal_reasons=(format_non_sealed_refusal_reason(check_id="length_stop"),),
+                    check_id="length_stop",
                     attempt=attempt,
                     seed=call_seed,
                     response_sha256=resp_sha,
@@ -3888,7 +4127,13 @@ class OllamaWriter:
                     retry_unchanged_sentences=retry_unchanged,
                     retry_attempt0_sentences=retry_attempt0_total,
                 )
-                self._append_generation_record(rec, response_text=content, thinking_text=thinking_text)
+                self._pending_sealed_failing_sentence = None
+                self._pending_sealed_refusal_reasons = (f"length_stop: {reason_msg}",)
+                self._append_generation_record(
+                    rec,
+                    response_text=content,
+                    thinking_text=thinking_text,
+                )
                 self._refusals.append(
                     ProseRefusalRecord(
                         scenario_id=scenario_id,
@@ -3904,6 +4149,18 @@ class OllamaWriter:
                 check_rendered_prose(content, world, focal_agent=focal_agent)
             except RenderCheckError as exc:
                 last_exc = exc
+                fail_sha, fail_off, fail_len = locate_failing_sentence_in_response(
+                    content, exc.failing_sentence
+                )
+                non_sealed_reason = format_non_sealed_refusal_reason(
+                    check_id=exc.check_id,
+                    event_index=exc.event_index,
+                    event_kind=exc.event_kind,
+                    failing_sentence_sha256=fail_sha,
+                    failing_sentence_offset=fail_off,
+                    failing_sentence_length=fail_len,
+                )
+                full_sealed_reason = f"{exc.check_id}: {exc}"
                 rec = GenerationCallRecord(
                     call_id=call_id,
                     call_index=call_index,
@@ -3932,7 +4189,13 @@ class OllamaWriter:
                     grant_id=self._grant_id,
                     top5_logprobs=top5_logprobs,
                     checks_passed=False,
-                    refusal_reasons=(f"{exc.check_id}: {exc}",),
+                    refusal_reasons=(non_sealed_reason,),
+                    check_id=exc.check_id,
+                    event_index=exc.event_index,
+                    event_kind=exc.event_kind,
+                    failing_sentence_sha256=fail_sha,
+                    failing_sentence_offset=fail_off,
+                    failing_sentence_length=fail_len,
                     attempt=attempt,
                     seed=call_seed,
                     response_sha256=resp_sha,
@@ -3944,7 +4207,13 @@ class OllamaWriter:
                     retry_unchanged_sentences=retry_unchanged,
                     retry_attempt0_sentences=retry_attempt0_total,
                 )
-                self._append_generation_record(rec, response_text=content, thinking_text=thinking_text)
+                self._pending_sealed_failing_sentence = exc.failing_sentence
+                self._pending_sealed_refusal_reasons = (full_sealed_reason,)
+                self._append_generation_record(
+                    rec,
+                    response_text=content,
+                    thinking_text=thinking_text,
+                )
                 self._refusals.append(
                     ProseRefusalRecord(
                         scenario_id=scenario_id,
@@ -3955,6 +4224,9 @@ class OllamaWriter:
                         failing_sentence=exc.failing_sentence,
                         event_index=exc.event_index,
                         event_kind=exc.event_kind,
+                        failing_sentence_sha256=fail_sha,
+                        failing_sentence_offset=fail_off,
+                        failing_sentence_length=fail_len,
                     )
                 )
                 if attempt < self._max_retries:
