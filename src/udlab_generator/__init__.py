@@ -102,6 +102,7 @@ from udlab_generator.render import (
     format_action_verbs_by_kind_summary,
     format_blocking_phrases_summary,
     format_negation_phrases_summary,
+    format_repair_retry_line,
     format_writer_prompt,
     get_checker_enforced_check_ids,
     indefinite_article,

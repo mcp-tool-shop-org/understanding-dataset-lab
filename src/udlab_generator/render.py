@@ -149,6 +149,8 @@ class ProseRefusalRecord:
     check_id: str
     reason: str
     failing_sentence: str | None = None
+    event_index: int | None = None
+    event_kind: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -158,6 +160,8 @@ class ProseRefusalRecord:
             "check_id": self.check_id,
             "reason": self.reason,
             "failing_sentence": self.failing_sentence,
+            "event_index": self.event_index,
+            "event_kind": self.event_kind,
         }
 
 
@@ -170,11 +174,15 @@ class RenderCheckError(ValueError):
         *,
         check_id: str = "render_check",
         failing_sentence: str | None = None,
+        event_index: int | None = None,
+        event_kind: str | None = None,
     ) -> None:
         super().__init__(message)
         self.check_id = check_id
         self.reason = message
         self.failing_sentence = failing_sentence
+        self.event_index = event_index
+        self.event_kind = event_kind
 
 
 class ForbiddenModelCallError(RuntimeError):
@@ -208,6 +216,7 @@ SIGHTING_VERBS: tuple[str, ...] = (
     "observed",
     "looked",
     "saw",
+    "see",
     "spotted",
     "noticed",
     "inspected",
@@ -365,7 +374,7 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
         "actor (no pronouns) precedes verb ("
         f"{format_action_verbs_by_kind_summary()}"
         ") with no intervening party; name room ('in/from/inside/at/of [the] <room>', no other room on intra-room); "
-        "from_location before to_location on enter/leave/move (or 'entered/arrived in <to> ... from <from>' on enter), where from-locations on enter/move use 'from'/'out of' and to-locations on enter/leave/move use 'to'/'into'/'toward'/'at'/'in'/'onto'; "
+        "every enter sentence must name both from_location and to_location (never write a bare 'entered <to>' without 'from <from>'), and from_location precedes to_location on enter/leave/move (or 'entered/arrived in <to> ... from <from>' on enter), where from-locations on enter/move use 'from'/'out of' and to-locations on enter/leave/move use 'to'/'into'/'toward'/'at'/'in'/'onto'; "
         "on see, name target_object, and if unoccluded at a container place it at to_location ('container bay' optional); "
         "on unoccluded move/see, no blocking phrases ("
         f"{format_blocking_phrases_summary()}"
@@ -538,11 +547,42 @@ def _raise_prose_check_error(
     message: str,
     *,
     failing_sentence: str | None = None,
+    event_index: int | None = None,
+    event_kind: str | None = None,
 ) -> NoReturn:
     """Raise `RenderCheckError` after verifying `check_id` is registered in `WRITER_PROSE_REQUIREMENTS`."""
     if check_id not in WRITER_PROSE_REQUIREMENTS_BY_ID:
         raise RuntimeError(f"Unregistered prose check_id {check_id!r} not in WRITER_PROSE_REQUIREMENTS.")
-    raise RenderCheckError(message, check_id=check_id, failing_sentence=failing_sentence)
+    raise RenderCheckError(
+        message,
+        check_id=check_id,
+        failing_sentence=failing_sentence,
+        event_index=event_index,
+        event_kind=event_kind,
+    )
+
+
+_REPAIR_HINT_BY_EVENT_KIND: dict[str, str] = {
+    "enter": "name the room the actor came from and the room entered, with the actor as subject",
+    "leave": "name the room the actor left and the destination room, with the actor as subject",
+    "move": "name the actor as subject, the target object, the source location, the destination location, and the room",
+    "see": "name the actor as subject before a sighting verb, the target object, the room, and any required container or occlusion clause",
+    "say": "name the actor as subject before a speech verb, the noise level in dB, and the verbatim quote",
+    "message": "name the actor as subject before a message verb, the recipient, and the verbatim quote",
+}
+
+
+def format_repair_retry_line(exc: RenderCheckError) -> str:
+    """Format a single repair-retry line naming `exc.check_id` and (when applicable) the event number and kind, without key content or model text."""
+    if exc.event_index is not None and exc.event_kind is not None:
+        hint = _REPAIR_HINT_BY_EVENT_KIND.get(
+            exc.event_kind,
+            "state the logged event with its actor, verb, locations, and room",
+        )
+        return f"Repair retry ({exc.check_id}): Event {exc.event_index}, {exc.event_kind}: {hint}."
+    rule_spec = WRITER_PROSE_REQUIREMENTS_BY_ID.get(exc.check_id)
+    rule_hint = rule_spec.rule_text if rule_spec is not None else "satisfy this mandatory constraint."
+    return f"Repair retry ({exc.check_id}): {rule_hint}"
 
 
 def load_writer_prompt_template(path: Path | None = None) -> str:
@@ -825,8 +865,10 @@ def _actor_precedes_verb_as_subject(
     actor: str,
     action_verbs: Sequence[str],
     all_parties: Sequence[str],
+    *,
+    ev: Event | None = None,
 ) -> bool:
-    """Return True if `actor` appears as the subject immediately preceding an action verb in `s_low`."""
+    """Return True if `actor` appears as the subject immediately preceding an unnegated action verb in `s_low`."""
     if not action_verbs:
         return bool(re.search(rf"\b{re.escape(actor.lower())}\b", s_low))
     verb_alt = "|".join(re.escape(v) for v in action_verbs)
@@ -836,17 +878,38 @@ def _actor_precedes_verb_as_subject(
         after_actor = s_low[m_act.end() :]
         if after_actor.startswith("'s") or after_actor.startswith("’s"):
             continue
-        m_verb = re.search(rf"\b(?:{verb_alt})\b", after_actor)
-        if m_verb is None:
-            continue
-        between = after_actor[: m_verb.start()]
-        # No other party name (or second occurrence of actor) may intervene as the closer subject before the verb
-        intervening_party = any(
-            re.search(rf"\b{re.escape(p.lower())}\b", between)
-            for p in all_parties
-        )
-        if intervening_party:
-            continue
+        for m_verb in re.finditer(rf"\b(?:{verb_alt})\b", after_actor):
+            between = after_actor[: m_verb.start()]
+            # No other party name (or second occurrence of actor) may intervene as the closer subject before the verb
+            intervening_party = any(
+                re.search(rf"\b{re.escape(p.lower())}\b", between)
+                for p in all_parties
+            )
+            if intervening_party:
+                continue
+            if ev is not None and _verb_is_scoped_by_negation(s_low, m_act.start(), m_act.end() + m_verb.start(), m_act.end() + m_verb.end(), ev):
+                continue
+            return True
+    return False
+
+
+def _verb_is_scoped_by_negation(
+    frame_low: str,
+    actor_start: int,
+    verb_start: int,
+    verb_end: int,
+    ev: Event,
+) -> bool:
+    """Return True if the event verb at `[verb_start, verb_end)` is scoped by a negation from `NEGATION_PHRASES`."""
+    span_from_actor = frame_low[actor_start:]
+    cleaned = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", span_from_actor)
+    if ev.kind == "see" and ev.occluded and ev.occluder:
+        cleaned = _COULD_NOT_SEE_RE.sub("", cleaned)
+    if _NEGATION_PATTERN.search(cleaned) is not None:
+        return True
+    before_actor = frame_low[:actor_start]
+    last_clause_before = re.split(r"[,;:]", before_actor)[-1]
+    if _NEGATION_PATTERN.search(last_clause_before) is not None:
         return True
     return False
 
@@ -889,12 +952,43 @@ def _ordered_from_to_positions(
     return False
 
 
-def _has_forbidden_event_negation(frame_low: str, ev: Event) -> bool:
-    """Return True if `frame_low` contains any negation from `NEGATION_PHRASES` outside the allowed occluded-see blocking clause."""
-    cleaned = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", frame_low)
-    if ev.kind == "see" and ev.occluded and ev.occluder:
-        cleaned = _COULD_NOT_SEE_RE.sub("", cleaned)
-    return _NEGATION_PATTERN.search(cleaned) is not None
+def _has_forbidden_event_negation(frame_low: str, ev: Event, all_parties: Sequence[str] = ()) -> bool:
+    """Return True if the event's verb in `frame_low` is scoped by any negation from `NEGATION_PHRASES` outside the allowed occluded-see blocking clause."""
+    parties = all_parties if all_parties else (ev.actor, *([ev.recipient] if ev.recipient else []))
+    action_verbs = _ACTION_VERBS_BY_KIND.get(ev.kind, ())
+    if not _actor_precedes_verb_as_subject(frame_low, ev.actor, action_verbs, parties):
+        cleaned = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", frame_low)
+        if ev.kind == "see" and ev.occluded and ev.occluder:
+            cleaned = _COULD_NOT_SEE_RE.sub("", cleaned)
+        return _NEGATION_PATTERN.search(cleaned) is not None
+    return not _actor_precedes_verb_as_subject(frame_low, ev.actor, action_verbs, parties, ev=ev)
+
+
+def _preceding_sentence_is_matching_leave(
+    prev_sentence: str | None,
+    prev_event: Event | None,
+    ev: Event,
+    noise_threshold: int,
+    world: World | None = None,
+) -> bool:
+    """Return True if `prev_event` and `prev_sentence` form the matching `leave` by the same actor naming `ev.from_location`."""
+    if prev_sentence is None or prev_event is None:
+        return False
+    if (
+        prev_event.kind != "leave"
+        or prev_event.actor != ev.actor
+        or not ev.from_location
+        or not prev_event.from_location
+        or prev_event.from_location.lower() != ev.from_location.lower()
+        or prev_event.room.lower() != ev.from_location.lower()
+        or not ev.to_location
+        or not prev_event.to_location
+        or prev_event.to_location.lower() != ev.to_location.lower()
+    ):
+        return False
+    if not _sentence_matches_event(prev_sentence, prev_event, noise_threshold, world=world):
+        return False
+    return bool(re.search(rf"\b{re.escape(ev.from_location.lower())}\b", prev_sentence.lower()))
 
 
 def _sentence_matches_event(
@@ -902,20 +996,23 @@ def _sentence_matches_event(
     ev: Event,
     noise_threshold: int,
     world: World | None = None,
+    *,
+    prev_sentence: str | None = None,
+    prev_event: Event | None = None,
 ) -> bool:
     """Return True if `sentence` states `ev` with role-bound actor, action, object, ordered from/to, and room."""
     s_low = sentence.lower()
     s_unquoted_low = re.sub(r'"[^"]*"|“[^”]*”', '""', s_low)
     frame_low = s_unquoted_low if ev.kind in ("say", "message") else s_low
-    if _has_forbidden_event_negation(frame_low, ev):
-        return False
     all_parties: Sequence[str] = (
         tuple(world.agents) + tuple(world.absent_parties)
         if world is not None
         else (ev.actor, *([ev.recipient] if ev.recipient else []))
     )
+    if _has_forbidden_event_negation(frame_low, ev, all_parties):
+        return False
     action_verbs = _ACTION_VERBS_BY_KIND.get(ev.kind, ())
-    if not _actor_precedes_verb_as_subject(frame_low, ev.actor, action_verbs, all_parties):
+    if not _actor_precedes_verb_as_subject(frame_low, ev.actor, action_verbs, all_parties, ev=ev):
         return False
 
     if ev.room.lower() not in frame_low:
@@ -945,12 +1042,25 @@ def _sentence_matches_event(
             for o_room in world.rooms:
                 if o_room.lower() not in allowed_rooms and o_room.lower() in s_low:
                     return False
-        return _ordered_from_to_positions(
+        if _ordered_from_to_positions(
             s_low,
             ev.from_location,
             ev.to_location,
             require_from_prep=True,
+        ):
+            return True
+        to_esc = re.escape(ev.to_location.lower())
+        has_to_dest = bool(
+            re.search(
+                rf"\b(?:to|into|toward|towards|for|onto|in|at|entered|arrived\s+in)\s+(?:the\s+)?{to_esc}\b",
+                s_low,
+            )
         )
+        if has_to_dest and _preceding_sentence_is_matching_leave(
+            prev_sentence, prev_event, ev, noise_threshold, world=world
+        ):
+            return True
+        return False
 
     if ev.kind == "leave":
         if not (ev.from_location and ev.to_location):
@@ -1341,9 +1451,27 @@ def check_prose_render_fidelity(
     matched_sentence_indices: list[int] = []
     search_start = 0
     for ev_idx, ev in enumerate(world.events):
+        prev_ev = world.events[ev_idx - 1] if ev_idx > 0 else None
         found_idx: int | None = None
         for s_idx in range(search_start, len(event_sentences)):
-            if _sentence_matches_event(event_sentences[s_idx], ev, world.noise_threshold, world=world):
+            prev_sent = (
+                event_sentences[s_idx - 1]
+                if (
+                    ev_idx > 0
+                    and s_idx > 0
+                    and matched_sentence_indices
+                    and matched_sentence_indices[-1] == s_idx - 1
+                )
+                else None
+            )
+            if _sentence_matches_event(
+                event_sentences[s_idx],
+                ev,
+                world.noise_threshold,
+                world=world,
+                prev_sentence=prev_sent,
+                prev_event=prev_ev,
+            ):
                 found_idx = s_idx
                 break
         if found_idx is None:
@@ -1363,6 +1491,8 @@ def check_prose_render_fidelity(
                     "c_fidelity_event_order",
                     f"Render check (c) failed: event #{ev_idx + 1} ({ev.kind} by {ev.actor} in {ev.room}) is out of relative chronological order (candidate sentence: {cand_sent!r}).",
                     failing_sentence=cand_sent,
+                    event_index=ev_idx + 1,
+                    event_kind=ev.kind,
                 )
             cand_sent = (
                 event_sentences[search_start]
@@ -1373,6 +1503,8 @@ def check_prose_render_fidelity(
                 "c_fidelity_missing_event",
                 f"Render check (c) failed: missing or altered event #{ev_idx + 1} (step={ev.step}, kind={ev.kind}, actor={ev.actor}, room={ev.room}, target={ev.target_object!r}, from={ev.from_location!r}, to={ev.to_location!r}; candidate sentence: {cand_sent!r}).",
                 failing_sentence=cand_sent,
+                event_index=ev_idx + 1,
+                event_kind=ev.kind,
             )
         matched_sentence_indices.append(found_idx)
         search_start = found_idx + 1
@@ -1638,6 +1770,9 @@ class MockWriter:
                         focal_agent=focal_ag,
                         check_id=exc.check_id,
                         reason=str(exc),
+                        failing_sentence=exc.failing_sentence,
+                        event_index=exc.event_index,
+                        event_kind=exc.event_kind,
                     )
                 )
                 raise
@@ -3034,17 +3169,47 @@ class OllamaWriter:
         for attempt in range(self._max_retries + 1):
             call_index = len(self._call_records) + 1
             call_id = f"{scenario_id}:r{rendering_index}:call_{call_index:04d}"
-            call_seed = base_seed + attempt
+            call_seed = base_seed
+            active_prompt = (
+                f"{prompt_text.rstrip('\n')}\n{format_repair_retry_line(last_exc)}"
+                if (attempt > 0 and last_exc is not None)
+                else prompt_text
+            )
+            attempt_messages = [
+                {
+                    "role": "user",
+                    "content": active_prompt,
+                }
+            ]
+            attempt_prompt_sha = _sha256_bytes(_canonical_json_line(attempt_messages).encode("utf-8"))
+            attempt_prompt_est = estimate_prompt_tokens(attempt_messages)
+            if self._think and attempt_prompt_est + self._num_predict <= self._max_num_ctx:
+                attempt_num_ctx = min(
+                    self._max_num_ctx,
+                    compute_num_ctx(
+                        attempt_prompt_est,
+                        self._num_predict,
+                        margin=NUM_CTX_MARGIN_TOKENS,
+                        step=NUM_CTX_STEP_TOKENS,
+                    ),
+                )
+            else:
+                attempt_num_ctx = compute_num_ctx(
+                    attempt_prompt_est,
+                    self._num_predict,
+                    margin=NUM_CTX_MARGIN_TOKENS,
+                    step=NUM_CTX_STEP_TOKENS,
+                )
             payload: dict[str, Any] = {
                 "model": self.ollama_tag,
-                "messages": messages,
+                "messages": attempt_messages,
                 "think": self._think,
                 "stream": False,
                 "options": {
                     "temperature": 0,
                     "seed": call_seed,
                     "num_predict": self._num_predict,
-                    "num_ctx": num_ctx,
+                    "num_ctx": attempt_num_ctx,
                 },
             }
             t0 = time.perf_counter()
@@ -3095,13 +3260,13 @@ class OllamaWriter:
                     manifest_digest=self.manifest_digest,
                     model_layer_digest=self._model_pin.model_layer_digest,
                     licence_id=self._model_pin.licence_id,
-                    prompt_sha256=prompt_sha,
-                    prompt_tokens_estimate=prompt_tokens_estimate,
+                    prompt_sha256=attempt_prompt_sha,
+                    prompt_tokens_estimate=attempt_prompt_est,
                     prompt_eval_count=prompt_eval_count,
                     eval_count=eval_count,
                     thinking_words=thinking_words,
                     num_predict=self._num_predict,
-                    num_ctx=num_ctx,
+                    num_ctx=attempt_num_ctx,
                     max_num_ctx=self._max_num_ctx,
                     think=self._think,
                     temperature=0.0,
@@ -3145,13 +3310,13 @@ class OllamaWriter:
                     manifest_digest=self.manifest_digest,
                     model_layer_digest=self._model_pin.model_layer_digest,
                     licence_id=self._model_pin.licence_id,
-                    prompt_sha256=prompt_sha,
-                    prompt_tokens_estimate=prompt_tokens_estimate,
+                    prompt_sha256=attempt_prompt_sha,
+                    prompt_tokens_estimate=attempt_prompt_est,
                     prompt_eval_count=prompt_eval_count,
                     eval_count=eval_count,
                     thinking_words=thinking_words,
                     num_predict=self._num_predict,
-                    num_ctx=num_ctx,
+                    num_ctx=attempt_num_ctx,
                     max_num_ctx=self._max_num_ctx,
                     think=self._think,
                     temperature=0.0,
@@ -3177,6 +3342,8 @@ class OllamaWriter:
                         check_id=exc.check_id,
                         reason=str(exc),
                         failing_sentence=exc.failing_sentence,
+                        event_index=exc.event_index,
+                        event_kind=exc.event_kind,
                     )
                 )
                 if attempt < self._max_retries:
@@ -3196,13 +3363,13 @@ class OllamaWriter:
                 manifest_digest=self.manifest_digest,
                 model_layer_digest=self._model_pin.model_layer_digest,
                 licence_id=self._model_pin.licence_id,
-                prompt_sha256=prompt_sha,
-                prompt_tokens_estimate=prompt_tokens_estimate,
+                prompt_sha256=attempt_prompt_sha,
+                prompt_tokens_estimate=attempt_prompt_est,
                 prompt_eval_count=prompt_eval_count,
                 eval_count=eval_count,
                 thinking_words=thinking_words,
                 num_predict=self._num_predict,
-                num_ctx=num_ctx,
+                num_ctx=attempt_num_ctx,
                 max_num_ctx=self._max_num_ctx,
                 think=self._think,
                 temperature=0.0,

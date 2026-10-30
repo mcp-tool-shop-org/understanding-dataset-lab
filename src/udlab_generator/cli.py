@@ -815,7 +815,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--max-retries",
         type=int,
         default=0,
-        help="Number of retries per refused rendering with the same prompt and seed + attempt (default: 0).",
+        help="Number of repair retries per refused rendering (default: 0).",
     )
     parser.add_argument(
         "--grant-id",

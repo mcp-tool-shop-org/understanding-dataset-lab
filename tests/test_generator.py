@@ -3484,10 +3484,10 @@ def test_43_fake_transport_keep_and_continue_and_max_retries(tmp_path: Path) -> 
         start_owned_server=False,
     )
     assert len(retry_calls) == 3
-    # Attempt 0 and attempt 1 for r1 use the exact same prompt and seed + attempt (w0.seed + 0, w0.seed + 1)
-    assert retry_calls[1][1] == retry_calls[2][1]
-    assert retry_calls[1][0] == int(w0.seed) + 0
-    assert retry_calls[2][0] == int(w0.seed) + 1
+    # Assert the retry prompt is the first prompt (stripped of trailing newline) plus ONE appended repair line
+    assert retry_calls[2][1].startswith(retry_calls[1][1].rstrip("\n") + "\nRepair retry (c_fidelity_missing_event): Event 1, see:")
+    assert retry_calls[1][0] == int(w0.seed)
+    assert retry_calls[2][0] == int(w0.seed)
     assert summary_retry["scenarios_kept"] == 1
     assert summary_retry["scenarios_refused"] == 0
     assert summary_retry["renderings_kept"] == 2
@@ -3503,7 +3503,7 @@ def test_43_fake_transport_keep_and_continue_and_max_retries(tmp_path: Path) -> 
     assert [(r["attempt"], r["seed"], r["checks_passed"]) for r in gen_retry] == [
         (0, int(w0.seed), True),
         (0, int(w0.seed), False),
-        (1, int(w0.seed) + 1, True),
+        (1, int(w0.seed), True),
     ]
 
 
@@ -4273,6 +4273,283 @@ def test_50b_negation_list_prompt_and_pass_cases() -> None:
             assert not _sentence_matches_event(sent_neg, w.events[ev_idx], w.noise_threshold, world=w), (
                 f"Negation item {item!r} must be rejected on {w.events[ev_idx].kind} event"
             )
+
+
+def test_51_card_st_negation_scoping_and_could_not_see() -> None:
+    """Test 51 (Card st Req a, b, e):
+    - (a) Negation scoping: negation counts only where it scopes the event's verb:
+      - 'Not long after, Eva observed the index reel in the linen bin in the bindery room.' passes;
+      - 'Eva did not see the index reel in the linen bin in the bindery room.' is refused;
+      - 'Eva never saw the index reel in the linen bin in the bindery room.' is refused;
+      - 'Dan could not see the iron safe at the far-side alcove in the sorting room because the rolling pillar blocked sight.'
+        is accepted ONLY for an occluded see, and refused for an unoccluded one.
+    - (b) 'could not see' on an occluded see is accepted, generated from the same list as the prompt text
+      (SIGHTING_VERBS includes 'see', BLOCKING_PHRASES includes 'could not see').
+    - (e) Seer-less occluded see ('The rolling pillar blocked sight of the iron safe at the far-side alcove in the sorting room.')
+      stays refused.
+    """
+    import udlab_generator.render as ug_render
+    from udlab_generator.render import _sentence_matches_event
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[0]  # Eva
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+
+    ev_1 = w.events[0]  # unoccluded see by Eva in bindery room (index reel at linen bin)
+    assert ev_1.kind == "see" and not ev_1.occluded
+    ev_17 = w.events[16]  # occluded see by Dan in sorting room (iron safe, rolling pillar)
+    assert ev_17.kind == "see" and ev_17.occluded and ev_17.occluder == "rolling pillar"
+
+    # (a.1) Pass test: "Not long after, Eva observed..." passes
+    sent_not_long_after = "Not long after, Eva observed the index reel in the linen bin in the bindery room."
+    assert _sentence_matches_event(sent_not_long_after, ev_1, w.noise_threshold, world=w)
+    assert check_rendered_prose(f"{sj_setup}\n\n{' '.join([sent_not_long_after, *sj_sents[1:]])}", w, focal_agent=fa) == ()
+
+    # (a.2) Refusal test: "Eva did not see..." is refused
+    sent_did_not_see = "Eva did not see the index reel in the linen bin in the bindery room."
+    assert not _sentence_matches_event(sent_did_not_see, ev_1, w.noise_threshold, world=w)
+    with pytest.raises(RenderCheckError) as exc_did_not:
+        check_rendered_prose(f"{sj_setup}\n\n{' '.join([sent_did_not_see, *sj_sents[1:]])}", w, focal_agent=fa)
+    assert exc_did_not.value.check_id == "c_fidelity_missing_event"
+
+    # (a.3) Refusal test: "Eva never saw..." is refused
+    sent_never_saw = "Eva never saw the index reel in the linen bin in the bindery room."
+    assert not _sentence_matches_event(sent_never_saw, ev_1, w.noise_threshold, world=w)
+    with pytest.raises(RenderCheckError) as exc_never:
+        check_rendered_prose(f"{sj_setup}\n\n{' '.join([sent_never_saw, *sj_sents[1:]])}", w, focal_agent=fa)
+    assert exc_never.value.check_id == "c_fidelity_missing_event"
+
+    # (a.4) & (b) Exact quoted sentence: "Dan could not see the iron safe at the far-side alcove in the sorting room because the rolling pillar blocked sight."
+    # Accepted ONLY for an occluded see (ev_17), and refused for an unoccluded one.
+    assert "see" in ug_render.SIGHTING_VERBS
+    assert "could not see" in ug_render.BLOCKING_PHRASES
+    prompt_str = format_writer_prompt(w, fa)
+    assert "see: " in prompt_str and ", see" in prompt_str
+    assert "'could not see'" in prompt_str
+
+    sent_could_not_see_exact = (
+        "Dan could not see the iron safe at the far-side alcove in the sorting room because the rolling pillar blocked sight."
+    )
+    assert _sentence_matches_event(sent_could_not_see_exact, ev_17, w.noise_threshold, world=w)
+    sents_occ = list(sj_sents)
+    sents_occ[16] = sent_could_not_see_exact
+    assert check_rendered_prose(f"{sj_setup}\n\n{' '.join(sents_occ)}", w, focal_agent=fa) == ()
+
+    # Also test "Dan could not see X behind the pillar" on occluded vs unoccluded see:
+    sent_could_not_see_behind = (
+        "In the sorting room, at the far-side alcove, Dan could not see the iron safe behind the rolling pillar, which blocked sight."
+    )
+    assert _sentence_matches_event(sent_could_not_see_behind, ev_17, w.noise_threshold, world=w)
+    unoccluded_ev_17 = replace(ev_17, occluded=False, occluder=None)
+    assert not _sentence_matches_event(sent_could_not_see_exact, unoccluded_ev_17, w.noise_threshold, world=w)
+    assert not _sentence_matches_event(sent_could_not_see_behind, unoccluded_ev_17, w.noise_threshold, world=w)
+    sent_unocc_could_not_see = "Eva could not see the index reel in the linen bin in the bindery room behind the canvas screen."
+    assert not _sentence_matches_event(sent_unocc_could_not_see, ev_1, w.noise_threshold, world=w)
+    with pytest.raises(RenderCheckError) as exc_unocc_cns:
+        check_rendered_prose(f"{sj_setup}\n\n{' '.join([sent_unocc_could_not_see, *sj_sents[1:]])}", w, focal_agent=fa)
+    assert exc_unocc_cns.value.check_id == "c_fidelity_missing_event"
+
+    # (e) Seer-less occluded see stays a model fault and stays refused:
+    sent_seerless = "The rolling pillar blocked sight of the iron safe at the far-side alcove in the sorting room."
+    assert not _sentence_matches_event(sent_seerless, ev_17, w.noise_threshold, world=w)
+    sents_seerless = list(sj_sents)
+    sents_seerless[16] = sent_seerless
+    sents_seerless[28] = sent_seerless
+    with pytest.raises(RenderCheckError) as exc_seerless:
+        check_rendered_prose(f"{sj_setup}\n\n{' '.join(sents_seerless)}", w, focal_agent=fa)
+    assert exc_seerless.value.check_id == "c_fidelity_missing_event"
+    assert exc_seerless.value.failing_sentence == sent_seerless
+
+
+def test_52_card_st_bare_enter_after_matching_leave() -> None:
+    """Test 52 (Card st Req d & f):
+    - (d) Accept a bare enter when the immediately preceding event sentence is by the same actor,
+      is the matching leave, and names the from-room. Refuse it otherwise:
+      - the r1 pattern ('Dan walked from the bindery room to the sorting room.' followed by 'Dan entered the sorting room.') passes;
+      - a bare enter with NO matching leave sentence before it stays refused;
+      - a bare enter whose preceding leave names a different from-room stays refused.
+    - (f) Prompt emphasis: generated constraints block explicitly emphasizes naming the from-room on every enter.
+    """
+    from udlab_generator.render import check_rendered_prose
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    fa = w.agents[1]  # Dan
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    setup_dan = sj_setup.replace("Following Eva", "Following Dan")
+
+    # (d.1) Pass test: the r1 bare-enter pattern on all 5 enters in scen_0000 (events 3, 5, 9, 13, 15, plus 21)
+    r1_pattern_sents = list(sj_sents)
+    r1_pattern_sents[1] = "Dan walked from the bindery room to the sorting room."
+    r1_pattern_sents[2] = "Dan entered the sorting room."
+    r1_pattern_sents[3] = "Cara walked from the bindery room to the sorting room."
+    r1_pattern_sents[4] = "Cara entered the sorting room."
+    r1_pattern_sents[7] = "Eva walked from the bindery room to the sorting room."
+    r1_pattern_sents[8] = "Eva entered the sorting room."
+    r1_pattern_sents[11] = "Cara walked from the sorting room to the bindery room."
+    r1_pattern_sents[12] = "Cara entered the bindery room."
+    r1_pattern_sents[13] = "Cara walked from the bindery room to the reading room."
+    r1_pattern_sents[14] = "Cara entered the reading room."
+    assert check_rendered_prose(f"{setup_dan}\n\n{' '.join(r1_pattern_sents)}", w, focal_agent=fa) == ()
+
+    # (d.2) Refusal test: a bare enter with NO matching leave sentence before it stays refused
+    # Mutate world so event #2 is a 'see' by Eva instead of 'leave' by Dan, followed by bare enter by Dan on event #3:
+    w_no_leave = replace(
+        w,
+        events=(
+            w.events[0],
+            w.events[0],  # event #2 is now 'see' by Eva, not 'leave' by Dan
+            *w.events[2:],
+        ),
+    )
+    sents_no_leave = list(sj_sents)
+    sents_no_leave[1] = sj_sents[0]
+    sents_no_leave[2] = "Dan entered the sorting room."
+    with pytest.raises(RenderCheckError) as exc_no_leave:
+        check_rendered_prose(f"{setup_dan}\n\n{' '.join(sents_no_leave)}", w_no_leave, focal_agent=fa)
+    assert exc_no_leave.value.check_id == "c_fidelity_missing_event"
+    assert exc_no_leave.value.failing_sentence == "Dan entered the sorting room."
+
+    # Also test when the preceding leave sentence is by a different actor in prose:
+    sents_wrong_actor_leave = list(sj_sents)
+    sents_wrong_actor_leave[1] = "Cara walked from the bindery room to the sorting room."
+    sents_wrong_actor_leave[2] = "Dan entered the sorting room."
+    with pytest.raises(RenderCheckError) as exc_wrong_actor:
+        check_rendered_prose(f"{setup_dan}\n\n{' '.join(sents_wrong_actor_leave)}", w, focal_agent=fa)
+    assert exc_wrong_actor.value.check_id == "c_fidelity_missing_event"
+
+    # (d.3) Refusal test: a bare enter whose preceding leave names a different from-room stays refused
+    w_diff_from = replace(
+        w,
+        events=(
+            w.events[0],
+            replace(w.events[1], room="reading room", from_location="reading room", to_location="sorting room"),
+            *w.events[2:],
+        ),
+    )
+    sents_diff_from = list(sj_sents)
+    sents_diff_from[1] = "Dan walked from the reading room to the sorting room."
+    sents_diff_from[2] = "Dan entered the sorting room."
+    with pytest.raises(RenderCheckError) as exc_diff_from:
+        check_rendered_prose(f"{setup_dan}\n\n{' '.join(sents_diff_from)}", w_diff_from, focal_agent=fa)
+    assert exc_diff_from.value.check_id == "c_fidelity_missing_event"
+    assert exc_diff_from.value.failing_sentence == "Dan entered the sorting room."
+
+    # (f) Prompt emphasis check
+    prompt_str = format_writer_prompt(w, fa)
+    assert "every enter sentence must name both from_location and to_location" in prompt_str
+
+
+def test_53_card_st_repair_retry_instead_of_blind_retry(tmp_path: Path) -> None:
+    """Test 53 (Card st Req c):
+    - On a refusal, the second attempt is the same prompt plus ONE appended line naming the check id
+      and the event number and kind, e.g. 'Repair retry (c_fidelity_missing_event): Event 3, enter: name the room the actor came from.'
+    - The line carries no key content and echoes no model text.
+    - Both attempts are recorded.
+    - No temperature or seed noise is added (temperature == 0.0 and seed == base_seed on both attempts).
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+    )
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    passing_r0 = render_world_template(w0, w0.agents[0])
+    passing_r1 = render_world_template(w0, w0.agents[1])
+    sj_setup, sj_sents = _build_sj_writer_in_the_loop_scen_0000()
+    setup_dan = sj_setup.replace("Following Eva", "Following Dan")
+
+    # Attempt 0 for r1 fails on Event 17 (seer-less occluded see) with unique model text that must NOT be echoed:
+    model_secret_text = "The rolling pillar blocked sight of the iron safe at the far-side alcove in the sorting room."
+    bad_sents_r1 = list(sj_sents)
+    bad_sents_r1[16] = model_secret_text
+    bad_sents_r1[28] = model_secret_text
+    failing_r1 = f"{setup_dan}\n\n{' '.join(bad_sents_r1)}"
+
+    seen_calls: list[tuple[int, float, str]] = []
+
+    def _repair_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            assert payload is not None
+            opts = payload.get("options") or {}
+            seed_val = int(opts.get("seed", -1))
+            temp_val = float(opts.get("temperature", -1.0))
+            prompt_str = str(payload["messages"][0]["content"])
+            idx = len(seen_calls)
+            seen_calls.append((seed_val, temp_val, prompt_str))
+            txt = passing_r0 if idx == 0 else (failing_r1 if idx == 1 else passing_r1)
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3000,
+                "eval_count": 780,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_dir = tmp_path / "st_repair_retry"
+    summary = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        max_retries=1,
+        grant_id="test-grant-st-repair",
+        http_transport=_repair_transport,
+        start_owned_server=False,
+    )
+    assert len(seen_calls) == 3
+    seed_0, temp_0, prompt_attempt_0 = seen_calls[1]
+    seed_1, temp_1, prompt_attempt_1 = seen_calls[2]
+
+    # Do not add temperature or seed noise:
+    assert temp_0 == 0.0 and temp_1 == 0.0
+    assert seed_0 == int(w0.seed) and seed_1 == int(w0.seed)
+
+    # Second attempt is the same prompt plus ONE appended line naming check id, event number, and event kind:
+    base_p0 = prompt_attempt_0.rstrip("\n")
+    assert prompt_attempt_1.startswith(base_p0 + "\n")
+    appended_tail = prompt_attempt_1[len(base_p0) + 1 :]
+    assert "\n" not in appended_tail, f"Expected exactly one appended line, got: {appended_tail!r}"
+    assert "c_fidelity_missing_event" in appended_tail
+    assert "Event 17, see:" in appended_tail
+
+    # The line carries no key content and echoes no model text:
+    assert model_secret_text not in appended_tail
+    assert "iron safe" not in appended_tail
+    assert "rolling pillar" not in appended_tail
+    assert "Dan" not in appended_tail
+    for q in compute_scenario_keys(w0).questions:
+        if isinstance(q.key, str) and q.key not in ("yes", "no", "none"):
+            assert q.key.lower() not in appended_tail.lower()
+
+    # Record both attempts:
+    assert summary["calls_kept"] == 2
+    assert summary["calls_refused"] == 1
+    gen_rows = [
+        json.loads(line)
+        for line in (out_dir / "generations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(gen_rows) == 3
+    assert gen_rows[1]["attempt"] == 0 and gen_rows[1]["seed"] == int(w0.seed) and gen_rows[1]["checks_passed"] is False
+    assert gen_rows[2]["attempt"] == 1 and gen_rows[2]["seed"] == int(w0.seed) and gen_rows[2]["checks_passed"] is True
+    assert gen_rows[1]["prompt_sha256"] != gen_rows[2]["prompt_sha256"]
+
 
 
 
