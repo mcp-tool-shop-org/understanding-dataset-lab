@@ -40,12 +40,14 @@ from udlab_generator.render import (
     OllamaHttpTransport,
     OllamaWriter,
     PromptTokenCounter,
+    ProseFaultRecord,
     RenderCheckError,
     RenderedScenario,
     SealedResponseEntry,
     WriterCheckpointManager,
     append_sealed_response,
     check_rendered_prose,
+    collect_prose_faults,
     compute_sealed_response_digests,
     count_duplicate_stake_statements,
     count_prompt_tokens_exact,
@@ -56,6 +58,7 @@ from udlab_generator.render import (
     locate_failing_sentence_in_response,
     parse_generation_refusal_metadata,
     resolve_sealed_failing_sentence,
+    summarize_fault_vector_counts,
 )
 from udlab_generator.sealing import (
     SealingError,
@@ -167,6 +170,9 @@ def _summarize_call_outcomes(call_records: Sequence[GenerationCallRecord]) -> di
         "kept": renderings_kept,
         "refused": renderings_refused,
         "refusals_by_check_id": dict(sorted(refusals_by_check_id.items())),
+        "fault_vector_counts_by_check_id": summarize_fault_vector_counts(
+            rec.fault_check_ids for rec in call_records
+        ),
     }
 
 
@@ -257,6 +263,8 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
             event_kind: str | None = None
             failing_sentence: str | None = None
             reason: str | None = None
+            faults: tuple[ProseFaultRecord, ...] = ()
+            fault_check_ids: list[str] = []
             calls_kept += 1
             call_dup_stakes = count_duplicate_stake_statements(response_text, world)
             duplicate_stake_statements += call_dup_stakes
@@ -267,6 +275,10 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
             event_kind = exc.event_kind
             failing_sentence = exc.failing_sentence
             reason = str(exc)
+            faults = collect_prose_faults(response_text, world, focal_agent=focal_agent)
+            fault_check_ids = list(dict.fromkeys(f.check_id for f in faults)) or (
+                [exc.check_id] if exc.check_id else []
+            )
             calls_refused += 1
             call_dup_stakes = count_duplicate_stake_statements(response_text, world)
             refusals_by_check_id[exc.check_id] += 1
@@ -357,6 +369,8 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
                 "failing_sentence_sha256_verified": failing_sentence_sha_verified,
                 "duplicate_stake_statements": call_dup_stakes,
                 "reason": reason,
+                "fault_check_ids": fault_check_ids,
+                "fault_vector": [f.to_dict() for f in faults],
             }
         )
 
@@ -385,6 +399,9 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
         "refused": renderings_refused,
         "duplicate_stake_statements": duplicate_stake_statements,
         "refusals_by_check_id": dict(sorted(refusals_by_check_id.items())),
+        "fault_vector_counts_by_check_id": summarize_fault_vector_counts(
+            c["fault_check_ids"] for c in call_results  # type: ignore[misc]
+        ),
         "legacy_refusal_format_calls": legacy_refusal_format_calls,
         "matches_recorded_verdicts": all_verdicts_match,
     }

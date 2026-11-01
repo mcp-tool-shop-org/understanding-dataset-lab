@@ -8616,9 +8616,9 @@ def test_87_card_ue_station_change_and_occluded_see_prompt_and_checker(monkeypat
     for form in get_station_and_occlusion_checker_forms():
         assert form in event_order_rule, form
     assert set(STATION_MOVE_DIRECTION_WORDS) <= set(get_station_and_occlusion_checker_forms())
-    assert "stepped behind the <occluder> to the far-side alcove" in station_clause
+    assert "on station_change, write '<actor> stepped behind the <occluder> to the far-side alcove'" in station_clause
     assert "stepped back around the <occluder> to the container bay" in station_clause
-    assert "never that the actor moved the <occluder>" in station_clause
+    assert "never" not in station_clause.split(ug_render.STATION_EXAMPLE_NOTE)[0]
     assert "blocked <actor>'s sight of the <container> from the far-side alcove" in see_clause
     assert "could not see the <container> from the far-side alcove, blocked by the <occluder>" in see_clause
     assert "never that the actor saw or observed it" in see_clause
@@ -9082,3 +9082,445 @@ def test_91_card_ul_exactness_against_recorded_prompt_eval_counts() -> None:
     assert counter.count("hello world") == 2  # no BOS for this vocab
     for call_id, messages, recorded in pairs:
         assert count_prompt_tokens_exact(messages, think=False, counter=counter) == recorded, call_id
+
+
+def test_92_station_projection_pure_and_world_keys_sealed_checkpoints_unchanged(tmp_path: Path) -> None:
+    """Test 92 (Card station-projection, Req 1 & 3): station-change Event projects to kind='station_change'
+    with actor, room, origin_station, destination_station, and occluder (no target_object/move shape); every
+    non-station Event projects unchanged; World, world.events, keys, sealed_store, and checkpoints are not
+    mutated and their sha256s for a fixed seed are byte-identical before and after projection; prompt token
+    estimate does not grow."""
+    from dataclasses import asdict
+    from udlab_generator.render import (
+        STATION_CHANGE_EVENT_KIND,
+        RenderedScenario,
+        WriterCheckpointManager,
+        estimate_prompt_tokens,
+        format_station_change_clause,
+        format_writer_prompt,
+        load_writer_prompt_template,
+        project_event_for_writer,
+        project_events_for_writer,
+        render_world_template,
+    )
+    from udlab_generator.sealing import _serialize_world, write_sealed_dataset
+    from udlab_generator.world import is_station_transition_event
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261033)[0])
+    fa0, fa1 = w.agents[0], w.agents[1]
+    prose_0 = render_world_template(w, fa0)
+    prose_1 = render_world_template(w, fa1)
+    keys_before = compute_scenario_keys(w)
+
+    def _canonical_sha(obj: object) -> str:
+        return hashlib.sha256(
+            json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    world_sha_before = _canonical_sha(_serialize_world(w))
+    events_sha_before = _canonical_sha([asdict(e) for e in w.events])
+    keys_sha_before = _canonical_sha(asdict(keys_before))
+
+    priv_seed = "cd" * 32
+    prov = {"writer": "mock"}
+    pair_before = (
+        RenderedScenario(w.scenario_id, 0, fa0, prose_0, "pre", keys_before, world=w),
+        RenderedScenario(w.scenario_id, 1, fa1, prose_1, "pre", keys_before, world=w),
+    )
+    dir_before = tmp_path / "before_proj"
+    receipt_before = write_sealed_dataset(
+        rendered_pairs=[pair_before],
+        public_dir=dir_before / "part_public",
+        sealed_dir=dir_before / "sealed_store",
+        private_seed_hex=priv_seed,
+        writer_provenance=prov,
+        all_worlds=[w],
+    )
+    ckpt_before = WriterCheckpointManager(
+        output_dir=dir_before,
+        count=1,
+        base_seed=20261033,
+        private_seed_hex=priv_seed,
+        writer_kind="mock",
+    )
+    ckpt_before.initialize_fresh()
+    ckpt_before.append_scenario(scenario_index=0, pair=pair_before, call_records=(), world=w)
+    ckpt_pub_sha_before = hashlib.sha256(ckpt_before.public_path.read_bytes()).hexdigest()
+    ckpt_seal_sha_before = hashlib.sha256(ckpt_before.sealed_path.read_bytes()).hexdigest()
+    sealing_meta_sha_before = hashlib.sha256(
+        (dir_before / "sealed_store" / "sealing.sealed.json").read_bytes()
+    ).hexdigest()
+
+    # Run projection and format_writer_prompt:
+    projected = project_events_for_writer(w.events, world=w)
+    assert len(projected) == len(w.events)
+    station_count = 0
+    for idx, (ev, p_dict) in enumerate(zip(w.events, projected, strict=True), start=1):
+        assert project_event_for_writer(ev, order_index=idx, world=w) == p_dict
+        if is_station_transition_event(ev, w):
+            station_count += 1
+            assert p_dict == {
+                "order_index": idx,
+                "kind": STATION_CHANGE_EVENT_KIND,
+                "actor": ev.actor,
+                "room": ev.room,
+                "origin_station": ev.from_location,
+                "destination_station": ev.to_location,
+                "occluder": ev.target_object,
+            }
+            assert "target_object" not in p_dict
+            assert p_dict["kind"] != "move"
+        else:
+            assert p_dict["kind"] == ev.kind
+            assert "origin_station" not in p_dict and "destination_station" not in p_dict
+            if ev.target_object is not None:
+                assert p_dict["target_object"] == ev.target_object
+    assert station_count == 3
+
+    prompt_0 = format_writer_prompt(w, fa0)
+    prompt_1 = format_writer_prompt(w, fa1)
+    assert f'"kind":"{STATION_CHANGE_EVENT_KIND}"' in prompt_0
+    for occ in w.occluders_by_room.values():
+        assert f'"target_object":"{occ}"' not in prompt_0
+
+    # Purity check: World, events, keys, sealed_store, and checkpoints are byte-identical after projection:
+    assert _canonical_sha(_serialize_world(w)) == world_sha_before
+    assert _canonical_sha([asdict(e) for e in w.events]) == events_sha_before
+    keys_after = compute_scenario_keys(w)
+    assert _canonical_sha(asdict(keys_after)) == keys_sha_before
+
+    pair_after = (
+        RenderedScenario(w.scenario_id, 0, fa0, prose_0, prompt_0, keys_after, world=w),
+        RenderedScenario(w.scenario_id, 1, fa1, prose_1, prompt_1, keys_after, world=w),
+    )
+    dir_after = tmp_path / "after_proj"
+    receipt_after = write_sealed_dataset(
+        rendered_pairs=[pair_after],
+        public_dir=dir_after / "part_public",
+        sealed_dir=dir_after / "sealed_store",
+        private_seed_hex=priv_seed,
+        writer_provenance=prov,
+        all_worlds=[w],
+    )
+    assert receipt_after.items_sha256 == receipt_before.items_sha256
+    assert receipt_after.part_json_sha256 == receipt_before.part_json_sha256
+    assert receipt_after.keys_sealed_sha256 == receipt_before.keys_sealed_sha256
+    assert (
+        hashlib.sha256((dir_after / "sealed_store" / "sealing.sealed.json").read_bytes()).hexdigest()
+        == sealing_meta_sha_before
+    )
+
+    ckpt_after = WriterCheckpointManager(
+        output_dir=dir_after,
+        count=1,
+        base_seed=20261033,
+        private_seed_hex=priv_seed,
+        writer_kind="mock",
+    )
+    ckpt_after.initialize_fresh()
+    ckpt_after.append_scenario(scenario_index=0, pair=pair_after, call_records=(), world=w)
+    assert hashlib.sha256(ckpt_after.public_path.read_bytes()).hexdigest() == ckpt_pub_sha_before
+    assert hashlib.sha256(ckpt_after.sealed_path.read_bytes()).hexdigest() == ckpt_seal_sha_before
+
+    # Requirement 3: positive station_change clause, no negative 'never that the actor moved' warning, no token growth.
+    clause = format_station_change_clause()
+    assert clause.startswith("on station_change, write ")
+    assert "never that the actor moved" not in clause
+    tmpl = load_writer_prompt_template()
+    assert len(tmpl.encode("utf-8")) <= 6577
+    assert estimate_prompt_tokens(tmpl) <= 2193
+
+
+def test_93_station_projection_reconstruct_world_round_trip_and_cli_verifiers(tmp_path: Path) -> None:
+    """Test 93 (Card station-projection, Req 2 & 6): _reconstruct_world_from_writer_prompt(world,
+    format_writer_prompt(world, ...)) equals world across multiple seeds containing station changes;
+    --recheck and --verify-written pass on a mock-writer run directory."""
+    from udlab_generator.cli import build_and_probe_dataset, recheck_saved_responses, verify_written_dataset
+    from udlab_generator.render import _reconstruct_world_from_writer_prompt, format_writer_prompt
+    from udlab_generator.world import is_station_transition_event
+
+    configs = make_balanced_configs(12, base_seed=20261033)
+    total_station_changes = 0
+    for cfg in configs:
+        w = generate_world(cfg)
+        sc = sum(1 for ev in w.events if is_station_transition_event(ev, w))
+        assert sc >= 1
+        total_station_changes += sc
+        for fa in w.agents[:2]:
+            prompt = format_writer_prompt(w, fa)
+            reconstructed = _reconstruct_world_from_writer_prompt(w, prompt)
+            assert reconstructed == w
+            assert reconstructed.events == w.events
+            assert compute_scenario_keys(reconstructed) == compute_scenario_keys(w)
+    assert total_station_changes >= 20
+
+    run_dir = tmp_path / "mock_run_seed"
+    summary = build_and_probe_dataset(
+        count=10,
+        base_seed=20261030,
+        output_dir=run_dir,
+        writer_kind="mock",
+    )
+    assert summary["scenarios_kept"] == 10 and summary["renderings_kept"] == 20
+    assert "fault_vector_counts_by_check_id" in summary
+    fault_table = summary["fault_vector_counts_by_check_id"]
+    assert isinstance(fault_table, dict) and all(v == 0 for v in fault_table.values())
+
+    recheck_res = recheck_saved_responses(run_dir)
+    assert recheck_res["matches_recorded_verdicts"] is True
+    assert recheck_res["fault_vector_counts_by_check_id"] == fault_table
+
+    verify_res = verify_written_dataset(run_dir)
+    assert verify_res["passed"] is True
+
+
+def test_94_station_change_checker_occluder_manipulation_refused_and_person_verbs_accepted() -> None:
+    """Test 94 (Card station-projection, Req 4 & 6): every verb in OCCLUDER_MANIPULATION_VERBS with the
+    occluder as object is refused on a station-change event (with or without behind/around and with or
+    without valid stations); every verb in STATION_CHANGE_PERSON_VERBS is accepted on a valid station-change
+    sentence and refused when the station or direction word is mutated; verify_prompt_and_checker_requirements_aligned
+    passes."""
+    from udlab_generator.render import (
+        OCCLUDER_MANIPULATION_VERBS,
+        STATION_CHANGE_PERSON_VERBS,
+        _sentence_matches_event,
+        _split_prose_sentences,
+        check_rendered_prose,
+        render_world_template,
+        verify_prompt_and_checker_requirements_aligned,
+    )
+    from udlab_generator.world import is_station_transition_event
+
+    verify_prompt_and_checker_requirements_aligned()
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261033)[0])
+    fa = w.agents[0]
+    setup_para, events_para = render_world_template(w, fa).split("\n\n")
+    sents = _split_prose_sentences(events_para)
+    sm, back = w.events[6], w.events[10]
+    assert is_station_transition_event(sm, w) and is_station_transition_event(back, w)
+    a, occ, room = sm.actor, sm.target_object, sm.room
+
+    # 1. Every verb in OCCLUDER_MANIPULATION_VERBS with the occluder as direct object is refused on both
+    #    station-change events (with or without behind/around, with or without valid stations, with adverb).
+    for verb in OCCLUDER_MANIPULATION_VERBS:
+        for ev in (sm, back):
+            f_loc, t_loc = ev.from_location, ev.to_location
+            candidates = (
+                f"In the {room}, {a} {verb} the {occ} from the {f_loc} to the {t_loc}.",
+                f"In the {room}, {a} {verb} the {occ} behind him from the {f_loc} to the {t_loc}.",
+                f"In the {room}, {a} {verb} the {occ} back around her from the {f_loc} to the {t_loc}.",
+                f"In the {room}, {a} {verb} quickly the {occ} behind him to the {t_loc}.",
+                f"In the {room}, {a} {verb} the {occ} to the {t_loc}.",
+                f"In the {room}, {a} {verb} the {occ}.",
+            )
+            for cand in candidates:
+                assert not _sentence_matches_event(cand, ev, w.noise_threshold, world=w), (verb, cand)
+
+    # 2. Every verb in STATION_CHANGE_PERSON_VERBS is accepted on valid station-change sentences and in full
+    #    check_rendered_prose, and refused when the station or direction word is mutated.
+    for verb in STATION_CHANGE_PERSON_VERBS:
+        valid_sm_1 = f"In the {room}, {a} {verb} behind the {occ} to the far-side alcove."
+        valid_sm_2 = f"In the {room}, {a} {verb} from the container bay behind the {occ} to the far-side alcove."
+        valid_back_1 = f"In the {room}, {a} {verb} back around the {occ} to the container bay."
+        valid_back_2 = f"In the {room}, {a} {verb} around the {occ} from the far-side alcove to the container bay."
+        assert _sentence_matches_event(valid_sm_1, sm, w.noise_threshold, world=w), (verb, valid_sm_1)
+        assert _sentence_matches_event(valid_sm_2, sm, w.noise_threshold, world=w), (verb, valid_sm_2)
+        assert _sentence_matches_event(valid_back_1, back, w.noise_threshold, world=w), (verb, valid_back_1)
+        assert _sentence_matches_event(valid_back_2, back, w.noise_threshold, world=w), (verb, valid_back_2)
+
+        patched = list(sents)
+        patched[6] = valid_sm_1
+        patched[10] = valid_back_1
+        patched[12] = valid_sm_2
+        assert check_rendered_prose(f"{setup_para}\n\n{' '.join(patched)}", w, focal_agent=fa) == ()
+
+        # Mutated destination station or missing/mutated direction word is refused:
+        wrong_station_sm = f"In the {room}, {a} {verb} behind the {occ} to the container bay."
+        wrong_station_back = f"In the {room}, {a} {verb} back around the {occ} to the far-side alcove."
+        no_dir_sm = f"In the {room}, {a} {verb} the {occ} to the far-side alcove."
+        wrong_dir_sm = f"In the {room}, {a} {verb} beside the {occ} to the far-side alcove."
+        no_occ_sm = f"In the {room}, {a} {verb} behind to the far-side alcove."
+        for bad_cand, ev in (
+            (wrong_station_sm, sm),
+            (wrong_station_back, back),
+            (no_dir_sm, sm),
+            (wrong_dir_sm, sm),
+            (no_occ_sm, sm),
+        ):
+            assert not _sentence_matches_event(bad_cand, ev, w.noise_threshold, world=w), (verb, bad_cand)
+
+
+def test_95_collect_all_fault_vectors_and_structural_no_text_guard(tmp_path: Path) -> None:
+    """Test 95 (Card station-projection, Req 5 & 6): a synthetic rendering violating three+ distinct checks
+    records all of them in fault_check_ids and collect_prose_faults / check_rendered_prose(..., collect_all=True)
+    while RenderCheckError still reports the first; verdicts and first-failure tuples on a test corpus match
+    with and without collect-all; structural guard ensures fault-vector fields hold only known check_ids,
+    integer indices, and allowed event_kind/failure_kind enums (never free text)."""
+    from udlab_generator.cli import build_and_probe_dataset, recheck_saved_responses
+    from udlab_generator.render import (
+         DEFAULT_WRITER_MODEL_PIN,
+        ProseFaultRecord,
+        VALID_FAILURE_KINDS,
+        VALID_FAULT_CHECK_IDS,
+        VALID_FAULT_EVENT_KINDS,
+        _split_prose_sentences,
+        check_rendered_prose,
+        collect_prose_faults,
+        render_world_template,
+        summarize_fault_vector_counts,
+    )
+    from udlab_generator.world import BELIEF_PERSISTENCE_RULE, OCCLUSION_RULE
+
+    w = generate_world(make_balanced_configs(1, base_seed=20261033)[0])
+    fa = w.agents[0]
+    good_prose = render_world_template(w, fa)
+    assert check_rendered_prose(good_prose, w, focal_agent=fa) == ()
+    assert check_rendered_prose(good_prose, w, focal_agent=fa, collect_all=True) == ()
+    assert collect_prose_faults(good_prose, w, focal_agent=fa) == ()
+
+    # 1. Multi-fault rendering violating 4 distinct checks:
+    #    - b_banned_adverbs ("secretly")
+    #    - a_no_markers_bracket ("[F0]")
+    #    - d_rule_sentence (omitted BELIEF_PERSISTENCE_RULE)
+    #    - c_fidelity_missing_event (first event sentence dropped)
+    setup_para, events_para = good_prose.split("\n\n")
+    ev_sents = _split_prose_sentences(events_para)
+    multi_bad_setup = setup_para.replace(BELIEF_PERSISTENCE_RULE, "") + " [F0] Everyone waited secretly."
+    multi_bad_prose = f"{multi_bad_setup}\n\n{' '.join(ev_sents[1:])}"
+
+    with pytest.raises(RenderCheckError) as exc_first:
+        check_rendered_prose(multi_bad_prose, w, focal_agent=fa)
+    assert exc_first.value.check_id == "b_banned_adverbs"
+
+    fault_vec = check_rendered_prose(multi_bad_prose, w, focal_agent=fa, collect_all=True)
+    assert fault_vec == collect_prose_faults(multi_bad_prose, w, focal_agent=fa)
+    fault_ids = [f.check_id for f in fault_vec]
+    assert fault_ids[0] == "b_banned_adverbs"
+    for expected_cid in (
+        "b_banned_adverbs",
+        "a_no_markers_bracket",
+        "a_no_markers_fact_id",
+        "d_rule_sentence",
+        "c_fidelity_missing_event",
+    ):
+        assert expected_cid in fault_ids
+
+    # 2. Verify build_summary.json, generations.jsonl, and --recheck produce identical fault_vector_counts_by_check_id:
+    pinned_digest = DEFAULT_WRITER_MODEL_PIN.manifest_digest
+
+    def _multi_fault_transport(method: str, url: str, body: dict | None = None) -> dict:
+        if method == "GET" and url.endswith("/api/version"):
+            return {"version": "0.40.9-test"}
+        if method == "GET" and url.endswith("/api/tags"):
+            return {"models": [{"name": "qwen3.6:35b", "model": "qwen3.6:35b", "digest": f"sha256:{pinned_digest}"}]}
+        if method == "POST" and url.endswith("/api/chat"):
+            payload = dict(body or {})
+            if payload.get("keep_alive") == 0:
+                return {"model": "qwen3.6:35b", "done": True, "done_reason": "unload"}
+            return {
+                "model": "qwen3.6:35b",
+                "message": {"role": "assistant", "content": multi_bad_prose},
+                "done": True,
+                "done_reason": "stop",
+                "eval_count": 300,
+                "prompt_eval_count": 3000,
+            }
+        raise AssertionError(f"Unexpected {method} {url}")
+
+    out_dir = tmp_path / "fault_vec_run"
+    summary = build_and_probe_dataset(
+        count=1,
+        base_seed=20261033,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        grant_id="test-grant-fv",
+        http_transport=_multi_fault_transport,
+        start_owned_server=False,
+    )
+    fv_counts = summary["fault_vector_counts_by_check_id"]
+    assert isinstance(fv_counts, dict)
+    assert summary["refusals_by_check_id"] == {"b_banned_adverbs": 2}
+    assert fv_counts["b_banned_adverbs"] == 2
+    assert fv_counts["a_no_markers_bracket"] == 2
+    assert fv_counts["d_rule_sentence"] == 2
+    assert fv_counts["c_fidelity_missing_event"] == 2
+
+    gen_rows = [
+        json.loads(line)
+        for line in (out_dir / "generations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(gen_rows) == 2
+    for row in gen_rows:
+        assert row["check_id"] == "b_banned_adverbs"
+        assert "b_banned_adverbs" in row["fault_check_ids"]
+        assert "d_rule_sentence" in row["fault_check_ids"]
+        assert "c_fidelity_missing_event" in row["fault_check_ids"]
+
+    recheck_out = recheck_saved_responses(out_dir)
+    assert recheck_out["matches_recorded_verdicts"] is True
+    assert recheck_out["fault_vector_counts_by_check_id"] == fv_counts
+    for c_entry in recheck_out["calls"]:
+        assert c_entry["fault_check_ids"] == gen_rows[0]["fault_check_ids"]
+        for f_dict in c_entry["fault_vector"]:
+            assert set(f_dict.keys()) == {"check_id", "event_index", "event_kind", "failure_kind"}
+
+    # 3. Verdicts and first-failure (check_id, event_index, event_kind, failure_kind) on corpus match with and without collect-all:
+    corpus_samples: list[tuple[str, World, str]] = [
+        (good_prose, w, fa),
+        (good_prose + " [step 1]", w, fa),
+        (good_prose.replace("In the", "Secretly, in the", 1), w, fa),
+        (good_prose.replace(BELIEF_PERSISTENCE_RULE, ""), w, fa),
+        (good_prose.replace(f"{w.noise_threshold} dB", ""), w, fa),
+        (f"{setup_para}\n\n{' '.join(ev_sents[:-1])}", w, fa),
+        (f"{setup_para}\n\n{' '.join([ev_sents[1], ev_sents[0]] + ev_sents[2:])}", w, fa),
+        (multi_bad_prose, w, fa),
+    ]
+    for sample_prose, sample_w, sample_fa in corpus_samples:
+        collected = check_rendered_prose(sample_prose, sample_w, focal_agent=sample_fa, collect_all=True)
+        try:
+            res_normal = check_rendered_prose(sample_prose, sample_w, focal_agent=sample_fa)
+            assert res_normal == ()
+            assert collected == ()
+        except RenderCheckError as exc_norm:
+            assert len(collected) >= 1
+            first_fault = collected[0]
+            assert (
+                first_fault.check_id,
+                first_fault.event_index,
+                first_fault.event_kind,
+                first_fault.failure_kind,
+            ) == (
+                exc_norm.check_id,
+                exc_norm.event_index,
+                exc_norm.event_kind,
+                exc_norm.failure_kind,
+            )
+
+    # 4. Structural test: fault-vector fields can only hold known check_id strings, integer indices, and
+    #    allowed event_kind/failure_kind enums (never free text).
+    valid_rec = ProseFaultRecord(
+        check_id="c_fidelity_missing_event",
+        event_index=3,
+        event_kind="move",
+        failure_kind="altered",
+    )
+    assert valid_rec.check_id in VALID_FAULT_CHECK_IDS
+    assert valid_rec.event_kind in VALID_FAULT_EVENT_KINDS
+    assert valid_rec.failure_kind in VALID_FAILURE_KINDS
+    assert set(valid_rec.to_dict().keys()) == {"check_id", "event_index", "event_kind", "failure_kind"}
+
+    with pytest.raises(ValueError, match="registered check_id"):
+        ProseFaultRecord(check_id="In the atrium, Ben moved the partition.")
+    with pytest.raises(ValueError, match="event_index"):
+        ProseFaultRecord(check_id="b_banned_adverbs", event_index=0)
+    with pytest.raises(ValueError, match="event_index"):
+        ProseFaultRecord(check_id="b_banned_adverbs", event_index=True)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="event_kind"):
+        ProseFaultRecord(check_id="c_fidelity_missing_event", event_index=1, event_kind="free prose text")
+    with pytest.raises(ValueError, match="failure_kind"):
+        ProseFaultRecord(check_id="c_fidelity_missing_event", event_index=1, event_kind="move", failure_kind="sentence text")
+    with pytest.raises(ValueError, match="registered check_ids"):
+        summarize_fault_vector_counts([["free text leak"]])
+

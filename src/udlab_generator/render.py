@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import ast
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+import contextvars
 from dataclasses import dataclass, replace
 import datetime
 import hashlib
@@ -418,13 +419,47 @@ BLOCKING_PHRASES: tuple[str, ...] = (
     "blocking sight",
 )
 
-# Card ue: the station-change and occluded-see forms. These constants are the single source for both the
-# prompt clauses in `WRITER_PROSE_REQUIREMENTS` (`c_fidelity_event_order`, via `format_station_change_clause`
-# and `format_occluded_see_clause`) and the checker's station-move and occluded-see branches in
-# `_sentence_matches_event`; `verify_prompt_and_checker_requirements_aligned` checks that every one of them
-# is rendered into the prompt.
+# Card ue / station-projection: the station-change and occluded-see forms. These constants are the single source
+# for both the prompt clauses in `WRITER_PROSE_REQUIREMENTS` (`c_fidelity_event_order`, via
+# `format_station_change_clause` and `format_occluded_see_clause`) and the checker's station-move and occluded-see
+# branches in `_sentence_matches_event`; `verify_prompt_and_checker_requirements_aligned` checks that every one of
+# them is rendered into the prompt.
+STATION_CHANGE_EVENT_KIND: str = "station_change"
 STATION_MOVE_DIRECTION_WORDS: tuple[str, ...] = ("behind", "around")
-STATION_MOVE_VERB: str = "stepped"
+STATION_CHANGE_PERSON_VERBS: tuple[str, ...] = (
+    "stepped",
+    "walked",
+    "moved",
+    "went",
+    "slipped",
+    "edged",
+)
+STATION_MOVE_VERB: str = STATION_CHANGE_PERSON_VERBS[0]
+OCCLUDER_MANIPULATION_VERBS: tuple[str, ...] = (
+    "moved",
+    "pushed",
+    "rolled",
+    "shifted",
+    "slid",
+    "pulled",
+    "carried",
+    "wheeled",
+    "dragged",
+    "set",
+    "placed",
+    "relocated",
+    "adjusted",
+    "turned",
+    "put",
+    "transferred",
+    "took",
+    "lifted",
+    "hauled",
+    "shoved",
+    "nudged",
+    "repositioned",
+    "stepped",
+)
 OCCLUDED_SEE_BLOCKED_PHRASES: tuple[str, ...] = ("blocked", "blocking sight")
 OCCLUDED_SEE_COULD_NOT_SEE: str = "could not see"
 OCCLUDED_SEE_SIGHT_NOUNS: tuple[str, ...] = ("sight", "view", "line of sight")
@@ -549,6 +584,7 @@ _ACTION_VERBS_BY_KIND: dict[str, tuple[str, ...]] = {
         "carried",
         "took",
     ),
+    STATION_CHANGE_EVENT_KIND: STATION_CHANGE_PERSON_VERBS,
     "see": SIGHTING_VERBS,
     "say": ("said", "stated", "spoke", "announced", "uttered", "claimed", "reported", "told"),
     "message": ("sent", "messaged", "texted", "transmitted", "notified", "wrote"),
@@ -556,12 +592,24 @@ _ACTION_VERBS_BY_KIND: dict[str, tuple[str, ...]] = {
 
 
 def verify_station_and_occlusion_constants() -> None:
-    """Card ue (fix round ui): the two constants that looked prompt-only are what the checker enforces.
-    `STATION_MOVE_VERB` must be a move verb the actor-as-subject gate accepts, and the could-not regexes must be
-    the ones built from `OCCLUDED_SEE_COULD_NOT_SEE`, whose last word must be a sighting verb. Run at import and
-    by `verify_prompt_and_checker_requirements_aligned`."""
+    """Card ue (fix round ui) + station-projection: the constants are what the checker enforces.
+    `STATION_MOVE_VERB` must be the primary verb in `STATION_CHANGE_PERSON_VERBS` and in `_ACTION_VERBS_BY_KIND['move']`,
+    `STATION_CHANGE_PERSON_VERBS` must match `_ACTION_VERBS_BY_KIND[STATION_CHANGE_EVENT_KIND]`,
+    `OCCLUDER_MANIPULATION_VERBS` must cover all move verbs, and the could-not regexes must be built from
+    `OCCLUDED_SEE_COULD_NOT_SEE`, whose last word must be a sighting verb. Run at import and by
+    `verify_prompt_and_checker_requirements_aligned`."""
     if STATION_MOVE_VERB not in _ACTION_VERBS_BY_KIND["move"]:
         raise ValueError(f"STATION_MOVE_VERB {STATION_MOVE_VERB!r} is not in _ACTION_VERBS_BY_KIND['move'].")
+    if not STATION_CHANGE_PERSON_VERBS or STATION_MOVE_VERB != STATION_CHANGE_PERSON_VERBS[0]:
+        raise ValueError(
+            f"STATION_MOVE_VERB {STATION_MOVE_VERB!r} must equal STATION_CHANGE_PERSON_VERBS[0] {STATION_CHANGE_PERSON_VERBS[:1]!r}."
+        )
+    if _ACTION_VERBS_BY_KIND.get(STATION_CHANGE_EVENT_KIND) != STATION_CHANGE_PERSON_VERBS:
+        raise ValueError(
+            f"_ACTION_VERBS_BY_KIND[{STATION_CHANGE_EVENT_KIND!r}] must equal STATION_CHANGE_PERSON_VERBS."
+        )
+    if not set(_ACTION_VERBS_BY_KIND["move"]) <= set(OCCLUDER_MANIPULATION_VERBS):
+        raise ValueError("OCCLUDER_MANIPULATION_VERBS must include all _ACTION_VERBS_BY_KIND['move'] verbs.")
     words = OCCLUDED_SEE_COULD_NOT_SEE.split()
     if len(words) < 2 or words[-1] not in SIGHTING_VERBS or words[-1] != _OCCLUDED_SEE_BARE_VERB:
         raise ValueError(f"OCCLUDED_SEE_COULD_NOT_SEE {OCCLUDED_SEE_COULD_NOT_SEE!r} must end in a sighting verb.")
@@ -630,6 +678,16 @@ _GERUNDS_BY_KIND: dict[str, frozenset[str]] = {
             "taking",
         }
     ),
+    STATION_CHANGE_EVENT_KIND: frozenset(
+        {
+            "stepping",
+            "walking",
+            "moving",
+            "going",
+            "slipping",
+            "edging",
+        }
+    ),
     "see": frozenset(
         {
             "observing",
@@ -659,6 +717,7 @@ _BASE_VERBS_BY_KIND: dict[str, frozenset[str]] = {
     "move": frozenset(
         {"move", "step", "place", "put", "shift", "transfer", "adjust", "turn", "pull", "set", "relocate", "carry", "take"}
     ),
+    STATION_CHANGE_EVENT_KIND: frozenset({"step", "walk", "move", "go", "slip", "edge"}),
     "see": frozenset(
         {"observe", "look", "see", "spot", "notice", "inspect", "check", "view", "watch", "glance", "examine", "lay"}
     ),
@@ -712,18 +771,17 @@ def format_occluded_see_example() -> str:
 
 
 def format_station_change_clause() -> str:
-    """Card ue: the station-change clause of `c_fidelity_event_order`, rendered from the same constants the
-    checker's station-move branch enforces (`STATION_MOVE_DIRECTION_WORDS`, `STATION_MOVE_VERB`, the stations).
-    Card ul appends the two worked examples from `format_station_change_examples`."""
+    """Station-change clause of `c_fidelity_event_order`, rendered as a short positive mapping for
+    `STATION_CHANGE_EVENT_KIND` from the same constants the checker's station-change branch enforces
+    (`STATION_CHANGE_EVENT_KIND`, `STATION_MOVE_DIRECTION_WORDS`, `STATION_MOVE_VERB`, the stations), with
+    the two worked examples from `format_station_change_examples`."""
     behind, around = STATION_MOVE_DIRECTION_WORDS
     verb = STATION_MOVE_VERB
     example_step, example_return = format_station_change_examples()
     return (
-        f"a move of the room's occluder between {CONTAINER_BAY_STATION} and {FAR_SIDE_ALCOVE_STATION} means the actor "
-        f"{verb} {behind} (or back {around}) the <occluder>; write '<actor> {verb} {behind} the <occluder> to the "
-        f"{FAR_SIDE_ALCOVE_STATION}' (or '<actor> {verb} back {around} the <occluder> to the {CONTAINER_BAY_STATION}'), "
-        f"never that the actor moved the <occluder>; e.g. '{example_step}' and '{example_return}' "
-        f"({STATION_EXAMPLE_NOTE})"
+        f"on {STATION_CHANGE_EVENT_KIND}, write '<actor> {verb} {behind} the <occluder> to the "
+        f"{FAR_SIDE_ALCOVE_STATION}' (or '<actor> {verb} back {around} the <occluder> to the {CONTAINER_BAY_STATION}'); "
+        f"e.g. '{example_step}' and '{example_return}' ({STATION_EXAMPLE_NOTE})"
     )
 
 
@@ -809,10 +867,12 @@ DEFAULT_EXAMPLE_NOISE_THRESHOLD: int = 60
 
 
 def get_station_and_occlusion_checker_forms() -> tuple[str, ...]:
-    """Card ue: every wording the checker's station-move and occluded-see branches accept or require, each of
-    which the prompt's `c_fidelity_event_order` rule must render (checked by
+    """Card ue + station-projection: every wording the checker's station-change and occluded-see branches accept or
+    require, each of which the prompt's `c_fidelity_event_order` rule must render (checked by
     `verify_prompt_and_checker_requirements_aligned`)."""
     return (
+        STATION_CHANGE_EVENT_KIND,
+        *STATION_CHANGE_PERSON_VERBS,
         *STATION_MOVE_DIRECTION_WORDS,
         STATION_MOVE_VERB,
         CONTAINER_BAY_STATION,
@@ -1172,6 +1232,81 @@ def verify_prompt_and_checker_requirements_aligned(
     return parsed_prompt_reqs
 
 
+VALID_FAULT_EVENT_KINDS: frozenset[str] = frozenset(
+    {"enter", "leave", "move", "see", "say", "message", STATION_CHANGE_EVENT_KIND}
+)
+VALID_FAULT_CHECK_IDS: frozenset[str] = frozenset(
+    set(WRITER_PROSE_REQUIREMENTS_BY_ID.keys())
+    | {CTX_OVER_CAP_CHECK_ID, "length_stop", "max_num_ctx_exceeded"}
+)
+
+
+@dataclass(frozen=True)
+class ProseFaultRecord:
+    """Single fault entry in a rendering's fault vector (counts/ids/enums only, never free text)."""
+
+    check_id: str
+    event_index: int | None = None
+    event_kind: str | None = None
+    failure_kind: str = "altered"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.check_id, str) or self.check_id not in VALID_FAULT_CHECK_IDS:
+            raise ValueError(
+                f"ProseFaultRecord.check_id must be a registered check_id, got {self.check_id!r}."
+            )
+        if self.event_index is not None and (
+            not isinstance(self.event_index, int)
+            or isinstance(self.event_index, bool)
+            or self.event_index <= 0
+        ):
+            raise ValueError(
+                f"ProseFaultRecord.event_index must be a positive int or None, got {self.event_index!r}."
+            )
+        if self.event_kind is not None and (
+            not isinstance(self.event_kind, str)
+            or self.event_kind not in VALID_FAULT_EVENT_KINDS
+        ):
+            raise ValueError(
+                f"ProseFaultRecord.event_kind must be one of {sorted(VALID_FAULT_EVENT_KINDS)} or None, got {self.event_kind!r}."
+            )
+        if not isinstance(self.failure_kind, str) or self.failure_kind not in VALID_FAILURE_KINDS:
+            raise ValueError(
+                f"ProseFaultRecord.failure_kind must be one of {sorted(VALID_FAILURE_KINDS)}, got {self.failure_kind!r}."
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "check_id": self.check_id,
+            "event_index": self.event_index,
+            "event_kind": self.event_kind,
+            "failure_kind": self.failure_kind,
+        }
+
+
+def summarize_fault_vector_counts(
+    fault_id_sequences: Iterable[Sequence[str]],
+) -> dict[str, int]:
+    """Build a deterministic per-check fault count table over all renderings (counts and check_ids only)."""
+    counts: dict[str, int] = {
+        req.check_id: 0 for req in WRITER_PROSE_REQUIREMENTS
+    }
+    for seq in fault_id_sequences:
+        for cid in seq:
+            if not isinstance(cid, str) or cid not in VALID_FAULT_CHECK_IDS:
+                raise ValueError(
+                    f"summarize_fault_vector_counts only accepts registered check_ids, got {cid!r}."
+                )
+        for cid in dict.fromkeys(seq):
+            counts[cid] = counts.get(cid, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+_ACTIVE_FAULT_COLLECTOR: contextvars.ContextVar[list[ProseFaultRecord] | None] = contextvars.ContextVar(
+    "_ACTIVE_FAULT_COLLECTOR", default=None
+)
+
+
 def _raise_prose_check_error(
     check_id: str,
     message: str,
@@ -1181,10 +1316,21 @@ def _raise_prose_check_error(
     event_kind: str | None = None,
     failure_kind: str = "altered",
     event_variant: str | None = None,
-) -> NoReturn:
-    """Raise `RenderCheckError` after verifying `check_id` is registered in `WRITER_PROSE_REQUIREMENTS`."""
+) -> None:
+    """Raise `RenderCheckError` after verifying `check_id` is registered in `WRITER_PROSE_REQUIREMENTS`, or record a `ProseFaultRecord` in collect-all mode."""
     if check_id not in WRITER_PROSE_REQUIREMENTS_BY_ID:
         raise RuntimeError(f"Unregistered prose check_id {check_id!r} not in WRITER_PROSE_REQUIREMENTS.")
+    collector = _ACTIVE_FAULT_COLLECTOR.get()
+    if collector is not None:
+        fault = ProseFaultRecord(
+            check_id=check_id,
+            event_index=event_index,
+            event_kind=event_kind,
+            failure_kind=failure_kind,
+        )
+        if fault not in collector:
+            collector.append(fault)
+        return
     raise RenderCheckError(
         message,
         check_id=check_id,
@@ -1230,6 +1376,7 @@ _REPAIR_HINT_BY_EVENT_KIND: dict[str, str] = {
     "enter": "names the room the actor came from and the room entered, with the actor as subject",
     "leave": "names the room the actor left and the destination room, with the actor as subject",
     "move": "names the actor as subject, the target object, the source location, the destination location, and the room",
+    STATION_CHANGE_EVENT_KIND: "names the actor as subject changing station past the stationary occluder in the room",
     "see": "names the actor as subject before a sighting verb, the target object, the room, and any required container or occlusion clause",
     "say": "names the actor as subject before a speech verb, the noise level in dB, and the verbatim quote",
     "message": "names the actor as subject before a message verb, the recipient, and the verbatim quote",
@@ -1413,11 +1560,76 @@ def load_writer_prompt_template(path: Path | None = None) -> str:
     return text
 
 
+def project_event_for_writer(
+    ev: Event,
+    *,
+    order_index: int | None = None,
+    world: World | None = None,
+) -> dict[str, object]:
+    """Project a single stored `Event` into its writer-facing event dictionary.
+
+    A station-change event (`is_station_transition_event(ev, world)`) becomes its own event kind
+    (`STATION_CHANGE_EVENT_KIND`, `'station_change'`) with `actor`, `room`, `origin_station`,
+    `destination_station`, and `occluder` (the room's stationary obstacle passed),
+    with no `target_object`/`move` shape. Every other event passes through unchanged.
+    """
+    idx = order_index if order_index is not None else ev.step
+    if is_station_transition_event(ev, world):
+        return {
+            "order_index": idx,
+            "kind": STATION_CHANGE_EVENT_KIND,
+            "actor": ev.actor,
+            "room": ev.room,
+            "origin_station": ev.from_location,
+            "destination_station": ev.to_location,
+            "occluder": ev.target_object,
+        }
+    ev_entry: dict[str, object] = {
+        "order_index": idx,
+        "kind": ev.kind,
+        "actor": ev.actor,
+        "room": ev.room,
+    }
+    if ev.target_object is not None:
+        ev_entry["target_object"] = ev.target_object
+    if ev.from_location is not None:
+        ev_entry["from_location"] = ev.from_location
+    if ev.to_location is not None:
+        ev_entry["to_location"] = ev.to_location
+    if ev.utterance is not None:
+        ev_entry["utterance"] = ev.utterance
+    if ev.recipient is not None:
+        ev_entry["recipient"] = ev.recipient
+    if ev.occluded:
+        ev_entry["occluded"] = True
+    if ev.occluder is not None:
+        ev_entry["occluder"] = ev.occluder
+    if ev.noise_level:
+        ev_entry["noise_level"] = ev.noise_level
+    if ev.is_bluff:
+        ev_entry["is_bluff"] = True
+    if ev.stated_reason is not None:
+        ev_entry["stated_reason"] = ev.stated_reason
+    return ev_entry
+
+
+def project_events_for_writer(
+    events: Sequence[Event],
+    world: World | None = None,
+) -> list[dict[str, object]]:
+    """Project a sequence of stored `Event` records into the writer-facing JSON event log list."""
+    return [
+        project_event_for_writer(ev, order_index=idx, world=world)
+        for idx, ev in enumerate(events, start=1)
+    ]
+
+
 def format_writer_prompt(world: World, focal_agent: str, template: str | None = None) -> str:
     """Format the `qwen3.6:35b` writer prompt for `world` and `focal_agent`.
 
-    Strips internal `fact_id` and `causal_preconditions` fields so no `F0`..`F9` markers leak
-    into the prompt, and verifies that `BELIEF_PERSISTENCE_RULE` appears byte-identically once.
+    Projects station-change events via `project_events_for_writer`, strips internal `fact_id` and
+    `causal_preconditions` fields so no `F0`..`F9` markers leak into the prompt, and verifies that
+    `BELIEF_PERSISTENCE_RULE` appears byte-identically once.
     """
     raw_template = template if template is not None else load_writer_prompt_template()
     world_setup = {
@@ -1443,35 +1655,7 @@ def format_writer_prompt(world: World, focal_agent: str, template: str | None = 
             for ag, g in world.goals.items()
         },
     }
-    event_log: list[dict[str, object]] = []
-    for idx, ev in enumerate(world.events, start=1):
-        ev_entry: dict[str, object] = {
-            "order_index": idx,
-            "kind": ev.kind,
-            "actor": ev.actor,
-            "room": ev.room,
-        }
-        if ev.target_object is not None:
-            ev_entry["target_object"] = ev.target_object
-        if ev.from_location is not None:
-            ev_entry["from_location"] = ev.from_location
-        if ev.to_location is not None:
-            ev_entry["to_location"] = ev.to_location
-        if ev.utterance is not None:
-            ev_entry["utterance"] = ev.utterance
-        if ev.recipient is not None:
-            ev_entry["recipient"] = ev.recipient
-        if ev.occluded:
-            ev_entry["occluded"] = True
-        if ev.occluder is not None:
-            ev_entry["occluder"] = ev.occluder
-        if ev.noise_level:
-            ev_entry["noise_level"] = ev.noise_level
-        if ev.is_bluff:
-            ev_entry["is_bluff"] = True
-        if ev.stated_reason is not None:
-            ev_entry["stated_reason"] = ev.stated_reason
-        event_log.append(ev_entry)
+    event_log = project_events_for_writer(world.events, world=world)
 
     expanded_template = (
         raw_template.replace(HARD_CONSTRAINTS_PLACEHOLDER, render_writer_prompt_constraints())
@@ -1730,7 +1914,10 @@ def _post_verb_core_args_end(frame_low: str, verb_end: int, ev: Event) -> int:
 
 def _adjunct_negates_event_verb_object_or_location(clause_low: str, ev: Event) -> bool:
     """Return True if a post-argument `without <gerund>` or relative clause negates `ev`'s own verb, location state, or actor action."""
-    kind_gerunds = _GERUNDS_BY_KIND.get(ev.kind, frozenset())
+    is_station_move = is_station_transition_event(ev)
+    kind_gerunds = set(_GERUNDS_BY_KIND.get(ev.kind, frozenset()))
+    if is_station_move:
+        kind_gerunds |= set(_GERUNDS_BY_KIND.get(STATION_CHANGE_EVENT_KIND, frozenset()))
     m_gerund = _POST_ARG_GERUND_CLAUSE_RE.match(clause_low.strip())
     if m_gerund is not None:
         gerund_word = m_gerund.group(1).lower()
@@ -1750,6 +1937,11 @@ def _adjunct_negates_event_verb_object_or_location(clause_low: str, ev: Event) -
         if re.search(rf"\b{re.escape(g_word)}\b", clause_low):
             return True
     kind_verbs = set(_ACTION_VERBS_BY_KIND.get(ev.kind, ())) | set(_BASE_VERBS_BY_KIND.get(ev.kind, frozenset()))
+    if is_station_move:
+        kind_verbs |= (
+            set(_ACTION_VERBS_BY_KIND.get(STATION_CHANGE_EVENT_KIND, ()))
+            | set(_BASE_VERBS_BY_KIND.get(STATION_CHANGE_EVENT_KIND, frozenset()))
+        )
     if ev.kind in ("enter", "leave"):
         kind_verbs |= (
             set(_ACTION_VERBS_BY_KIND["enter"])
@@ -1989,6 +2181,9 @@ def _sentence_states_non_arrival_action(
             rf"\b(?:{direction_alt})\s+{_ARTICLE_OPT_RE}(?:{occluder_alt})\b.*\b(?:{station_alt})\b", s_low
         ):
             move_verb_applied_to_thing = True
+    move_and_station_verbs = tuple(
+        dict.fromkeys(_ACTION_VERBS_BY_KIND["move"] + STATION_CHANGE_PERSON_VERBS)
+    )
     for party in all_parties:
         if _actor_precedes_verb_as_subject(s_low, party, SIGHTING_VERBS, all_parties):
             return True
@@ -1997,24 +2192,35 @@ def _sentence_states_non_arrival_action(
         if _actor_precedes_verb_as_subject(s_low, party, _ACTION_VERBS_BY_KIND["message"], all_parties):
             return True
         if move_verb_applied_to_thing and _actor_precedes_verb_as_subject(
-            s_low, party, _ACTION_VERBS_BY_KIND["move"], all_parties
+            s_low, party, move_and_station_verbs, all_parties
         ):
             return True
     return False
 
 
 def _occluder_is_direct_object_of_move_verb(s_low: str, occluder: str) -> bool:
-    """Card ue: True if `s_low` applies a move verb to the occluder itself (`moved [quickly] the <occluder>`), the
-    literal furniture reading of a station change, which is never what the event means."""
-    move_verb_alt = "|".join(re.escape(v) for v in _ACTION_VERBS_BY_KIND["move"])
+    """Card ue + station-projection: True if `s_low` applies any manipulation verb in
+    `OCCLUDER_MANIPULATION_VERBS` to the occluder itself (`moved/pushed/rolled/... [quickly] the <occluder>`),
+    even if the sentence also names the right stations."""
+    manip_verb_alt = "|".join(re.escape(v) for v in OCCLUDER_MANIPULATION_VERBS)
     occ_esc = re.escape(occluder.lower())
-    return (
+    if (
         re.search(
-            rf"\b(?:{move_verb_alt})\s+(?:[a-z]+ly\s+)?(?:(?:the|a|an|his|her|their|its)\s+)?{occ_esc}\b",
+            rf"\b(?:{manip_verb_alt})\s+(?:[a-z]+ly\s+)?(?:(?:aside|away|back|over)\s+)?(?:(?:the|a|an|his|her|their|its|this|that)\s+)?{occ_esc}\b",
             s_low,
         )
         is not None
-    )
+    ):
+        return True
+    if (
+        re.search(
+            rf"\b{occ_esc}\s+(?:was|were|had\s+been|is|being)\s+(?:[a-z]+ly\s+)?(?:{manip_verb_alt})\b",
+            s_low,
+        )
+        is not None
+    ):
+        return True
+    return False
 
 
 def _sentence_matches_station_move(s_low: str, ev: Event) -> bool:
@@ -2208,9 +2414,12 @@ def _sentence_matches_event(
         )
     ):
         is_folded_movement = False
+    is_station_move = is_station_transition_event(ev, world)
     action_verbs: Sequence[str] = (
         _FOLDED_LEAVE_ENTER_VERBS
         if is_folded_movement
+        else STATION_CHANGE_PERSON_VERBS
+        if is_station_move
         else _ACTION_VERBS_BY_KIND.get(ev.kind, ())
     )
     if _has_forbidden_event_negation(frame_low, ev, all_parties, action_verbs=action_verbs):
@@ -2871,6 +3080,7 @@ def check_prose_render_fidelity(
             failing_sentence=cand,
             failure_kind="altered",
         )
+        return
     event_sentences: list[str] = []
     for ev_para in paragraphs[1:]:
         event_sentences.extend(_split_prose_sentences(ev_para))
@@ -3017,6 +3227,8 @@ def check_prose_render_fidelity(
                     failure_kind="altered",
                     event_variant=_event_variant(ev),
                 )
+                matched_sentence_indices.append(earlier_idx)
+                continue
             cand_sent = (
                 event_sentences[search_start]
                 if search_start < len(event_sentences)
@@ -3046,6 +3258,10 @@ def check_prose_render_fidelity(
                 failure_kind=missing_ev_kind,
                 event_variant=_event_variant(ev),
             )
+            if missing_ev_kind == "altered" and search_start < len(event_sentences):
+                matched_sentence_indices.append(search_start)
+                search_start += 1
+            continue
         matched_sentence_indices.append(found_idx)
         search_start = found_idx + 1
 
@@ -3063,20 +3279,39 @@ def check_prose_render_fidelity(
         )
 
 
+def collect_prose_faults(
+    prose: str,
+    world: World | None = None,
+    focal_agent: str | None = None,
+) -> tuple[ProseFaultRecord, ...]:
+    """Run all prose checks (a)-(d) in collect-all mode and return every `ProseFaultRecord` (with no text)."""
+    collector: list[ProseFaultRecord] = []
+    token = _ACTIVE_FAULT_COLLECTOR.set(collector)
+    try:
+        check_prose_banned_adverbs(prose)
+        check_prose_no_markers(prose)
+        if world is not None:
+            check_prose_rule_and_hearing_threshold(prose, world)
+            check_prose_render_fidelity(prose, world, focal_agent=focal_agent)
+    finally:
+        _ACTIVE_FAULT_COLLECTOR.reset(token)
+    return tuple(collector)
+
+
 def check_rendered_prose(
     prose: str,
     world: World | None = None,
     focal_agent: str | None = None,
-) -> tuple[str, ...]:
-    """Run all prose checks (a)-(d) on `prose`, raising `RenderCheckError` on any violation.
+    *,
+    collect_all: bool = False,
+) -> tuple[Any, ...]:
+    """Run all prose checks (a)-(d) on `prose`.
 
-    Checks:
-    - (a) No markers survive: no `[...]` bracket markers, no fact IDs (`F0`–`F9`), no `"step N"`.
-    - (b) Banned mental/emotional adverbs (`BANNED_ADVERBS`).
-    - (c) Render fidelity against `world` (when `world` is provided): all events, actors, actions,
-          objects, places, rooms, and relative order, with nothing unlogged asserted.
-    - (d) Belief-persistence rule sentence and doorway hearing threshold in setup prose (when `world` is provided).
+    When `collect_all=False` (default), raises `RenderCheckError` on the first violation and returns `()` on pass.
+    When `collect_all=True`, runs in collect-all mode without raising and returns `tuple[ProseFaultRecord, ...]`.
     """
+    if collect_all:
+        return collect_prose_faults(prose, world, focal_agent=focal_agent)
     check_prose_banned_adverbs(prose)
     check_prose_no_markers(prose)
     if world is not None:
@@ -3214,6 +3449,51 @@ def render_world_template(world: World, focal_agent: str) -> str:
     return prose
 
 
+def _reconstruct_event_from_prompt_entry(ev: Event, item: Mapping[str, Any]) -> Event:
+    """Reconstruct a stored `Event` from a writer-prompt JSON event-log item (inverting `project_event_for_writer`)."""
+    raw_kind = str(item["kind"])
+    if raw_kind == STATION_CHANGE_EVENT_KIND:
+        target_obj = (
+            item.get("occluder")
+            or item.get("passing_behind")
+            or item.get("stationary_obstacle_passed")
+        )
+        from_loc = item.get("origin_station") or item.get("from_station") or item.get("from_location")
+        to_loc = item.get("destination_station") or item.get("to_station") or item.get("to_location")
+        return replace(
+            ev,
+            kind="move",
+            actor=str(item["actor"]),
+            room=str(item["room"]),
+            target_object=target_obj,
+            from_location=from_loc,
+            to_location=to_loc,
+            utterance=None,
+            recipient=None,
+            occluded=False,
+            occluder=None,
+            noise_level=int(item.get("noise_level", ev.noise_level)),
+            is_bluff=False,
+            stated_reason=None,
+        )
+    return replace(
+        ev,
+        kind=raw_kind,
+        actor=str(item["actor"]),
+        room=str(item["room"]),
+        target_object=item.get("target_object"),
+        from_location=item.get("from_location"),
+        to_location=item.get("to_location"),
+        utterance=item.get("utterance"),
+        recipient=item.get("recipient"),
+        occluded=bool(item.get("occluded", False)),
+        occluder=item.get("occluder"),
+        noise_level=int(item.get("noise_level", ev.noise_level)),
+        is_bluff=bool(item.get("is_bluff", False)),
+        stated_reason=item.get("stated_reason"),
+    )
+
+
 def _reconstruct_world_from_writer_prompt(world: World, prompt_str: str) -> World:
     """Reconstruct `World` from the JSON event log embedded in `prompt_str` to verify perspective-flip invariance."""
     marker = "Complete Event Log:\n"
@@ -3240,32 +3520,22 @@ def _reconstruct_world_from_writer_prompt(world: World, prompt_str: str) -> Worl
             check_id="prompt_event_log_incomplete",
         )
     reconstructed_events = tuple(
-        replace(
-            ev,
-            kind=str(by_order[idx]["kind"]),
-            actor=str(by_order[idx]["actor"]),
-            room=str(by_order[idx]["room"]),
-            target_object=by_order[idx].get("target_object"),
-            from_location=by_order[idx].get("from_location"),
-            to_location=by_order[idx].get("to_location"),
-            utterance=by_order[idx].get("utterance"),
-            recipient=by_order[idx].get("recipient"),
-            occluded=bool(by_order[idx].get("occluded", False)),
-            occluder=by_order[idx].get("occluder"),
-            noise_level=int(by_order[idx].get("noise_level", 0)),
-            is_bluff=bool(by_order[idx].get("is_bluff", False)),
-            stated_reason=by_order[idx].get("stated_reason"),
-        )
+        _reconstruct_event_from_prompt_entry(ev, by_order[idx])
         for idx, ev in enumerate(world.events, start=1)
+    )
+    reconstructed_unknowable = (
+        world.unknowable_spec
+        if reconstructed_events == world.events
+        else replace(
+            world.unknowable_spec,
+            trace_a=reconstructed_events,
+            trace_b=reconstructed_events,
+        )
     )
     return replace(
         world,
         events=reconstructed_events,
-        unknowable_spec=replace(
-            world.unknowable_spec,
-            trace_a=reconstructed_events,
-            trace_b=reconstructed_events,
-        ),
+        unknowable_spec=reconstructed_unknowable,
     )
 
 
@@ -4208,6 +4478,15 @@ class GenerationCallRecord:
     # Card ul: the exact prompt-token count that decided `num_ctx` (None when no tokenizer was configured, and
     # on retries, which are sized from the measured attempt-0 counts).
     prompt_tokens_exact: int | None = None
+    # Card sp: ordered vector of all prose check_ids that fired on this call (no text).
+    fault_check_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for cid in self.fault_check_ids:
+            if not isinstance(cid, str) or cid not in VALID_FAULT_CHECK_IDS:
+                raise ValueError(
+                    f"GenerationCallRecord.fault_check_ids must contain only known check_ids, got {cid!r}."
+                )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -4269,6 +4548,7 @@ class GenerationCallRecord:
             "failing_sentence_offset": self.failing_sentence_offset,
             "failing_sentence_length": self.failing_sentence_length,
             "refusal_reasons": list(self.refusal_reasons),
+            "fault_check_ids": list(self.fault_check_ids),
         }
 
 
@@ -4535,13 +4815,11 @@ class WriterCheckpointManager:
                 "rendering_index": r0.rendering_index,
                 "focal_agent": r0.focal_agent,
                 "prose": r0.prose,
-                "writer_prompt": r0.writer_prompt,
             }
             rendering_1_dict: dict[str, Any] | None = {
                 "rendering_index": r1.rendering_index,
                 "focal_agent": r1.focal_agent,
                 "prose": r1.prose,
-                "writer_prompt": r1.writer_prompt,
             }
             kept = True
         else:
@@ -4707,8 +4985,16 @@ class WriterCheckpointManager:
                 prose_1 = str(r1_dict["prose"])
                 focal_0 = str(r0_dict["focal_agent"])
                 focal_1 = str(r1_dict["focal_agent"])
-                prompt_0 = str(r0_dict["writer_prompt"])
-                prompt_1 = str(r1_dict["writer_prompt"])
+                prompt_0 = (
+                    str(r0_dict["writer_prompt"])
+                    if "writer_prompt" in r0_dict
+                    else format_writer_prompt(world, focal_0)
+                )
+                prompt_1 = (
+                    str(r1_dict["writer_prompt"])
+                    if "writer_prompt" in r1_dict
+                    else format_writer_prompt(world, focal_1)
+                )
 
                 try:
                     check_rendered_prose(prose_0, world, focal_agent=focal_0)
@@ -4822,6 +5108,9 @@ class WriterCheckpointManager:
                             int(c_dict["retry_attempt0_sentences"])
                             if c_dict.get("retry_attempt0_sentences") is not None
                             else None
+                        ),
+                        fault_check_ids=tuple(
+                            str(x) for x in (c_dict.get("fault_check_ids") or ())
                         ),
                     )
                 )
@@ -5207,6 +5496,7 @@ class OllamaWriter:
                 check_id=CTX_OVER_CAP_CHECK_ID,
                 attempt=0,
                 seed=base_seed,
+                fault_check_ids=(CTX_OVER_CAP_CHECK_ID,),
             )
             self._append_generation_record(rec)
             self._refusals.append(
@@ -5440,6 +5730,7 @@ class OllamaWriter:
                     retry_fallback_reason=retry_fallback_reason,
                     retry_unchanged_sentences=retry_unchanged,
                     retry_attempt0_sentences=retry_attempt0_total,
+                    fault_check_ids=("length_stop",),
                 )
                 self._pending_sealed_failing_sentence = None
                 self._pending_sealed_refusal_reasons = (f"length_stop: {reason_msg}",)
@@ -5463,6 +5754,10 @@ class OllamaWriter:
                 check_rendered_prose(content, world, focal_agent=focal_agent)
             except RenderCheckError as exc:
                 last_exc = exc
+                faults = collect_prose_faults(content, world, focal_agent=focal_agent)
+                fault_ids = tuple(dict.fromkeys(f.check_id for f in faults)) or (
+                    (exc.check_id,) if exc.check_id in VALID_FAULT_CHECK_IDS else ()
+                )
                 fail_sha, fail_off, fail_len = locate_failing_sentence_in_response(
                     content, exc.failing_sentence
                 )
@@ -5521,6 +5816,7 @@ class OllamaWriter:
                     retry_fallback_reason=retry_fallback_reason,
                     retry_unchanged_sentences=retry_unchanged,
                     retry_attempt0_sentences=retry_attempt0_total,
+                    fault_check_ids=fault_ids,
                 )
                 self._pending_sealed_failing_sentence = exc.failing_sentence
                 self._pending_sealed_refusal_reasons = (full_sealed_reason,)
