@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """VM-side runner for the understanding-dataset-lab Colab scenario writer window.
 
-Installs pinned Ollama 0.40.13, pulls and verifies qwen3.6:35b manifest and
+Installs pinned Ollama 0.40.13 and pinned uv 0.13.4 (checking archive SHA-256),
+installs Python 3.15 and syncs the repo from uv.lock, records GPU info from
+nvidia-smi (or CPU in stub mode), pulls and verifies qwen3.6:35b manifest and
 layer blob digests, builds llama-tokenize at pinned llama.cpp commit, proves
-the exact-count gate on the 4 recorded fixture prompts (and deletes the prompt
-files before any writer call), runs udlab-gen under a hard wall timeout,
-verifies log hygiene, and packs only allow-listed sealed/count artifacts.
+the exact-count gate on the 4 recorded fixture prompts inside the uv Python
+environment (and deletes the prompt files before any writer call), verifies
+100% GPU model offload via a short-lived Ollama warm-up server in GPU mode,
+runs udlab-gen under a hard wall timeout, verifies log hygiene, and packs only
+allow-listed sealed/count artifacts.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable, Iterable
@@ -33,6 +38,16 @@ OLLAMA_ARCHIVE_SHA256 = (
     "c9490e0f520be21271d969e6703f012268b1d39f8b70dd58854e5bfef7a75bb6"
 )
 
+UV_VERSION = "0.13.4"
+UV_RELEASE_URL = (
+    "https://github.com/astral-sh/uv/releases/download/"
+    f"{UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz"
+)
+UV_ARCHIVE_SHA256 = (
+    "2b428396f12572d4429cf210ca234dd599a33b3af0958a4d5ed569d63e3f344f"
+)
+REQUIRED_PYTHON_VERSION = "3.15"
+
 WRITER_MODEL = "qwen3.6:35b"
 EXPECTED_MANIFEST_DIGEST = (
     "a7eb95c53bcf96b4bdd008d0fab4a5dac88047d9c1a7a9ab88ed453423fbd87c"
@@ -45,6 +60,14 @@ EXPECTED_MODEL_LAYER_BLOB = f"sha256-{EXPECTED_MODEL_LAYER_DIGEST}"
 LLAMA_CPP_REPO = "https://github.com/ggml-org/llama.cpp.git"
 LLAMA_CPP_COMMIT = "50569eb87df530daff11afda229ceb9ab8e6cae8"
 
+WARMUP_OLLAMA_HOST = "127.0.0.1:11435"
+NVIDIA_SMI_QUERY_CMD: tuple[str, ...] = (
+    "nvidia-smi",
+    "--query-gpu=name,memory.total,driver_version",
+    "--format=csv,noheader",
+)
+
+# A change to tests/fixtures/exact_ctx/index.json must update this tuple in the same PR.
 EXPECTED_EXACT_COUNTS: tuple[int, ...] = (3124, 3423, 3393, 3394)
 MAX_LOG_LINE_CHARS = 2000
 
@@ -267,6 +290,245 @@ def verify_ollama_archive_and_version(
     return actual_sha256, cleaned_version
 
 
+def verify_uv_archive_and_version(
+    archive_path: Path,
+    version_output: str,
+    expected_sha256: str = UV_ARCHIVE_SHA256,
+    expected_version: str = UV_VERSION,
+) -> tuple[str, str]:
+    """Verify the downloaded uv archive SHA-256 and reported version string."""
+    if not archive_path.is_file():
+        raise RefusalError(
+            "UV_ARCHIVE_SHA256_MISMATCH",
+            f"uv archive missing at {archive_path}",
+        )
+    actual_sha256 = sha256_file(archive_path)
+    if actual_sha256.lower() != expected_sha256.lower():
+        raise RefusalError(
+            "UV_ARCHIVE_SHA256_MISMATCH",
+            f"expected {expected_sha256}, got {actual_sha256}",
+        )
+    cleaned_version = version_output.strip()
+    if expected_version not in cleaned_version:
+        raise RefusalError(
+            "UV_VERSION_MISMATCH",
+            f"expected version {expected_version} in {cleaned_version!r}",
+        )
+    return actual_sha256, cleaned_version
+
+
+def probe_vm_gpu(
+    mode: str,
+    allow_missing_in_dryrun: bool = False,
+) -> dict[str, object]:
+    """Query GPU name, memory.total, and driver_version via nvidia-smi, or record CPU in stub mode."""
+    if mode == "stub":
+        return {
+            "hardware": "CPU",
+            "gpu_present": False,
+            "gpu_name": "CPU",
+            "gpu_memory_total": None,
+            "gpu_driver_version": None,
+            "nvidia_smi": None,
+        }
+
+    if allow_missing_in_dryrun:
+        resolved = shutil.which("nvidia-smi")
+        norm_resolved = (resolved or "").replace("\\", "/")
+        if (
+            not resolved
+            or norm_resolved.startswith(("/usr/", "/bin/", "/sbin/", "/lib/"))
+            or "windows/system32" in norm_resolved.lower()
+        ):
+            return {
+                "hardware": "A100",
+                "gpu_present": True,
+                "gpu_name": "A100",
+                "gpu_memory_total": None,
+                "gpu_driver_version": None,
+                "nvidia_smi": None,
+            }
+
+    try:
+        proc = subprocess.run(
+            list(NVIDIA_SMI_QUERY_CMD),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        if allow_missing_in_dryrun:
+            return {
+                "hardware": "A100",
+                "gpu_present": True,
+                "gpu_name": "A100",
+                "gpu_memory_total": None,
+                "gpu_driver_version": None,
+                "nvidia_smi": None,
+            }
+        raise RefusalError(
+            "GPU_NOT_FOUND",
+            f"nvidia-smi failed to execute in GPU mode: {exc}",
+        ) from exc
+
+    lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    if proc.returncode != 0 or not lines:
+        if allow_missing_in_dryrun:
+            return {
+                "hardware": "A100",
+                "gpu_present": True,
+                "gpu_name": "A100",
+                "gpu_memory_total": None,
+                "gpu_driver_version": None,
+                "nvidia_smi": None,
+            }
+        raise RefusalError(
+            "GPU_NOT_FOUND",
+            f"nvidia-smi exited with code {proc.returncode} and output {proc.stdout!r}",
+        )
+
+    first_line = lines[0]
+    parts = [p.strip() for p in first_line.split(",")]
+    gpu_name = parts[0] if parts else first_line
+    gpu_memory_total = parts[1] if len(parts) > 1 else None
+    gpu_driver_version = parts[2] if len(parts) > 2 else None
+    return {
+        "hardware": first_line,
+        "gpu_present": True,
+        "gpu_name": gpu_name,
+        "gpu_memory_total": gpu_memory_total,
+        "gpu_driver_version": gpu_driver_version,
+        "nvidia_smi": first_line,
+    }
+
+
+def verify_model_full_gpu_offload(
+    ps_payload: dict[str, object] | str | bytes,
+    model: str = WRITER_MODEL,
+) -> dict[str, object]:
+    """Verify Ollama /api/ps reports the loaded writer model 100% in VRAM (size_vram == size)."""
+    if isinstance(ps_payload, (str, bytes)):
+        try:
+            data = json.loads(ps_payload)
+        except Exception as exc:
+            raise RefusalError(
+                "MODEL_PARTIAL_OFFLOAD",
+                f"Invalid JSON from Ollama /api/ps: {exc}",
+            ) from exc
+    elif isinstance(ps_payload, dict):
+        data = ps_payload
+    else:
+        raise RefusalError(
+            "MODEL_PARTIAL_OFFLOAD",
+            f"Unexpected /api/ps payload type: {type(ps_payload).__name__}",
+        )
+
+    models = data.get("models")
+    if not isinstance(models, list) or not models:
+        raise RefusalError(
+            "MODEL_PARTIAL_OFFLOAD",
+            f"No loaded models reported by Ollama /api/ps when checking {model}",
+        )
+
+    matched = None
+    for entry in models:
+        if isinstance(entry, dict) and (
+            entry.get("model") == model or entry.get("name") == model
+        ):
+            matched = entry
+            break
+    if matched is None and isinstance(models[0], dict):
+        matched = models[0]
+    if not isinstance(matched, dict):
+        raise RefusalError(
+            "MODEL_PARTIAL_OFFLOAD",
+            f"Malformed model entry in Ollama /api/ps for {model}",
+        )
+
+    try:
+        size = int(matched.get("size", 0))
+        size_vram = int(matched.get("size_vram", 0))
+    except (TypeError, ValueError) as exc:
+        raise RefusalError(
+            "MODEL_PARTIAL_OFFLOAD",
+            f"Non-integer size/size_vram in Ollama /api/ps: {matched!r}",
+        ) from exc
+
+    if size <= 0:
+        raise RefusalError(
+            "MODEL_PARTIAL_OFFLOAD",
+            f"Model {model} reported non-positive size={size} in /api/ps",
+        )
+    if size_vram != size:
+        raise RefusalError(
+            "MODEL_PARTIAL_OFFLOAD",
+            f"Model {model} not 100% on GPU: size_vram={size_vram} != size={size}",
+        )
+
+    return {
+        "checked": True,
+        "model": str(matched.get("model") or matched.get("name") or model),
+        "size": size,
+        "size_vram": size_vram,
+        "gpu_offload_percent": 100.0,
+    }
+
+
+def check_ollama_server_full_gpu_offload(
+    base_url: str = f"http://{WARMUP_OLLAMA_HOST}",
+    model: str = WRITER_MODEL,
+    timeout_s: float = 120.0,
+) -> dict[str, object]:
+    """Warm-load model on an Ollama server, check /api/ps for 100% GPU offload, and unload it."""
+    base = base_url.rstrip("/")
+    load_body = json.dumps(
+        {"model": model, "prompt": "", "stream": False}
+    ).encode("utf-8")
+    unload_body = json.dumps(
+        {"model": model, "prompt": "", "keep_alive": 0, "stream": False}
+    ).encode("utf-8")
+
+    try:
+        load_req = urllib.request.Request(
+            f"{base}/api/generate",
+            data=load_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(load_req, timeout=timeout_s) as resp:
+                resp.read()
+        except Exception as exc:
+            raise RefusalError(
+                "MODEL_PARTIAL_OFFLOAD",
+                f"Warm-up load request to {base}/api/generate failed: {exc}",
+            ) from exc
+
+        ps_req = urllib.request.Request(f"{base}/api/ps", method="GET")
+        try:
+            with urllib.request.urlopen(ps_req, timeout=timeout_s) as resp:
+                ps_raw = resp.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            raise RefusalError(
+                "MODEL_PARTIAL_OFFLOAD",
+                f"Failed to query {base}/api/ps: {exc}",
+            ) from exc
+
+        return verify_model_full_gpu_offload(ps_raw, model=model)
+    finally:
+        unload_req = urllib.request.Request(
+            f"{base}/api/generate",
+            data=unload_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(unload_req, timeout=30.0) as resp:
+                resp.read()
+        except Exception:
+            pass
+
+
 def verify_writer_model_digests(
     models_root: Path,
     model: str = WRITER_MODEL,
@@ -355,6 +617,8 @@ def run_exact_count_gate(
     llama_tokenize_bin: Path | None = None,
     gguf_path: Path | None = None,
     count_fn: Callable[[str], int] | None = None,
+    repo_dir: Path | None = None,
+    uv_bin: Path | str = "uv",
 ) -> list[dict[str, object]]:
     """Verify the 4 recorded prompts hash and tokenize to 3124, 3423, 3393, 3394, then delete them.
 
@@ -389,22 +653,51 @@ def run_exact_count_gate(
                     "EXACT_COUNT_TOKEN_MISMATCH",
                     "llama_tokenize_bin and gguf_path are required when count_fn is None",
                 )
-            from udlab_generator.render import (
-                DEFAULT_WRITER_MODEL_PIN,
-                LlamaTokenizeCounter,
-                count_prompt_tokens_exact,
+            effective_repo_dir = repo_dir or Path(__file__).resolve().parents[2]
+            ensure_not_drive_path(effective_repo_dir)
+            uv_exe = str(uv_bin)
+            tok_bin_str = str(Path(llama_tokenize_bin))
+            gguf_str = str(Path(gguf_path))
+            inline_code = (
+                "import sys; from pathlib import Path; "
+                "from udlab_generator.render import DEFAULT_WRITER_MODEL_PIN, LlamaTokenizeCounter, count_prompt_tokens_exact; "
+                "counter = LlamaTokenizeCounter(Path(sys.argv[1]), Path(sys.argv[2])); "
+                "counter.verify_pinned_digest(DEFAULT_WRITER_MODEL_PIN.model_layer_digest); "
+                "raw = sys.stdin.buffer.read().decode('utf-8'); "
+                "print(count_prompt_tokens_exact([{'role': 'user', 'content': raw}], think=False, counter=counter))"
             )
 
-            counter = LlamaTokenizeCounter(Path(llama_tokenize_bin), Path(gguf_path))
-            counter.verify_pinned_digest(DEFAULT_WRITER_MODEL_PIN.model_layer_digest)
-
             def _default_count_fn(raw_prompt_text: str) -> int:
-                messages = [{"role": "user", "content": raw_prompt_text}]
-                return count_prompt_tokens_exact(
-                    messages,
-                    think=False,
-                    counter=counter,
+                proc = subprocess.run(
+                    [
+                        uv_exe,
+                        "run",
+                        "--frozen",
+                        "python",
+                        "-c",
+                        inline_code,
+                        tok_bin_str,
+                        gguf_str,
+                    ],
+                    cwd=str(effective_repo_dir),
+                    input=raw_prompt_text.encode("utf-8"),
+                    capture_output=True,
+                    check=False,
                 )
+                if proc.returncode != 0:
+                    err_msg = proc.stderr.decode("utf-8", errors="replace").strip()
+                    raise RefusalError(
+                        "EXACT_COUNT_TOKEN_MISMATCH",
+                        f"uv run exact-count helper failed (exit {proc.returncode}): {err_msg[:300]}",
+                    )
+                out_str = proc.stdout.decode("utf-8", errors="replace").strip()
+                try:
+                    return int(out_str.splitlines()[-1].strip())
+                except (IndexError, ValueError) as exc:
+                    raise RefusalError(
+                        "EXACT_COUNT_TOKEN_MISMATCH",
+                        f"Non-integer token count from uv run exact-count helper: {out_str!r}",
+                    ) from exc
 
             count_fn = _default_count_fn
 
@@ -541,6 +834,91 @@ def install_pinned_ollama(work_dir: Path, log_fh) -> tuple[str, str]:
     return actual_sha, cleaned_ver
 
 
+def install_pinned_uv_and_sync_repo(
+    work_dir: Path,
+    repo_dir: Path,
+    log_fh,
+    install_dir: Path = Path("/usr/local/bin"),
+    expected_sha256: str = UV_ARCHIVE_SHA256,
+    expected_version: str = UV_VERSION,
+    required_python: str = REQUIRED_PYTHON_VERSION,
+) -> tuple[str, str, str, Path]:
+    """Install pinned uv 0.13.4 archive (verifying SHA-256), install Python 3.15, and uv sync --frozen."""
+    ensure_not_drive_path(work_dir)
+    ensure_not_drive_path(repo_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    install_dir.mkdir(parents=True, exist_ok=True)
+
+    archive_path = work_dir / f"uv-x86_64-unknown-linux-gnu-v{expected_version}.tar.gz"
+    if not archive_path.is_file():
+        urllib.request.urlretrieve(UV_RELEASE_URL, archive_path)
+
+    actual_sha = sha256_file(archive_path)
+    if actual_sha.lower() != expected_sha256.lower():
+        raise RefusalError(
+            "UV_ARCHIVE_SHA256_MISMATCH",
+            f"expected {expected_sha256}, got {actual_sha}",
+        )
+
+    subprocess.run(
+        [
+            "tar",
+            "-xzf",
+            str(archive_path),
+            "--strip-components=1",
+            "-C",
+            str(install_dir),
+        ],
+        check=True,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+    )
+
+    uv_bin = install_dir / "uv"
+    proc_ver = subprocess.run(
+        [str(uv_bin), "--version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    uv_ver_out = (proc_ver.stdout or "") + (proc_ver.stderr or "")
+    _, cleaned_uv_ver = verify_uv_archive_and_version(
+        archive_path=archive_path,
+        version_output=uv_ver_out,
+        expected_sha256=expected_sha256,
+        expected_version=expected_version,
+    )
+
+    subprocess.run(
+        [str(uv_bin), "python", "install", required_python],
+        cwd=str(repo_dir),
+        check=True,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+    )
+    subprocess.run(
+        [str(uv_bin), "sync", "--frozen"],
+        cwd=str(repo_dir),
+        check=True,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+    )
+    proc_py = subprocess.run(
+        [str(uv_bin), "run", "--frozen", "python", "--version"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    cleaned_py_ver = ((proc_py.stdout or "") + (proc_py.stderr or "")).strip()
+    if required_python not in cleaned_py_ver:
+        raise RefusalError(
+            "PYTHON_VERSION_MISMATCH",
+            f"expected Python {required_python} in {cleaned_py_ver!r}",
+        )
+    return actual_sha, cleaned_uv_ver, cleaned_py_ver, uv_bin
+
+
 def pull_and_verify_writer_model(
     models_root: Path,
     ollama_log_path: Path,
@@ -584,6 +962,59 @@ def pull_and_verify_writer_model(
         expected_layer_blob=EXPECTED_MODEL_LAYER_BLOB,
         verify_blob_sha256=True,
     )
+
+
+def warmup_and_verify_full_gpu_offload(
+    models_root: Path,
+    ollama_log_path: Path,
+    vm_log_fh,
+    warmup_host: str = WARMUP_OLLAMA_HOST,
+) -> dict[str, object]:
+    """Start a short-lived ollama serve on another port, warm-load the model, verify 100% GPU offload, unload, and stop."""
+    ensure_not_drive_path(models_root)
+    env = os.environ.copy()
+    env["OLLAMA_MODELS"] = str(models_root)
+    env["OLLAMA_HOST"] = warmup_host
+    base_url = f"http://{warmup_host}"
+
+    with ollama_log_path.open("a", encoding="utf-8") as ol_fh:
+        srv = subprocess.Popen(
+            ["/usr/local/bin/ollama", "serve"],
+            env=env,
+            stdout=ol_fh,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            ready = False
+            for _ in range(30):
+                try:
+                    with urllib.request.urlopen(f"{base_url}/api/ps", timeout=2.0) as resp:
+                        if resp.status == 200:
+                            ready = True
+                            break
+                except Exception:
+                    time.sleep(0.5)
+            if not ready:
+                raise RefusalError(
+                    "MODEL_PARTIAL_OFFLOAD",
+                    f"Warm-up Ollama server on {warmup_host} did not become ready",
+                )
+            result = check_ollama_server_full_gpu_offload(
+                base_url=base_url,
+                model=WRITER_MODEL,
+            )
+            vm_log_fh.write(
+                f"gpu_offload_check ok model={result['model']} size={result['size']} size_vram={result['size_vram']}\n"
+            )
+            vm_log_fh.flush()
+            return result
+        finally:
+            srv.terminate()
+            try:
+                srv.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                srv.kill()
+                srv.wait(timeout=5)
 
 
 def build_llama_tokenize(build_root: Path, log_fh) -> Path:
@@ -661,11 +1092,19 @@ def build_llama_tokenize(build_root: Path, log_fh) -> Path:
     return bin_path
 
 
-def run_dryrun_pipeline(args: argparse.Namespace, logs_dir: Path, vm_log_path: Path) -> dict[str, object]:
+def run_dryrun_pipeline(
+    args: argparse.Namespace,
+    logs_dir: Path,
+    vm_log_path: Path,
+    gpu_info: dict[str, object] | None = None,
+) -> dict[str, object]:
     """Execute deterministic dry-run pipeline for rig fake-CLI testing (no GPU/network)."""
     inject_failure = os.environ.get("UDLAB_DRYRUN_INJECT_FAILURE", "").strip()
     if inject_failure:
         raise RefusalError(inject_failure, f"Injected dry-run failure: {inject_failure}")
+
+    if gpu_info is None:
+        gpu_info = probe_vm_gpu(args.mode, allow_missing_in_dryrun=True)
 
     index_path = args.index_path or (
         args.repo_dir / "tests" / "fixtures" / "exact_ctx" / "index.json"
@@ -684,6 +1123,30 @@ def run_dryrun_pipeline(args: argparse.Namespace, logs_dir: Path, vm_log_path: P
         prompts_dir=args.prompts_dir,
         count_fn=_dryrun_counter,
     )
+
+    if args.mode == "gpu":
+        fake_ps_json = os.environ.get("UDLAB_FAKE_API_PS_JSON", "").strip()
+        if fake_ps_json:
+            gpu_offload_check = verify_model_full_gpu_offload(
+                fake_ps_json,
+                model=WRITER_MODEL,
+            )
+        else:
+            gpu_offload_check = verify_model_full_gpu_offload(
+                {
+                    "models": [
+                        {
+                            "name": WRITER_MODEL,
+                            "model": WRITER_MODEL,
+                            "size": 23456789012,
+                            "size_vram": 23456789012,
+                        }
+                    ]
+                },
+                model=WRITER_MODEL,
+            )
+    else:
+        gpu_offload_check = {"checked": False, "reason": "stub_mode"}
 
     sealed_dir = args.run_dir / "sealed_store"
     sealed_dir.mkdir(parents=True, exist_ok=True)
@@ -753,6 +1216,10 @@ def run_dryrun_pipeline(args: argparse.Namespace, logs_dir: Path, vm_log_path: P
         "grant_id": args.grant_id,
         "vram_halt_mib": args.vram_halt_mib,
         "resume": bool(args.resume),
+        **gpu_info,
+        "uv_version": f"uv {UV_VERSION}",
+        "uv_archive_sha256": UV_ARCHIVE_SHA256,
+        "python_version": f"Python {REQUIRED_PYTHON_VERSION}.0",
         "ollama_version": f"ollama version is {OLLAMA_VERSION}",
         "ollama_archive_sha256": OLLAMA_ARCHIVE_SHA256,
         "writer_model": WRITER_MODEL,
@@ -760,6 +1227,7 @@ def run_dryrun_pipeline(args: argparse.Namespace, logs_dir: Path, vm_log_path: P
         "model_layer_blob": EXPECTED_MODEL_LAYER_BLOB,
         "llama_cpp_commit": LLAMA_CPP_COMMIT,
         "exact_count_gate": verified_gate,
+        "gpu_offload_check": gpu_offload_check,
         "dryrun": True,
     }
 
@@ -799,13 +1267,25 @@ def main(argv: list[str] | None = None) -> int:
     receipt_path = args.run_dir / "vm_receipt.json"
 
     dryrun = args.dryrun or os.environ.get("VM_DRYRUN") == "1"
+    gpu_info: dict[str, object] = {}
 
     try:
+        gpu_info = probe_vm_gpu(args.mode, allow_missing_in_dryrun=dryrun)
         if dryrun:
-            receipt = run_dryrun_pipeline(args, logs_dir, vm_log_path)
+            receipt = run_dryrun_pipeline(
+                args,
+                logs_dir,
+                vm_log_path,
+                gpu_info=gpu_info,
+            )
         else:
             with vm_log_path.open("a", encoding="utf-8", newline="\n") as vm_log_fh:
                 archive_sha, ollama_ver = install_pinned_ollama(args.work_dir, vm_log_fh)
+                uv_archive_sha, uv_ver, py_ver, uv_bin = install_pinned_uv_and_sync_repo(
+                    work_dir=args.work_dir,
+                    repo_dir=args.repo_dir,
+                    log_fh=vm_log_fh,
+                )
                 manifest_digest, layer_blob, blob_path = pull_and_verify_writer_model(
                     models_root=args.models_root,
                     ollama_log_path=ollama_log_path,
@@ -813,19 +1293,31 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 llama_tokenize_bin = build_llama_tokenize(args.work_dir, vm_log_fh)
 
-            index_path = args.index_path or (
-                args.repo_dir / "tests" / "fixtures" / "exact_ctx" / "index.json"
-            )
-            verified_gate = run_exact_count_gate(
-                index_path=index_path,
-                prompts_dir=args.prompts_dir,
-                llama_tokenize_bin=llama_tokenize_bin,
-                gguf_path=blob_path,
-            )
+                index_path = args.index_path or (
+                    args.repo_dir / "tests" / "fixtures" / "exact_ctx" / "index.json"
+                )
+                verified_gate = run_exact_count_gate(
+                    index_path=index_path,
+                    prompts_dir=args.prompts_dir,
+                    llama_tokenize_bin=llama_tokenize_bin,
+                    gguf_path=blob_path,
+                    repo_dir=args.repo_dir,
+                    uv_bin=uv_bin,
+                )
+
+                if args.mode == "gpu":
+                    gpu_offload_check = warmup_and_verify_full_gpu_offload(
+                        models_root=args.models_root,
+                        ollama_log_path=ollama_log_path,
+                        vm_log_fh=vm_log_fh,
+                    )
+                else:
+                    gpu_offload_check = {"checked": False, "reason": "stub_mode"}
 
             gen_cmd = [
-                "uv",
+                str(uv_bin),
                 "run",
+                "--frozen",
                 "udlab-gen",
                 "--count",
                 str(args.count),
@@ -886,6 +1378,10 @@ def main(argv: list[str] | None = None) -> int:
                 "grant_id": args.grant_id,
                 "vram_halt_mib": args.vram_halt_mib,
                 "resume": bool(args.resume),
+                **gpu_info,
+                "uv_version": uv_ver,
+                "uv_archive_sha256": uv_archive_sha,
+                "python_version": py_ver,
                 "ollama_version": ollama_ver,
                 "ollama_archive_sha256": archive_sha,
                 "writer_model": WRITER_MODEL,
@@ -893,6 +1389,7 @@ def main(argv: list[str] | None = None) -> int:
                 "model_layer_blob": layer_blob,
                 "llama_cpp_commit": LLAMA_CPP_COMMIT,
                 "exact_count_gate": verified_gate,
+                "gpu_offload_check": gpu_offload_check,
                 "dryrun": False,
             }
 
@@ -916,6 +1413,7 @@ def main(argv: list[str] | None = None) -> int:
             "writer": args.writer,
             "count": args.count,
             "seed": args.seed,
+            **gpu_info,
         }
         receipt_path.write_text(
             json.dumps(fail_receipt, indent=2) + "\n",

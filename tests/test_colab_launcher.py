@@ -668,3 +668,269 @@ def test_stub_vs_gpu_diff_only_card_wall_cap_writer_grant_vram() -> None:
     assert stub_vars == expected_vars
     assert gpu_vars == expected_vars
 
+
+def test_uv_archive_sha_mismatch_and_version_refusal(tmp_path: Path) -> None:
+    archive = tmp_path / f"uv-x86_64-unknown-linux-gnu-v{vm_udlab.UV_VERSION}.tar.gz"
+    archive.write_bytes(b"fake-uv-archive-bytes")
+    actual_sha = vm_udlab.sha256_file(archive)
+
+    with pytest.raises(vm_udlab.RefusalError) as exc_sha:
+        vm_udlab.verify_uv_archive_and_version(
+            archive_path=archive,
+            version_output=f"uv {vm_udlab.UV_VERSION} (7456b60bc 2026-10-20)",
+            expected_sha256="0" * 64,
+            expected_version=vm_udlab.UV_VERSION,
+        )
+    assert exc_sha.value.failure_class == "UV_ARCHIVE_SHA256_MISMATCH"
+
+    with pytest.raises(vm_udlab.RefusalError) as exc_ver:
+        vm_udlab.verify_uv_archive_and_version(
+            archive_path=archive,
+            version_output="uv 0.12.0",
+            expected_sha256=actual_sha,
+            expected_version=vm_udlab.UV_VERSION,
+        )
+    assert exc_ver.value.failure_class == "UV_VERSION_MISMATCH"
+
+    sha_ok, ver_ok = vm_udlab.verify_uv_archive_and_version(
+        archive_path=archive,
+        version_output=f"uv {vm_udlab.UV_VERSION}\n",
+        expected_sha256=actual_sha,
+        expected_version=vm_udlab.UV_VERSION,
+    )
+    assert sha_ok == actual_sha
+    assert vm_udlab.UV_VERSION in ver_ok
+
+    # Also verify install_pinned_uv_and_sync_repo refuses on SHA-256 mismatch before extraction
+    log_path = tmp_path / "uv_install.log"
+    with log_path.open("w", encoding="utf-8", newline="\n") as log_fh:
+        with pytest.raises(vm_udlab.RefusalError) as exc_install:
+            vm_udlab.install_pinned_uv_and_sync_repo(
+                work_dir=tmp_path,
+                repo_dir=tmp_path,
+                log_fh=log_fh,
+                install_dir=tmp_path / "bin",
+            )
+    assert exc_install.value.failure_class == "UV_ARCHIVE_SHA256_MISMATCH"
+
+
+def test_receipt_and_outcome_carry_gpu_name_with_fake_nvidia_smi(tmp_path: Path) -> None:
+    env_paths = _setup_fake_colab_env(tmp_path)
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+    out_dir = tmp_path / "run_gpu_receipt_ok"
+    lock_file = tmp_path / "colab-open-gpu-ok.lock"
+
+    fake_nvidia_smi = env_paths["fake_bin"] / "nvidia-smi"
+    fake_gpu_line = "NVIDIA A100-SXM4-40GB, 40960 MiB, 550.54.15"
+    fake_nvidia_smi.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "$*" == *"--query-gpu=name,memory.total,driver_version"* ]] && [[ "$*" == *"--format=csv,noheader"* ]]; then\n'
+        f'  echo "{fake_gpu_line}"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 2\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake_nvidia_smi.chmod(fake_nvidia_smi.stat().st_mode | stat.S_IEXEC)
+
+    wsl_fake_bin = _to_wsl_path(env_paths["fake_bin"])
+    wsl_sentinel_bin = _to_wsl_path(env_paths["sentinel_bin"])
+    wsl_state_dir = _to_wsl_path(env_paths["state_dir"])
+    wsl_prompts_dir = _to_wsl_path(prompts_dir)
+    wsl_index_json = _to_wsl_path(index_json)
+    wsl_out_dir = _to_wsl_path(out_dir)
+    wsl_lock_file = _to_wsl_path(lock_file)
+    wsl_launch = _to_wsl_path(LAUNCH_SH)
+
+    cmd = (
+        f"export PATH='{wsl_fake_bin}:{wsl_sentinel_bin}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{wsl_state_dir}'; "
+        f"export UDLAB_OPEN_LOCK='{wsl_lock_file}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{wsl_prompts_dir}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{wsl_index_json}'; "
+        f"export VM_DRYRUN=1; "
+        f"bash '{wsl_launch}' --grant-id test-grant-gpu-01 --out-dir '{wsl_out_dir}' --run-id test-gpu-receipt"
+    )
+    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert not env_paths["sentinel_called"].exists()
+
+    receipt = json.loads((out_dir / "vm_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["gpu_present"] is True
+    assert receipt["gpu_name"] == "NVIDIA A100-SXM4-40GB"
+    assert receipt["gpu_memory_total"] == "40960 MiB"
+    assert receipt["gpu_driver_version"] == "550.54.15"
+    assert receipt["nvidia_smi"] == fake_gpu_line
+    assert receipt["hardware"] == fake_gpu_line
+    assert vm_udlab.UV_VERSION in receipt["uv_version"]
+    assert vm_udlab.REQUIRED_PYTHON_VERSION in receipt["python_version"]
+    assert receipt["gpu_offload_check"]["checked"] is True
+    assert receipt["gpu_offload_check"]["size_vram"] == receipt["gpu_offload_check"]["size"]
+
+    outcome = json.loads((out_dir / "outcome.draft.json").read_text(encoding="utf-8"))
+    assert outcome["outcome"] == "ok"
+    assert outcome["hardware"] == fake_gpu_line
+
+
+def test_stub_mode_records_cpu_and_absence_of_gpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1. Direct unit check with empty PATH (no nvidia-smi present): must not fail
+    monkeypatch.setenv("PATH", str(tmp_path))
+    gpu_info = vm_udlab.probe_vm_gpu("stub")
+    assert gpu_info["hardware"] == "CPU"
+    assert gpu_info["gpu_name"] == "CPU"
+    assert gpu_info["gpu_present"] is False
+    assert gpu_info["gpu_memory_total"] is None
+    assert gpu_info["gpu_driver_version"] is None
+    assert gpu_info["nvidia_smi"] is None
+
+    # 2. End-to-end stub run check via launch.sh
+    env_paths = _setup_fake_colab_env(tmp_path)
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+    out_dir = tmp_path / "run_stub_cpu_receipt"
+    lock_file = tmp_path / "colab-open-stub-cpu.lock"
+
+    wsl_fake_bin = _to_wsl_path(env_paths["fake_bin"])
+    wsl_sentinel_bin = _to_wsl_path(env_paths["sentinel_bin"])
+    wsl_state_dir = _to_wsl_path(env_paths["state_dir"])
+    wsl_prompts_dir = _to_wsl_path(prompts_dir)
+    wsl_index_json = _to_wsl_path(index_json)
+    wsl_out_dir = _to_wsl_path(out_dir)
+    wsl_lock_file = _to_wsl_path(lock_file)
+    wsl_launch = _to_wsl_path(LAUNCH_SH)
+
+    cmd = (
+        f"export PATH='{wsl_fake_bin}:{wsl_sentinel_bin}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{wsl_state_dir}'; "
+        f"export UDLAB_OPEN_LOCK='{wsl_lock_file}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{wsl_prompts_dir}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{wsl_index_json}'; "
+        f"export VM_DRYRUN=1; "
+        f"bash '{wsl_launch}' --stub --out-dir '{wsl_out_dir}' --run-id test-stub-cpu-receipt"
+    )
+    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert not env_paths["sentinel_called"].exists()
+
+    receipt = json.loads((out_dir / "vm_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["hardware"] == "CPU"
+    assert receipt["gpu_name"] == "CPU"
+    assert receipt["gpu_present"] is False
+    assert receipt["nvidia_smi"] is None
+    assert receipt["gpu_offload_check"] == {"checked": False, "reason": "stub_mode"}
+
+    outcome = json.loads((out_dir / "outcome.draft.json").read_text(encoding="utf-8"))
+    assert outcome["hardware"] == "CPU"
+    assert outcome["outcome"] == "ok"
+
+
+def test_partial_offload_refusal_on_fake_api_ps(tmp_path: Path) -> None:
+    import http.server
+    import threading
+
+    # 1. Direct verification of /api/ps payload with size_vram < size
+    partial_ps = {
+        "models": [
+            {
+                "name": "qwen3.6:35b",
+                "model": "qwen3.6:35b",
+                "size": 23456789012,
+                "size_vram": 18000000000,
+            }
+        ]
+    }
+    with pytest.raises(vm_udlab.RefusalError) as exc_partial:
+        vm_udlab.verify_model_full_gpu_offload(partial_ps, model="qwen3.6:35b")
+    assert exc_partial.value.failure_class == "MODEL_PARTIAL_OFFLOAD"
+
+    full_ps = {
+        "models": [
+            {
+                "name": "qwen3.6:35b",
+                "model": "qwen3.6:35b",
+                "size": 23456789012,
+                "size_vram": 23456789012,
+            }
+        ]
+    }
+    res_ok = vm_udlab.verify_model_full_gpu_offload(full_ps, model="qwen3.6:35b")
+    assert res_ok["checked"] is True
+    assert res_ok["size_vram"] == res_ok["size"] == 23456789012
+
+    # 2. HTTP warm-up + /api/ps + unload lifecycle test against a fake /api/ps server
+    requests_seen: list[tuple[str, str, dict[str, object]]] = []
+
+    class FakeOllamaHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+            requests_seen.append(("POST", self.path, body))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"done":true}')
+
+        def do_GET(self) -> None:
+            requests_seen.append(("GET", self.path, {}))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(partial_ps).encode("utf-8"))
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), FakeOllamaHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(vm_udlab.RefusalError) as exc_srv:
+            vm_udlab.check_ollama_server_full_gpu_offload(
+                base_url=f"http://127.0.0.1:{port}",
+                model="qwen3.6:35b",
+            )
+        assert exc_srv.value.failure_class == "MODEL_PARTIAL_OFFLOAD"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # Verify warm-up load, /api/ps query, and keep_alive=0 unload were all sent
+    assert [r[1] for r in requests_seen] == ["/api/generate", "/api/ps", "/api/generate"]
+    assert requests_seen[-1][2].get("keep_alive") == 0
+
+    # 3. End-to-end launch.sh GPU refusal when /api/ps reports size_vram < size
+    env_paths = _setup_fake_colab_env(tmp_path)
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+    out_dir = tmp_path / "run_gpu_partial_offload"
+    lock_file = tmp_path / "colab-open-partial.lock"
+
+    wsl_fake_bin = _to_wsl_path(env_paths["fake_bin"])
+    wsl_sentinel_bin = _to_wsl_path(env_paths["sentinel_bin"])
+    wsl_state_dir = _to_wsl_path(env_paths["state_dir"])
+    wsl_prompts_dir = _to_wsl_path(prompts_dir)
+    wsl_index_json = _to_wsl_path(index_json)
+    wsl_out_dir = _to_wsl_path(out_dir)
+    wsl_lock_file = _to_wsl_path(lock_file)
+    wsl_launch = _to_wsl_path(LAUNCH_SH)
+    partial_ps_json = json.dumps(partial_ps)
+
+    cmd = (
+        f"export PATH='{wsl_fake_bin}:{wsl_sentinel_bin}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{wsl_state_dir}'; "
+        f"export UDLAB_OPEN_LOCK='{wsl_lock_file}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{wsl_prompts_dir}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{wsl_index_json}'; "
+        f"export VM_DRYRUN=1; "
+        f"export UDLAB_FAKE_API_PS_JSON='{partial_ps_json}'; "
+        f"bash '{wsl_launch}' --grant-id test-grant-partial --out-dir '{wsl_out_dir}' --run-id test-partial-offload"
+    )
+    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    assert proc.returncode != 0
+    assert not env_paths["sentinel_called"].exists()
+
+    receipt = json.loads((out_dir / "vm_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["status"] == "refused"
+    assert receipt["failure_class"] == "MODEL_PARTIAL_OFFLOAD"
+
+

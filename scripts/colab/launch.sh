@@ -179,6 +179,16 @@ outcome = sys.argv[7]
 why = sys.argv[8]
 cost = round((runtime_seconds / 3600.0) * rate, 4)
 
+receipt_path = out_path.parent / "vm_receipt.json"
+if receipt_path.is_file():
+    try:
+        receipt_data = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt_hw = receipt_data.get("hardware")
+        if isinstance(receipt_hw, str) and receipt_hw.strip():
+            hardware = receipt_hw.strip()
+    except Exception:
+        pass
+
 payload = {
     "id": run_id,
     "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
@@ -278,6 +288,7 @@ tar_out = Path(sys.argv[2])
 index_override = Path(sys.argv[3])
 include_paths = [
     "pyproject.toml",
+    ".python-version",
     "uv.lock",
     "README.md",
     "src",
