@@ -410,10 +410,21 @@ if subcmd == "cp":
     src = args[s_idx + 2]
     dst = args[s_idx + 3]
     if src.startswith("/content/"):
-        fetch_sleep_s = float(os.environ.get("FAKE_COLAB_FETCH_SLEEP", "0"))
-        if fetch_sleep_s > 0:
-            time.sleep(fetch_sleep_s)
+        if not any(s.get("session_id") == sid for s in sessions):
+            raise SystemExit(1)
         vm_src = vm_fs / src.removeprefix("/content/")
+        fetch_sleep_s = float(os.environ.get("FAKE_COLAB_FETCH_SLEEP", "0"))
+        if fetch_sleep_s > 0 and src == "/content/result.tar.gz":
+            if vm_src.is_file():
+                raw_bytes = vm_src.read_bytes()
+                Path(dst).parent.mkdir(parents=True, exist_ok=True)
+                Path(dst).write_bytes(raw_bytes[: max(1, len(raw_bytes) // 2)])
+            time.sleep(fetch_sleep_s)
+            sessions_now = json.loads(sessions_file.read_text(encoding="utf-8"))
+            if not any(s.get("session_id") == sid for s in sessions_now):
+                raise SystemExit(1)
+        elif fetch_sleep_s > 0:
+            time.sleep(fetch_sleep_s)
         if not vm_src.is_file():
             raise SystemExit(1)
         Path(dst).parent.mkdir(parents=True, exist_ok=True)
@@ -575,7 +586,7 @@ def test_launch_sh_trap_stops_session_on_refusal_failure(tmp_path: Path) -> None
         f"export UDLAB_EXACT_CTX_PROMPTS='{wsl_prompts_dir}'; "
         f"export UDLAB_EXACT_CTX_INDEX='{wsl_index_json}'; "
         f"export VM_DRYRUN=1; "
-        f"export UDLAB_DRYRUN_INJECT_FAILURE='MANIFEST_DIGEST_MISMATCH'; "
+        f"export UDLAB_FAKE_API_PS_JSON='{{\"models\":[]}}'; "
         f"bash '{wsl_launch}' --grant-id test-grant-01 --out-dir '{wsl_out_dir}' --run-id test-gpu-refusal"
     )
     proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
@@ -1102,22 +1113,93 @@ def test_finding3a_prompts_extracted_just_before_gate_and_deleted_on_early_failu
 
 
 def test_finding3b_unexpected_exception_writes_refusal_receipt_and_result_tar(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    secret_leak_msg = "secret_path=/root/private_token_xyz colab-runtime-proxy-token=LEAK999"
+
+    # 1. Direct monkeypatched step in vm_udlab.main (no production failure-injection switch)
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path / "direct")
+    prompts_tar = tmp_path / "direct_prompts.tar.gz"
+    with tarfile.open(prompts_tar, "w:gz") as tf:
+        for p in sorted(prompts_dir.glob("*.prompt.txt")):
+            tf.add(p, arcname=p.name, recursive=False)
+
+    vm_prompts_dir = tmp_path / "direct_vm_prompts"
+    vm_prompts_dir.mkdir(parents=True, exist_ok=True)
+    for p in prompts_dir.glob("*.prompt.txt"):
+        (vm_prompts_dir / p.name).write_bytes(p.read_bytes())
+
+    direct_run_dir = tmp_path / "direct_run"
+    direct_result_tar = tmp_path / "direct_result.tar.gz"
+
+    def _boom_dryrun_step(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise RuntimeError(secret_leak_msg)
+
+    monkeypatch.setattr(vm_udlab, "run_dryrun_pipeline", _boom_dryrun_step)
+
+    rc = vm_udlab.main(
+        [
+            "--mode",
+            "stub",
+            "--writer",
+            "mock",
+            "--grant-id",
+            "test-grant",
+            "--vram-halt-mib",
+            "0",
+            "--wall-seconds",
+            "60",
+            "--repo-dir",
+            str(REPO_ROOT),
+            "--index-path",
+            str(index_json),
+            "--prompts-dir",
+            str(vm_prompts_dir),
+            "--prompts-tar",
+            str(prompts_tar),
+            "--run-dir",
+            str(direct_run_dir),
+            "--result-tar",
+            str(direct_result_tar),
+            "--dryrun",
+        ]
+    )
+    assert rc == 2
+    assert (direct_run_dir / "vm_receipt.json").is_file()
+    assert direct_result_tar.is_file()
+    direct_receipt = json.loads((direct_run_dir / "vm_receipt.json").read_text(encoding="utf-8"))
+    assert direct_receipt["status"] == "refused"
+    assert direct_receipt["failure_class"] == "UNEXPECTED_ERROR"
+    assert direct_receipt["step"] == "dryrun_pipeline"
+    assert direct_receipt["exception_type"] == "RuntimeError"
+    direct_raw = (direct_run_dir / "vm_receipt.json").read_text(encoding="utf-8")
+    assert "private_token_xyz" not in direct_raw
+    assert "LEAK999" not in direct_raw
+    assert not prompts_tar.exists()
+    assert not list(vm_prompts_dir.glob("*.prompt.txt")) if vm_prompts_dir.exists() else True
+
+    # 2. End-to-end launch.sh check via test-only sitecustomize monkeypatch on PYTHONPATH
     env_paths = _setup_fake_colab_env(tmp_path)
-    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
     out_dir = tmp_path / "run_f3b_unexpected"
     lock_file = tmp_path / "colab-open-f3b.lock"
+    py_inject_dir = tmp_path / "py_inject"
+    py_inject_dir.mkdir(parents=True, exist_ok=True)
+    (py_inject_dir / "sitecustomize.py").write_text(
+        "import shutil, sys\n"
+        "if sys.argv and str(sys.argv[0]).endswith('vm_udlab.py'):\n"
+        f"    shutil.disk_usage = lambda _p: (_ for _ in ()).throw(RuntimeError({secret_leak_msg!r}))\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
-    secret_leak_msg = "secret_path=/root/private_token_xyz colab-runtime-proxy-token=LEAK999"
     cmd = (
         f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"export PYTHONPATH='{_to_wsl_path(py_inject_dir)}'; "
         f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_paths['state_dir'])}'; "
         f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file)}'; "
         f"export UDLAB_EXACT_CTX_PROMPTS='{_to_wsl_path(prompts_dir)}'; "
         f"export UDLAB_EXACT_CTX_INDEX='{_to_wsl_path(index_json)}'; "
         f"export VM_DRYRUN=1; "
-        f"export UDLAB_DRYRUN_INJECT_UNEXPECTED='{secret_leak_msg}'; "
         f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir)}' --run-id test-f3b-unexpected"
     )
     proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
@@ -1304,6 +1386,61 @@ def test_finding6_launch_sh_refuses_drive_path_for_exact_ctx_prompts(tmp_path: P
         assert proc.returncode == 2
         assert "FORBIDDEN_STORAGE_PATH" in proc.stderr
         assert not env_paths["sentinel_called"].exists()
+
+
+def test_fetch_race_watchdog_waits_for_in_progress_main_fetch_before_stop(
+    tmp_path: Path,
+) -> None:
+    env_paths = _setup_fake_colab_env(tmp_path)
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+    out_dir = tmp_path / "run_fetch_race"
+    lock_file = tmp_path / "colab-open-fetch-race.lock"
+
+    # Main exec completes (~1.2s) and starts main fetch, which takes 2.5s.
+    # Watchdog fires at WALL(4) - MARGIN(2) = 2s while main fetch is in progress.
+    cmd = (
+        f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_paths['state_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file)}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{_to_wsl_path(prompts_dir)}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{_to_wsl_path(index_json)}'; "
+        f"export VM_DRYRUN=1; "
+        f"export UDLAB_WALL_SECONDS=4; "
+        f"export UDLAB_FETCH_MARGIN_SECONDS=2; "
+        f"export UDLAB_WATCHDOG_FETCH_TIMEOUT_SECONDS=5; "
+        f"export FAKE_COLAB_EXEC_SLEEP=0; "
+        f"export FAKE_COLAB_FETCH_SLEEP=2.5; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir)}' --run-id test-fetch-race"
+    )
+    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    assert not env_paths["sentinel_called"].exists()
+
+    calls = [
+        json.loads(line)
+        for line in env_paths["calls_log"].read_text(encoding="utf-8").splitlines()
+    ]
+    result_tar_cp_calls = [
+        c for c in calls if c["subcmd"] == "cp" and "/content/result.tar.gz" in c["args"]
+    ]
+    # Exactly one fetch of result.tar.gz runs
+    assert len(result_tar_cp_calls) == 1
+
+    # Watchdog fired while main fetch was in progress, waited for FETCH_DONE, then stopped
+    cli_log_text = (out_dir / "colab-cli.log").read_text(encoding="utf-8")
+    assert "FETCH_START" in cli_log_text
+    assert "RIG_DEADLINE_EXCEEDED" in cli_log_text
+    assert "FETCH_DONE" in cli_log_text
+    assert "WATCHDOG_STOP_SESSION" in cli_log_text
+    assert cli_log_text.index("FETCH_START") < cli_log_text.index("RIG_DEADLINE_EXCEEDED")
+    assert cli_log_text.index("FETCH_DONE") < cli_log_text.index("WATCHDOG_STOP_SESSION")
+
+    # Result tar is whole and valid
+    assert (out_dir / "result.tar.gz").is_file()
+    tar_members = vm_udlab.validate_tar_file(out_dir / "result.tar.gz")
+    assert "vm_receipt.json" in tar_members
+    assert "generations.jsonl" in tar_members
+    assert proc.returncode == 0
+
 
 
 

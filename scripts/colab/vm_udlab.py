@@ -1242,14 +1242,6 @@ def run_dryrun_pipeline(
     prompt_line_hashes_out: set[str] | None = None,
 ) -> dict[str, object]:
     """Execute deterministic dry-run pipeline for rig fake-CLI testing (no GPU/network)."""
-    inject_failure = os.environ.get("UDLAB_DRYRUN_INJECT_FAILURE", "").strip()
-    if inject_failure:
-        raise RefusalError(inject_failure, f"Injected dry-run failure: {inject_failure}")
-
-    inject_unexpected = os.environ.get("UDLAB_DRYRUN_INJECT_UNEXPECTED", "").strip()
-    if inject_unexpected:
-        raise RuntimeError(inject_unexpected)
-
     if gpu_info is None:
         gpu_info = probe_vm_gpu(args.mode, allow_missing_in_dryrun=True)
 

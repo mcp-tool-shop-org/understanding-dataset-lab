@@ -104,6 +104,11 @@ fi
 mkdir -p "$OUT_DIR"
 CLI_LOG="$OUT_DIR/colab-cli.log"
 OUTCOME_FILE="$OUT_DIR/outcome.draft.json"
+FETCH_CLAIM_DIR="$OUT_DIR/.rig_fetch_claim"
+FETCH_DONE_MARKER="$OUT_DIR/.rig_fetched"
+DEADLINE_MARKER="$OUT_DIR/.rig_deadline_exceeded"
+FETCH_MARGIN="${UDLAB_FETCH_MARGIN_SECONDS:-180}"
+WATCHDOG_FETCH_TIMEOUT="${UDLAB_WATCHDOG_FETCH_TIMEOUT_SECONDS:-$(( FETCH_MARGIN > 10 ? FETCH_MARGIN - 5 : (FETCH_MARGIN > 0 ? FETCH_MARGIN : 1) ))}"
 touch "$CLI_LOG"
 
 scrub_stream() {
@@ -145,13 +150,39 @@ cleanup_stage() {
   fi
 }
 
+wait_for_fetch_done() {
+  local wait_timeout="${1:-${WATCHDOG_FETCH_TIMEOUT:-175}}"
+  if [[ "$wait_timeout" -le 0 ]]; then
+    wait_timeout="${WATCHDOG_FETCH_TIMEOUT:-175}"
+  fi
+  local deadline=$(( $(date +%s) + wait_timeout ))
+  while [[ ! -f "$FETCH_DONE_MARKER" ]]; do
+    if [[ "$(date +%s)" -ge "$deadline" ]]; then
+      break
+    fi
+    sleep 0.05
+  done
+}
+
 fetch_results_once() {
   local fetch_timeout="${1:-0}"
-  if [[ "$FETCHED" -eq 1 ]] || [[ -z "$S" ]] || [[ -f "$OUT_DIR/.rig_fetched" ]]; then
+  local wait_timeout="$fetch_timeout"
+  if [[ "$wait_timeout" -le 0 ]]; then
+    wait_timeout="${WATCHDOG_FETCH_TIMEOUT:-175}"
+  fi
+  if [[ -z "$S" ]]; then
+    return 0
+  fi
+  if [[ -f "$FETCH_DONE_MARKER" ]]; then
+    FETCHED=1
+    return 0
+  fi
+  if ! mkdir "$FETCH_CLAIM_DIR" 2>/dev/null; then
+    wait_for_fetch_done "$wait_timeout"
+    FETCHED=1
     return 0
   fi
   FETCHED=1
-  touch "$OUT_DIR/.rig_fetched"
   log_msg "FETCH_START session=$S"
   if [[ "$fetch_timeout" -gt 0 ]]; then
     timeout --signal=TERM --kill-after=5 "${fetch_timeout}s" bash -c '
@@ -163,6 +194,7 @@ fetch_results_once() {
     run_colab cp -s "$S" "/content/udlab_run/vm_receipt.json" "$OUT_DIR/vm_receipt.json" >/dev/null 2>&1 || true
   fi
   log_msg "FETCH_DONE session=$S"
+  touch "$FETCH_DONE_MARKER"
 }
 
 write_outcome_draft() {
@@ -219,19 +251,25 @@ stop_all() {
   local exit_code=$?
   set +e
   cleanup_stage
+  if [[ -n "$S" ]] && [[ "$STOPPED" -eq 0 ]] && [[ ! -f "$OUT_DIR/.rig_stopped" ]]; then
+    fetch_results_once "$WATCHDOG_FETCH_TIMEOUT"
+  fi
   if [[ -n "$WATCHDOG_PID" ]]; then
-    kill "$WATCHDOG_PID" 2>/dev/null || true
-    wait "$WATCHDOG_PID" 2>/dev/null || true
+    if [[ -f "$DEADLINE_MARKER" ]]; then
+      wait "$WATCHDOG_PID" 2>/dev/null || true
+    else
+      kill "$WATCHDOG_PID" 2>/dev/null || true
+      wait "$WATCHDOG_PID" 2>/dev/null || true
+    fi
     WATCHDOG_PID=""
   fi
   if [[ -n "$S" ]] && [[ "$STOPPED" -eq 0 ]] && [[ ! -f "$OUT_DIR/.rig_stopped" ]]; then
-    fetch_results_once
     log_msg "STOP_SESSION session=$S"
     run_colab stop -s "$S" >/dev/null 2>&1 || true
     STOPPED=1
     touch "$OUT_DIR/.rig_stopped"
   fi
-  rm -f "$OUT_DIR/.rig_fetched" "$OUT_DIR/.rig_stopped" 2>/dev/null || true
+  rm -rf "$DEADLINE_MARKER" "$FETCH_CLAIM_DIR" "$FETCH_DONE_MARKER" "$OUT_DIR/.rig_stopped" 2>/dev/null || true
   "$PYTHON_BIN" -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path(sys.argv[1]) / 'scripts' / 'colab')); import vm_udlab; vm_udlab.scrub_log_file_in_place(Path(sys.argv[2]))" "$REPO_ROOT" "$CLI_LOG" >/dev/null 2>&1 || true
   write_outcome_draft
   exit "$exit_code"
@@ -359,16 +397,13 @@ flock -u 9 || true
 log_msg "LOCK_RELEASED session=$S"
 
 # Start independent rig-side deadline watchdog (fires at WALL - FETCH_MARGIN, fetches, then stops by WALL)
-FETCH_MARGIN="${UDLAB_FETCH_MARGIN_SECONDS:-180}"
-WATCHDOG_FETCH_TIMEOUT="${UDLAB_WATCHDOG_FETCH_TIMEOUT_SECONDS:-$(( FETCH_MARGIN > 10 ? FETCH_MARGIN - 5 : (FETCH_MARGIN > 0 ? FETCH_MARGIN : 1) ))}"
 if [[ "$WALL_SECONDS" -gt "$FETCH_MARGIN" ]]; then
   WATCHDOG_SLEEP_SECONDS=$(( WALL_SECONDS - FETCH_MARGIN ))
 else
   WATCHDOG_SLEEP_SECONDS=0
 fi
 
-DEADLINE_MARKER="$OUT_DIR/.rig_deadline_exceeded"
-rm -f "$DEADLINE_MARKER" "$OUT_DIR/.rig_fetched" "$OUT_DIR/.rig_stopped"
+rm -rf "$DEADLINE_MARKER" "$FETCH_CLAIM_DIR" "$FETCH_DONE_MARKER" "$OUT_DIR/.rig_stopped"
 (
   sleep "$WATCHDOG_SLEEP_SECONDS"
   touch "$DEADLINE_MARKER"
