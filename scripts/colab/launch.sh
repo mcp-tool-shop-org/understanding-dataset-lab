@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Per-window Google Colab launcher for the understanding-dataset-lab scenario writer.
-# Follows the colab skill: shared open lock, trap-guaranteed session stop on every
-# exit path, neighbour-session preservation, token scrubbing, strict result tar
-# allow-list, dual rig/VM wall caps, and Publisher outcome.draft.json output.
+# Follows the colab skill: shared open lock, reconciler lock file convention,
+# trap-guaranteed session stop on every exit path, neighbour-session preservation,
+# token scrubbing, strict result tar allow-list, dual rig/VM wall caps, and
+# Publisher outcome.draft.json output.
 
 set -euo pipefail
 
@@ -11,20 +12,24 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 MODE="${UDLAB_MODE:-gpu}"
 RESUME_FLAG=0
+DRY_FLAG="${UDLAB_DRY:-0}"
+SESSION_SMOKE_FLAG=0
 CUSTOM_GRANT_ID="${UDLAB_GRANT_ID:-}"
 OUT_DIR="${UDLAB_OUT_DIR:-}"
-RUN_ID="${UDLAB_RUN_ID:-udlab-writer-$(date -u +%Y%m%dT%H%M%SZ)}"
+RUN_ID="${UDLAB_RUN_ID:-writer-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/colab/launch.sh [--stub] [--resume] [--grant-id ID] [--out-dir DIR] [--run-id ID]
+Usage: scripts/colab/launch.sh [--stub] [--session-smoke] [--dry] [--resume] [--grant-id ID] [--out-dir DIR] [--run-id ID]
 
 Options:
-  --stub          Run the CPU stub rung (CPU, wall 7200s, cap 0.16, --writer mock)
-  --resume        Resume from an existing checkpoint in --out-dir
-  --grant-id ID   Grant ID for GPU writer runs (or set UDLAB_GRANT_ID)
-  --out-dir DIR   Rig output directory for logs, result.tar.gz, and outcome.draft.json
-  --run-id ID     Window identifier recorded in outcome.draft.json
+  --stub            Run the CPU stub rung (CPU, wall 7200s, cap 0.16, --writer mock)
+  --session-smoke   Run the first-rung CPU session smoke test only (no upload, no pull)
+  --dry             Print every CLI command line with real values in order and exit
+  --resume          Resume from an existing checkpoint in --out-dir
+  --grant-id ID     Grant ID for GPU writer runs (or set UDLAB_GRANT_ID)
+  --out-dir DIR     Rig output directory for logs, result.tar.gz, and outcome.draft.json
+  --run-id ID       Window identifier recorded in outcome.draft.json (session is udlab-<run-id>)
 EOF
 }
 
@@ -32,6 +37,15 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --stub)
       MODE="stub"
+      shift
+      ;;
+    --session-smoke)
+      SESSION_SMOKE_FLAG=1
+      MODE="stub"
+      shift
+      ;;
+    --dry|--dry-run)
+      DRY_FLAG=1
       shift
       ;;
     --resume)
@@ -86,7 +100,21 @@ fi
 COUNT="${UDLAB_COUNT:-3}"
 SEED="${UDLAB_SEED:-5}"
 OPEN_LOCK="${UDLAB_OPEN_LOCK:-/tmp/colab-window-open.lock}"
+LOCK_DIR="${COLAB_LOCK_DIR:-/tmp/colab-locks}"
+RECONCILE_SH="${COLAB_RECONCILE_SH:-/mnt/e/AI/rnd-local/projects/colab-lanes/reconcile/reconcile.sh}"
+MAIN=$$
 PYTHON_BIN="${UDLAB_PYTHON:-python3}"
+GATE_TIMEOUT_SECONDS="${UDLAB_GATE_TIMEOUT_SECONDS:-180}"
+UPLOAD_TIMEOUT_SECONDS="${UDLAB_UPLOAD_TIMEOUT_SECONDS:-600}"
+DOWNLOAD_TIMEOUT_SECONDS="${UDLAB_DOWNLOAD_TIMEOUT_SECONDS:-300}"
+RIG_GRACE_SECONDS="${UDLAB_RIG_GRACE_SECONDS:-5}"
+RIG_TIMEOUT=$(( WALL_SECONDS + RIG_GRACE_SECONDS ))
+
+if [[ "$RUN_ID" == udlab-* ]]; then
+  SESSION_NAME="$RUN_ID"
+else
+  SESSION_NAME="udlab-$RUN_ID"
+fi
 
 if [[ -z "${UDLAB_CAP_UNITS:-}" ]]; then
   CAP_UNITS="$("$PYTHON_BIN" -c "import sys; w=float(sys.argv[1]); r=float(sys.argv[2]); print(f'{round(w * r / 3600.0, 4):g}')" "$WALL_SECONDS" "$RATE_UNITS_PER_HOUR")"
@@ -101,6 +129,57 @@ if [[ "$OUT_DIR" == *"/content/drive"* ]] || [[ "$OUT_DIR" == *"/gdrive"* ]]; th
   exit 2
 fi
 
+scrub_stream() {
+  sed -E 's/colab-runtime-proxy-token=[^ "'"'"'&;]+/colab-runtime-proxy-token=[REDACTED]/g'
+}
+
+if [[ "$DRY_FLAG" == "1" ]]; then
+  if [[ "$SESSION_SMOKE_FLAG" -eq 1 ]]; then
+    printf 'colab sessions\n'
+    printf 'colab new -s %s\n' "$SESSION_NAME"
+    printf 'colab sessions\n'
+    printf 'colab stop -s %s\n' "$SESSION_NAME"
+    printf 'colab sessions\n'
+    exit 0
+  fi
+
+  DRY_STAGE_DIR="${OUT_DIR}/stage"
+  DRY_REPO_TAR="${DRY_STAGE_DIR}/repo_bundle.tar.gz"
+  DRY_PROMPTS_TAR="${DRY_STAGE_DIR}/exact_ctx_prompts.tar.gz"
+  DRY_RESUME_TAR="${DRY_STAGE_DIR}/resume_state.tar.gz"
+  DRY_NEW_OPTS=""
+  if [[ "${#COLAB_NEW_FLAGS[@]}" -gt 0 ]]; then
+    DRY_NEW_OPTS=" ${COLAB_NEW_FLAGS[*]}"
+  fi
+  DRY_RESUME_VAL=0
+  if [[ "$RESUME_FLAG" -eq 1 ]] || [[ -f "$OUT_DIR/checkpoint.json" ]]; then
+    DRY_RESUME_VAL=1
+  fi
+  DRY_ENV_STR="--env UDLAB_STEP=run --env UDLAB_MODE=${MODE} --env UDLAB_WRITER=${WRITER} --env UDLAB_COUNT=${COUNT} --env UDLAB_SEED=${SEED} --env UDLAB_GRANT_ID=${GRANT_ID} --env UDLAB_VRAM_HALT_MIB=${VRAM_HALT_MIB} --env UDLAB_WALL_SECONDS=${WALL_SECONDS} --env UDLAB_REPO_DIR=/content/udlab --env UDLAB_REPO_TAR=/content/repo_bundle.tar.gz --env UDLAB_PROMPTS_DIR=/content/udlab_prompts --env UDLAB_PROMPTS_TAR=/content/exact_ctx_prompts.tar.gz --env UDLAB_RUN_DIR=/content/udlab_run --env UDLAB_RESULT_TAR=/content/result.tar.gz --env UDLAB_RESUME=${DRY_RESUME_VAL}"
+  if [[ "$DRY_RESUME_VAL" -eq 1 ]] && [[ -f "$OUT_DIR/checkpoint.json" ]]; then
+    DRY_ENV_STR="${DRY_ENV_STR} --env UDLAB_RESUME_TAR=/content/resume_state.tar.gz"
+  fi
+  if [[ "${VM_DRYRUN:-0}" == "1" ]]; then
+    DRY_ENV_STR="${DRY_ENV_STR} --env VM_DRYRUN=1"
+  fi
+
+  {
+    printf 'colab sessions\n'
+    printf 'colab new%s -s %s\n' "$DRY_NEW_OPTS" "$SESSION_NAME"
+    printf 'colab exec -s %s --env UDLAB_STEP=gate -f %s --timeout %s\n' "$SESSION_NAME" "$SCRIPT_DIR/vm_udlab.py" "$GATE_TIMEOUT_SECONDS"
+    printf 'colab upload -s %s %s /content/repo_bundle.tar.gz\n' "$SESSION_NAME" "$DRY_REPO_TAR"
+    printf 'colab upload -s %s %s /content/exact_ctx_prompts.tar.gz\n' "$SESSION_NAME" "$DRY_PROMPTS_TAR"
+    if [[ "$DRY_RESUME_VAL" -eq 1 ]] && [[ -f "$OUT_DIR/checkpoint.json" ]]; then
+      printf 'colab upload -s %s %s /content/resume_state.tar.gz\n' "$SESSION_NAME" "$DRY_RESUME_TAR"
+    fi
+    printf 'colab exec -s %s %s -f %s --timeout %s\n' "$SESSION_NAME" "$DRY_ENV_STR" "$SCRIPT_DIR/vm_udlab.py" "$WALL_SECONDS"
+    printf 'colab download -s %s /content/result.tar.gz %s/result.tar.gz\n' "$SESSION_NAME" "$OUT_DIR"
+    printf 'colab download -s %s /content/udlab_run/vm_receipt.json %s/vm_receipt.json\n' "$SESSION_NAME" "$OUT_DIR"
+    printf 'colab stop -s %s\n' "$SESSION_NAME"
+  } | scrub_stream
+  exit 0
+fi
+
 mkdir -p "$OUT_DIR"
 CLI_LOG="$OUT_DIR/colab-cli.log"
 OUTCOME_FILE="$OUT_DIR/outcome.draft.json"
@@ -110,10 +189,6 @@ DEADLINE_MARKER="$OUT_DIR/.rig_deadline_exceeded"
 FETCH_MARGIN="${UDLAB_FETCH_MARGIN_SECONDS:-180}"
 WATCHDOG_FETCH_TIMEOUT="${UDLAB_WATCHDOG_FETCH_TIMEOUT_SECONDS:-$(( FETCH_MARGIN > 10 ? FETCH_MARGIN - 5 : (FETCH_MARGIN > 0 ? FETCH_MARGIN : 1) ))}"
 touch "$CLI_LOG"
-
-scrub_stream() {
-  sed -E 's/colab-runtime-proxy-token=[^ "'"'"'&;]+/colab-runtime-proxy-token=[REDACTED]/g'
-}
 
 log_msg() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | scrub_stream | tee -a "$CLI_LOG"
@@ -170,7 +245,7 @@ fetch_results_once() {
   if [[ "$wait_timeout" -le 0 ]]; then
     wait_timeout="${WATCHDOG_FETCH_TIMEOUT:-175}"
   fi
-  if [[ -z "$S" ]]; then
+  if [[ -z "$S" ]] || [[ "$SESSION_SMOKE_FLAG" -eq 1 ]]; then
     return 0
   fi
   if [[ -f "$FETCH_DONE_MARKER" ]]; then
@@ -186,12 +261,12 @@ fetch_results_once() {
   log_msg "FETCH_START session=$S"
   if [[ "$fetch_timeout" -gt 0 ]]; then
     timeout --signal=TERM --kill-after=5 "${fetch_timeout}s" bash -c '
-      colab cp -s "$1" "/content/result.tar.gz" "$2/result.tar.gz" >/dev/null 2>&1 || true
-      colab cp -s "$1" "/content/udlab_run/vm_receipt.json" "$2/vm_receipt.json" >/dev/null 2>&1 || true
+      colab download -s "$1" "/content/result.tar.gz" "$2/result.tar.gz" >/dev/null 2>&1 || true
+      colab download -s "$1" "/content/udlab_run/vm_receipt.json" "$2/vm_receipt.json" >/dev/null 2>&1 || true
     ' _ "$S" "$OUT_DIR" || true
   else
-    run_colab cp -s "$S" "/content/result.tar.gz" "$OUT_DIR/result.tar.gz" >/dev/null 2>&1 || true
-    run_colab cp -s "$S" "/content/udlab_run/vm_receipt.json" "$OUT_DIR/vm_receipt.json" >/dev/null 2>&1 || true
+    timeout "$DOWNLOAD_TIMEOUT_SECONDS" colab download -s "$S" "/content/result.tar.gz" "$OUT_DIR/result.tar.gz" >/dev/null 2>&1 || true
+    timeout "$DOWNLOAD_TIMEOUT_SECONDS" colab download -s "$S" "/content/udlab_run/vm_receipt.json" "$OUT_DIR/vm_receipt.json" >/dev/null 2>&1 || true
   fi
   log_msg "FETCH_DONE session=$S"
   touch "$FETCH_DONE_MARKER"
@@ -266,8 +341,20 @@ stop_all() {
   if [[ -n "$S" ]] && [[ "$STOPPED" -eq 0 ]] && [[ ! -f "$OUT_DIR/.rig_stopped" ]]; then
     log_msg "STOP_SESSION session=$S"
     run_colab stop -s "$S" >/dev/null 2>&1 || true
+    rm -f "$LOCK_DIR/$S.lock"
     STOPPED=1
     touch "$OUT_DIR/.rig_stopped"
+    if [[ "$SESSION_SMOKE_FLAG" -eq 1 ]]; then
+      POST_SESSIONS="$(run_colab sessions || true)"
+      log_msg "SESSIONS_AFTER_STOP session=$S sessions=$(printf '%s' "$POST_SESSIONS" | tr '\n' ' ')"
+      if printf '%s\n' "$POST_SESSIONS" | grep -q "^\[$S\]"; then
+        RUN_OUTCOME="fail"
+        RUN_WHY="session $S still present after colab stop"
+        exit_code=1
+      fi
+    fi
+  elif [[ -n "$S" ]]; then
+    rm -f "$LOCK_DIR/$S.lock"
   fi
   rm -rf "$DEADLINE_MARKER" "$FETCH_CLAIM_DIR" "$FETCH_DONE_MARKER" "$OUT_DIR/.rig_stopped" 2>/dev/null || true
   "$PYTHON_BIN" -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path(sys.argv[1]) / 'scripts' / 'colab')); import vm_udlab; vm_udlab.scrub_log_file_in_place(Path(sys.argv[2]))" "$REPO_ROOT" "$CLI_LOG" >/dev/null 2>&1 || true
@@ -277,6 +364,40 @@ stop_all() {
 
 trap stop_all EXIT
 trap 'RUN_WHY="interrupted by signal"; exit 143' TERM INT
+
+if [[ "$SESSION_SMOKE_FLAG" -eq 1 ]]; then
+  log_msg "SESSION_SMOKE_START id=$RUN_ID session=$SESSION_NAME card=$CARD"
+  mkdir -p "$(dirname "$OPEN_LOCK")"
+  exec 9>"$OPEN_LOCK"
+  flock -w 300 9 || {
+    RUN_WHY="failed to acquire open lock $OPEN_LOCK"
+    exit 1
+  }
+  log_msg "LOCK_ACQUIRED lock=$OPEN_LOCK"
+  PRE_SESSIONS="$(run_colab sessions || true)"
+  S="$SESSION_NAME"
+  if ! run_colab new -s "$S" >/dev/null; then
+    flock -u 9 || true
+    RUN_WHY="colab new failed for $S"
+    exit 1
+  fi
+  mkdir -p "$LOCK_DIR"
+  printf '%s\n' "$MAIN" > "$LOCK_DIR/$S.lock"
+  log_msg "SESSION_LOCK_WRITTEN lock_file=$LOCK_DIR/$S.lock pid=$MAIN"
+  MID_SESSIONS="$(run_colab sessions || true)"
+  log_msg "SESSION_OPENED session=$S pre_sessions=$(printf '%s' "$PRE_SESSIONS" | tr -d '\n ') mid_sessions=$(printf '%s' "$MID_SESSIONS" | tr '\n' ' ')"
+  if ! printf '%s\n' "$MID_SESSIONS" | grep -q "^\[$S\]"; then
+    flock -u 9 || true
+    RUN_WHY="colab sessions did not list [$S] after colab new"
+    exit 1
+  fi
+  flock -u 9 || true
+  log_msg "LOCK_RELEASED session=$S"
+  RUN_OUTCOME="ok"
+  RUN_WHY="completed CPU session-smoke check for $S"
+  log_msg "SESSION_SMOKE_OK id=$RUN_ID session=$S"
+  exit 0
+fi
 
 log_msg "WINDOW_START id=$RUN_ID mode=$MODE card=$CARD wall_s=$WALL_SECONDS rate_uh=$RATE_UNITS_PER_HOUR cap_units=$CAP_UNITS writer=$WRITER count=$COUNT seed=$SEED grant_id=$GRANT_ID vram_halt_mib=$VRAM_HALT_MIB"
 
@@ -373,26 +494,31 @@ flock -w 300 9 || {
 }
 
 log_msg "LOCK_ACQUIRED lock=$OPEN_LOCK"
-PRE_LS="$(run_colab ls --json || echo "[]")"
-NEW_OUT="$(run_colab new "${COLAB_NEW_FLAGS[@]+"${COLAB_NEW_FLAGS[@]}"}" --json)" || {
+if [[ -x "$RECONCILE_SH" ]]; then
+  COLAB_LOCK_DIR="$LOCK_DIR" "$RECONCILE_SH" --live | scrub_stream >> "$CLI_LOG" || true
+fi
+PRE_SESSIONS="$(run_colab sessions || true)"
+S="$SESSION_NAME"
+if ! run_colab new "${COLAB_NEW_FLAGS[@]+"${COLAB_NEW_FLAGS[@]}"}" -s "$S" >/dev/null; then
   flock -u 9 || true
   RUN_WHY="colab new failed"
   exit 1
-}
-
-S="$("$PYTHON_BIN" -c 'import json, sys; data = json.loads(sys.argv[1]); print(data.get("session_id") or data.get("id") or "")' "$NEW_OUT")"
-if [[ -z "$S" ]]; then
-  flock -u 9 || true
-  RUN_WHY="colab new returned empty session id"
-  exit 1
 fi
-log_msg "SESSION_OPENED session=$S pre_sessions=$(printf '%s' "$PRE_LS" | tr -d '\n ')"
 
-GATE_OUT="$(run_colab exec -s "$S" -- "echo VM_GATE_OK && uname -a")" || {
+mkdir -p "$LOCK_DIR"
+printf '%s\n' "$MAIN" > "$LOCK_DIR/$S.lock"
+log_msg "SESSION_OPENED session=$S pre_sessions=$(printf '%s' "$PRE_SESSIONS" | tr -d '\n ')"
+
+GATE_OUT="$(timeout "$GATE_TIMEOUT_SECONDS" colab exec -s "$S" --env UDLAB_STEP=gate -f "$SCRIPT_DIR/vm_udlab.py" --timeout "$GATE_TIMEOUT_SECONDS" 2>&1 | scrub_stream | tee -a "$CLI_LOG")" || {
   flock -u 9 || true
   RUN_WHY="VM liveness gate failed on session $S"
   exit 1
 }
+if ! printf '%s\n' "$GATE_OUT" | grep -q '^VM_GATE_OK'; then
+  flock -u 9 || true
+  RUN_WHY="VM liveness gate did not print VM_GATE_OK on session $S"
+  exit 1
+fi
 flock -u 9 || true
 log_msg "LOCK_RELEASED session=$S"
 
@@ -411,16 +537,16 @@ rm -rf "$DEADLINE_MARKER" "$FETCH_CLAIM_DIR" "$FETCH_DONE_MARKER" "$OUT_DIR/.rig
   fetch_results_once "$WATCHDOG_FETCH_TIMEOUT"
   printf '%s WATCHDOG_STOP_SESSION session=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$S" >> "$CLI_LOG"
   colab stop -s "$S" >/dev/null 2>&1 || true
+  rm -f "$LOCK_DIR/$S.lock"
   touch "$OUT_DIR/.rig_stopped"
 ) &
 WATCHDOG_PID="$!"
 
-run_colab cp -s "$S" "$REPO_TAR" "/content/repo_bundle.tar.gz" >/dev/null
-run_colab cp -s "$S" "$PROMPTS_TAR" "/content/exact_ctx_prompts.tar.gz" >/dev/null
+timeout "$UPLOAD_TIMEOUT_SECONDS" colab upload -s "$S" "$REPO_TAR" "/content/repo_bundle.tar.gz" 2>&1 | scrub_stream >> "$CLI_LOG"
+timeout "$UPLOAD_TIMEOUT_SECONDS" colab upload -s "$S" "$PROMPTS_TAR" "/content/exact_ctx_prompts.tar.gz" 2>&1 | scrub_stream >> "$CLI_LOG"
 cleanup_stage
 
-run_colab exec -s "$S" -- "mkdir -p /content/udlab /content/udlab_run && tar -xzf /content/repo_bundle.tar.gz -C /content/udlab && rm -f /content/repo_bundle.tar.gz" >/dev/null
-
+UPLOADED_RESUME_TAR=""
 if [[ "$RESUME_FLAG" -eq 1 ]] || [[ -f "$OUT_DIR/checkpoint.json" ]]; then
   RESUME_FLAG=1
   if [[ -f "$OUT_DIR/checkpoint.json" ]]; then
@@ -449,38 +575,42 @@ with tarfile.open(tar_path, "w:gz") as tf:
         if p.is_file():
             tf.add(p, arcname=rel, recursive=False)
 PY
-    run_colab cp -s "$S" "$RESUME_TAR" "/content/resume_state.tar.gz" >/dev/null
+    timeout "$UPLOAD_TIMEOUT_SECONDS" colab upload -s "$S" "$RESUME_TAR" "/content/resume_state.tar.gz" 2>&1 | scrub_stream >> "$CLI_LOG"
     rm -f "$RESUME_TAR"
-    run_colab exec -s "$S" -- "tar -xzf /content/resume_state.tar.gz -C /content/udlab_run && rm -f /content/resume_state.tar.gz" >/dev/null
+    UPLOADED_RESUME_TAR="/content/resume_state.tar.gz"
   fi
 fi
 
-VM_ARGS=(
-  "--mode" "$MODE"
-  "--writer" "$WRITER"
-  "--count" "$COUNT"
-  "--seed" "$SEED"
-  "--grant-id" "$GRANT_ID"
-  "--vram-halt-mib" "$VRAM_HALT_MIB"
-  "--wall-seconds" "$WALL_SECONDS"
-  "--repo-dir" "/content/udlab"
-  "--prompts-dir" "/content/udlab_prompts"
-  "--prompts-tar" "/content/exact_ctx_prompts.tar.gz"
-  "--run-dir" "/content/udlab_run"
-  "--result-tar" "/content/result.tar.gz"
+EXEC_ENV_ARGS=(
+  --env "UDLAB_STEP=run"
+  --env "UDLAB_MODE=$MODE"
+  --env "UDLAB_WRITER=$WRITER"
+  --env "UDLAB_COUNT=$COUNT"
+  --env "UDLAB_SEED=$SEED"
+  --env "UDLAB_GRANT_ID=$GRANT_ID"
+  --env "UDLAB_VRAM_HALT_MIB=$VRAM_HALT_MIB"
+  --env "UDLAB_WALL_SECONDS=$WALL_SECONDS"
+  --env "UDLAB_REPO_DIR=/content/udlab"
+  --env "UDLAB_REPO_TAR=/content/repo_bundle.tar.gz"
+  --env "UDLAB_PROMPTS_DIR=/content/udlab_prompts"
+  --env "UDLAB_PROMPTS_TAR=/content/exact_ctx_prompts.tar.gz"
+  --env "UDLAB_RUN_DIR=/content/udlab_run"
+  --env "UDLAB_RESULT_TAR=/content/result.tar.gz"
+  --env "UDLAB_RESUME=$RESUME_FLAG"
 )
-if [[ "$RESUME_FLAG" -eq 1 ]]; then
-  VM_ARGS+=("--resume")
+if [[ -n "$UPLOADED_RESUME_TAR" ]]; then
+  EXEC_ENV_ARGS+=(--env "UDLAB_RESUME_TAR=$UPLOADED_RESUME_TAR")
 fi
 if [[ "${VM_DRYRUN:-0}" == "1" ]]; then
-  VM_ARGS+=("--dryrun")
+  EXEC_ENV_ARGS+=(--env "VM_DRYRUN=1")
+fi
+if [[ -n "${UDLAB_FAKE_API_PS_JSON:-}" ]]; then
+  EXEC_ENV_ARGS+=(--env "UDLAB_FAKE_API_PS_JSON=$UDLAB_FAKE_API_PS_JSON")
 fi
 
-RIG_GRACE_SECONDS="${UDLAB_RIG_GRACE_SECONDS:-5}"
-RIG_TIMEOUT=$(( WALL_SECONDS + RIG_GRACE_SECONDS ))
 EXEC_RC=0
 timeout --signal=TERM --kill-after=15 "${RIG_TIMEOUT}s" \
-  colab exec -s "$S" -- "timeout --signal=TERM --kill-after=30 ${WALL_SECONDS}s python3 /content/udlab/scripts/colab/vm_udlab.py ${VM_ARGS[*]}" 2>&1 | scrub_stream >> "$CLI_LOG" || EXEC_RC=$?
+  colab exec -s "$S" "${EXEC_ENV_ARGS[@]}" -f "$SCRIPT_DIR/vm_udlab.py" --timeout "$WALL_SECONDS" 2>&1 | scrub_stream >> "$CLI_LOG" || EXEC_RC=$?
 
 if [[ -f "$DEADLINE_MARKER" ]]; then
   if [[ -n "$WATCHDOG_PID" ]]; then

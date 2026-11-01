@@ -1380,34 +1380,178 @@ def run_dryrun_pipeline(
     }
 
 
+def unpack_uploaded_tars(
+    repo_tar: Path | None,
+    repo_dir: Path,
+    resume_tar: Path | None,
+    run_dir: Path,
+) -> None:
+    """Unpack uploaded repo_bundle.tar.gz and optional resume_state.tar.gz on the VM."""
+    ensure_not_drive_path(repo_dir)
+    ensure_not_drive_path(run_dir)
+    if repo_tar is not None and repo_tar.is_file():
+        ensure_not_drive_path(repo_tar)
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with tarfile.open(repo_tar, "r:*") as tf:
+                for member in tf.getmembers():
+                    if (
+                        member.issym()
+                        or member.islnk()
+                        or ".." in member.name
+                        or member.name.startswith("/")
+                        or "\\" in member.name
+                    ):
+                        raise RefusalError(
+                            "TAR_ALLOWLIST_VIOLATION",
+                            f"Forbidden repo tar member: {member.name!r}",
+                        )
+                tf.extractall(repo_dir)
+        finally:
+            try:
+                repo_tar.unlink()
+            except OSError:
+                pass
+
+    if resume_tar is not None and resume_tar.is_file():
+        ensure_not_drive_path(resume_tar)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with tarfile.open(resume_tar, "r:*") as tf:
+                for member in tf.getmembers():
+                    if (
+                        member.issym()
+                        or member.islnk()
+                        or ".." in member.name
+                        or member.name.startswith("/")
+                        or "\\" in member.name
+                    ):
+                        raise RefusalError(
+                            "TAR_ALLOWLIST_VIOLATION",
+                            f"Forbidden resume tar member: {member.name!r}",
+                        )
+                tf.extractall(run_dir)
+        finally:
+            try:
+                resume_tar.unlink()
+            except OSError:
+                pass
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    env_or = lambda key, default=None: os.environ.get(key) or default
+    env_int = lambda key, default: int(os.environ[key]) if os.environ.get(key) else default
+    env_path = lambda key, default=None: Path(os.environ[key]) if os.environ.get(key) else default
+
     parser = argparse.ArgumentParser(description="VM-side udlab Colab runner")
-    parser.add_argument("--mode", choices=("gpu", "stub"), required=True)
-    parser.add_argument("--writer", choices=("ollama", "mock"), required=True)
-    parser.add_argument("--count", type=int, default=3)
-    parser.add_argument("--seed", type=int, default=5)
-    parser.add_argument("--grant-id", required=True)
-    parser.add_argument("--vram-halt-mib", type=int, required=True)
-    parser.add_argument("--wall-seconds", type=int, required=True)
-    parser.add_argument("--repo-dir", type=Path, required=True)
-    parser.add_argument("--index-path", type=Path, default=None)
-    parser.add_argument("--prompts-dir", type=Path, required=True)
-    parser.add_argument("--prompts-tar", type=Path, default=None)
-    parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--work-dir", type=Path, default=Path("/content/udlab_work"))
-    parser.add_argument("--models-root", type=Path, default=Path("/root/.ollama/models"))
-    parser.add_argument("--result-tar", type=Path, required=True)
-    parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--step",
+        choices=("run", "gate"),
+        default=env_or("UDLAB_STEP", "run"),
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("gpu", "stub"),
+        default=env_or("UDLAB_MODE"),
+        required=("UDLAB_MODE" not in os.environ and env_or("UDLAB_STEP", "run") != "gate"),
+    )
+    parser.add_argument(
+        "--writer",
+        choices=("ollama", "mock"),
+        default=env_or("UDLAB_WRITER"),
+        required=("UDLAB_WRITER" not in os.environ and env_or("UDLAB_STEP", "run") != "gate"),
+    )
+    parser.add_argument("--count", type=int, default=env_int("UDLAB_COUNT", 3))
+    parser.add_argument("--seed", type=int, default=env_int("UDLAB_SEED", 5))
+    parser.add_argument(
+        "--grant-id",
+        default=env_or("UDLAB_GRANT_ID"),
+        required=("UDLAB_GRANT_ID" not in os.environ and env_or("UDLAB_STEP", "run") != "gate"),
+    )
+    parser.add_argument(
+        "--vram-halt-mib",
+        type=int,
+        default=env_int("UDLAB_VRAM_HALT_MIB", 0) if "UDLAB_VRAM_HALT_MIB" in os.environ else None,
+        required=("UDLAB_VRAM_HALT_MIB" not in os.environ and env_or("UDLAB_STEP", "run") != "gate"),
+    )
+    parser.add_argument(
+        "--wall-seconds",
+        type=int,
+        default=env_int("UDLAB_WALL_SECONDS", 0) if "UDLAB_WALL_SECONDS" in os.environ else None,
+        required=("UDLAB_WALL_SECONDS" not in os.environ and env_or("UDLAB_STEP", "run") != "gate"),
+    )
+    parser.add_argument(
+        "--repo-dir",
+        type=Path,
+        default=env_path("UDLAB_REPO_DIR", Path("/content/udlab")),
+    )
+    parser.add_argument(
+        "--repo-tar",
+        type=Path,
+        default=env_path("UDLAB_REPO_TAR", None),
+    )
+    parser.add_argument(
+        "--index-path",
+        type=Path,
+        default=env_path("UDLAB_INDEX_PATH", None),
+    )
+    parser.add_argument(
+        "--prompts-dir",
+        type=Path,
+        default=env_path("UDLAB_PROMPTS_DIR", Path("/content/udlab_prompts")),
+    )
+    parser.add_argument(
+        "--prompts-tar",
+        type=Path,
+        default=env_path("UDLAB_PROMPTS_TAR", None),
+    )
+    parser.add_argument(
+        "--resume-tar",
+        type=Path,
+        default=env_path("UDLAB_RESUME_TAR", None),
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=env_path("UDLAB_RUN_DIR", Path("/content/udlab_run")),
+    )
+    parser.add_argument(
+        "--work-dir",
+        type=Path,
+        default=env_path("UDLAB_WORK_DIR", Path("/content/udlab_work")),
+    )
+    parser.add_argument(
+        "--models-root",
+        type=Path,
+        default=env_path("UDLAB_MODELS_ROOT", Path("/root/.ollama/models")),
+    )
+    parser.add_argument(
+        "--result-tar",
+        type=Path,
+        default=env_path("UDLAB_RESULT_TAR", Path("/content/result.tar.gz")),
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=(os.environ.get("UDLAB_RESUME") == "1"),
+    )
     parser.add_argument("--dryrun", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.step == "gate":
+        import platform
+
+        print(f"VM_GATE_OK {platform.platform()}", flush=True)
+        return 0
+
     for p in (args.repo_dir, args.prompts_dir, args.run_dir, args.work_dir, args.result_tar):
         ensure_not_drive_path(p)
-    if args.prompts_tar is not None:
-        ensure_not_drive_path(args.prompts_tar)
+    for opt_p in (args.prompts_tar, args.repo_tar, args.resume_tar):
+        if opt_p is not None:
+            ensure_not_drive_path(opt_p)
 
     args.run_dir.mkdir(parents=True, exist_ok=True)
     logs_dir = args.run_dir / "logs"
@@ -1424,6 +1568,14 @@ def main(argv: list[str] | None = None) -> int:
     current_step = "probe_vm_gpu"
 
     try:
+        current_step = "unpack_uploaded_tars"
+        unpack_uploaded_tars(
+            repo_tar=args.repo_tar,
+            repo_dir=args.repo_dir,
+            resume_tar=args.resume_tar,
+            run_dir=args.run_dir,
+        )
+        current_step = "probe_vm_gpu"
         gpu_info = probe_vm_gpu(args.mode, allow_missing_in_dryrun=dryrun)
         if dryrun:
             current_step = "dryrun_pipeline"
@@ -1646,6 +1798,12 @@ def main(argv: list[str] | None = None) -> int:
 
     finally:
         cleanup_prompts_dir(args.prompts_dir, prompts_tar=args.prompts_tar)
+        for opt_tar in (args.repo_tar, args.resume_tar):
+            if opt_tar is not None and opt_tar.exists():
+                try:
+                    opt_tar.unlink()
+                except OSError:
+                    pass
 
 
 if __name__ == "__main__":

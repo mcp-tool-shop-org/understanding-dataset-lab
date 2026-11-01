@@ -4,6 +4,14 @@ Per-window Google Colab launcher (`launch.sh`) and VM runner (`vm_udlab.py`) for
 
 ## Usage
 
+- **First-rung CPU session smoke** (opens `udlab-<run-id>`, writes reconciler lock, checks `colab sessions`, stops session in trap, verifies removal; no upload or model pull):
+  ```bash
+  bash scripts/colab/launch.sh --session-smoke --out-dir runs/smoke-window --run-id smoke-01
+  ```
+- **Dry command listing** (prints every `colab` command line in order with resolved session name, files, and timeouts):
+  ```bash
+  bash scripts/colab/launch.sh --stub --dry --out-dir runs/stub-window --run-id stub-window-01
+  ```
 - **CPU stub rung** (`--writer mock`, 7200s wall cap, 0.16 Colab compute units):
   ```bash
   UDLAB_EXACT_CTX_PROMPTS=/path/to/exact_ctx_prompts \

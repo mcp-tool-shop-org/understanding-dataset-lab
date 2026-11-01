@@ -15,6 +15,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_COLAB_DIR = REPO_ROOT / "scripts" / "colab"
 LAUNCH_SH = SCRIPTS_COLAB_DIR / "launch.sh"
 VM_UDLAB_PY = SCRIPTS_COLAB_DIR / "vm_udlab.py"
+CLI_CONTRACT_JSON = REPO_ROOT / "tests" / "fixtures" / "colab-cli-contract.json"
+CLI_CONTRACT_SHA256 = "39704f50455ef401106938e9df78f4443acd12256e96c5cdf856e0d098a2250f"
 
 if str(SCRIPTS_COLAB_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_COLAB_DIR))
@@ -322,13 +324,15 @@ def test_log_scrubber_and_policy_verifier(tmp_path: Path) -> None:
 
 
 def _setup_fake_colab_env(tmp_path: Path) -> dict[str, Path]:
-    """Create a front-of-PATH fake `colab` CLI and a later-on-PATH real-colab sentinel."""
+    """Create a front-of-PATH fake `colab` CLI enforcing colab-cli-contract.json and a later-on-PATH real-colab sentinel."""
     fake_bin = tmp_path / "fake_bin"
     sentinel_bin = tmp_path / "sentinel_real_bin"
     state_dir = tmp_path / "fake_colab_state"
+    colab_locks_dir = tmp_path / "colab_locks"
     fake_bin.mkdir(parents=True, exist_ok=True)
     sentinel_bin.mkdir(parents=True, exist_ok=True)
     state_dir.mkdir(parents=True, exist_ok=True)
+    colab_locks_dir.mkdir(parents=True, exist_ok=True)
 
     # Pre-populate a neighbour session that must never be stopped
     sessions_file = state_dir / "sessions.json"
@@ -347,9 +351,10 @@ def _setup_fake_colab_env(tmp_path: Path) -> dict[str, Path]:
     )
     sentinel_script.chmod(sentinel_script.stat().st_mode | stat.S_IEXEC)
 
+    contract_path_posix = _to_wsl_path(CLI_CONTRACT_JSON)
     fake_driver_py = state_dir / "fake_colab_driver.py"
     fake_driver_py.write_text(
-        """#!/usr/bin/env python3
+        f"""#!/usr/bin/env python3
 from __future__ import annotations
 import json
 import os
@@ -359,15 +364,98 @@ import sys
 import time
 from pathlib import Path
 
+CONTRACT_PATH = Path({contract_path_posix!r})
+contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+commands_contract = contract["commands"]
+global_options = set(contract.get("global_options", []))
+
 state_dir = Path(os.environ["FAKE_COLAB_STATE_DIR"])
 vm_fs = state_dir / "vm_fs"
 vm_fs.mkdir(parents=True, exist_ok=True)
 calls_log = state_dir / "calls.jsonl"
 sessions_file = state_dir / "sessions.json"
-lock_file = Path(os.environ["UDLAB_OPEN_LOCK"])
+lock_file = Path(os.environ.get("UDLAB_OPEN_LOCK", "/tmp/colab-window-open.lock"))
+reconcile_lock_dir = Path(os.environ.get("COLAB_LOCK_DIR", "/tmp/colab-locks"))
 
-args = sys.argv[1:]
-subcmd = args[0] if args else ""
+raw_args = sys.argv[1:]
+
+# Parse optional global flags before subcommand
+idx = 0
+GLOBAL_VALUE_FLAGS = {{"--auth", "--client-oauth-config", "-c", "--config"}}
+while idx < len(raw_args) and raw_args[idx].startswith("-"):
+    gopt = raw_args[idx].split("=", 1)[0]
+    if gopt not in global_options:
+        sys.stderr.write(f"No such global option: {{raw_args[idx]}}\\n")
+        raise SystemExit(2)
+    if gopt in GLOBAL_VALUE_FLAGS and "=" not in raw_args[idx]:
+        idx += 2
+    else:
+        idx += 1
+
+if idx >= len(raw_args):
+    sys.stderr.write("Missing command.\\n")
+    raise SystemExit(2)
+
+subcmd = raw_args[idx]
+args = raw_args[idx + 1:]
+
+if subcmd not in commands_contract:
+    sys.stderr.write(f"No such command '{{subcmd}}' in {{contract['cli']}} {{contract['version']}}.\\n")
+    raise SystemExit(2)
+
+allowed_opts = set(commands_contract[subcmd]["options"])
+VALUE_OPTS_BY_CMD = {{
+    "new": {{"-s", "--session", "--gpu", "--tpu"}},
+    "exec": {{"-s", "--session", "-f", "--file", "--timeout", "--env", "--output-image"}},
+    "upload": {{"-s", "--session"}},
+    "download": {{"-s", "--session"}},
+    "stop": {{"-s", "--session"}},
+    "sessions": set(),
+    "usage": set(),
+    "status": {{"-s", "--session"}},
+}}
+value_opts = VALUE_OPTS_BY_CMD.get(subcmd, set())
+
+parsed_opts: dict[str, list[str]] = {{}}
+positionals: list[str] = []
+i = 0
+while i < len(args):
+    tok = args[i]
+    if tok == "--":
+        sys.stderr.write(f"colab {{subcmd}} --: not an option of {{contract['cli']}} {{contract['version']}} (trailing shell commands are rejected)\\n")
+        raise SystemExit(2)
+    if tok.startswith("-") and len(tok) > 1:
+        if "=" in tok:
+            opt_name, opt_val = tok.split("=", 1)
+            if opt_name not in allowed_opts:
+                sys.stderr.write(f"colab {{subcmd}} {{opt_name}}: not an option of {{contract['cli']}} {{contract['version']}} (allowed: {{' '.join(sorted(allowed_opts))}})\\n")
+                raise SystemExit(2)
+            parsed_opts.setdefault(opt_name, []).append(opt_val)
+            i += 1
+        else:
+            opt_name = tok
+            if opt_name not in allowed_opts:
+                sys.stderr.write(f"colab {{subcmd}} {{opt_name}}: not an option of {{contract['cli']}} {{contract['version']}} (allowed: {{' '.join(sorted(allowed_opts))}})\\n")
+                raise SystemExit(2)
+            if opt_name in value_opts:
+                if i + 1 >= len(args):
+                    sys.stderr.write(f"Option '{{opt_name}}' requires an argument.\\n")
+                    raise SystemExit(2)
+                parsed_opts.setdefault(opt_name, []).append(args[i + 1])
+                i += 2
+            else:
+                parsed_opts.setdefault(opt_name, []).append("true")
+                i += 1
+    else:
+        positionals.append(tok)
+        i += 1
+
+def _get_opt(*names: str) -> str | None:
+    for n in names:
+        vals = parsed_opts.get(n)
+        if vals:
+            return vals[-1]
+    return None
 
 # Check whether the open lock is currently held by the caller
 lock_held = False
@@ -378,7 +466,15 @@ if lock_file.exists():
     except Exception:
         lock_held = False
 
-record = {"subcmd": subcmd, "args": args, "lock_held": lock_held, "ts": time.time()}
+reconcile_locks_present = sorted(p.name for p in reconcile_lock_dir.glob("*.lock")) if reconcile_lock_dir.is_dir() else []
+
+record = {{
+    "subcmd": subcmd,
+    "args": args,
+    "lock_held": lock_held,
+    "reconcile_locks": reconcile_locks_present,
+    "ts": time.time(),
+}}
 with calls_log.open("a", encoding="utf-8", newline="\\n") as fh:
     fh.write(json.dumps(record) + "\\n")
 
@@ -387,75 +483,155 @@ sys.stderr.write("debug proxy https://colab.research.google.com/?colab-runtime-p
 
 sessions = json.loads(sessions_file.read_text(encoding="utf-8"))
 
-if subcmd == "ls":
-    print(json.dumps(sessions))
+if subcmd == "sessions":
+    if positionals:
+        sys.stderr.write(f"Got unexpected extra arguments ({{' '.join(positionals)}})\\n")
+        raise SystemExit(2)
+    for s in sessions:
+        sid = s.get("session_id", "?")
+        gpu = s.get("gpu", "CPU")
+        print(f"[{{sid}}] m-s-fake-{{sid}} | {{gpu}}")
     raise SystemExit(0)
 
 if subcmd == "new":
-    sid = "sess-udlab-test-001"
-    gpu = "CPU"
-    if "--gpu" in args:
-        idx = args.index("--gpu")
-        if idx + 1 < len(args):
-            gpu = args[idx + 1]
-    sessions.append({"session_id": sid, "gpu": gpu})
+    if positionals:
+        sys.stderr.write(f"Got unexpected extra arguments ({{' '.join(positionals)}})\\n")
+        raise SystemExit(2)
+    sid = _get_opt("-s", "--session") or "sess-udlab-test-001"
+    gpu = _get_opt("--gpu") or "CPU"
+    sessions.append({{"session_id": sid, "gpu": gpu}})
     sessions_file.write_text(json.dumps(sessions), encoding="utf-8", newline="\\n")
-    print(json.dumps({"session_id": sid, "gpu": gpu}))
+    print(f"Created session [{{sid}}] ({{gpu}})")
     raise SystemExit(0)
 
-if subcmd == "cp":
-    # colab cp -s <S> <src> <dst>
-    s_idx = args.index("-s")
-    sid = args[s_idx + 1]
-    src = args[s_idx + 2]
-    dst = args[s_idx + 3]
-    if src.startswith("/content/"):
-        if not any(s.get("session_id") == sid for s in sessions):
+if subcmd == "upload":
+    sid = _get_opt("-s", "--session")
+    if not sid or len(positionals) != 2:
+        sys.stderr.write("Usage: colab upload -s SESSION <local_path> <remote_path>\\n")
+        raise SystemExit(2)
+    src, dst = positionals[0], positionals[1]
+    if not any(s.get("session_id") == sid for s in sessions):
+        sys.stderr.write(f"Session {{sid}} not found\\n")
+        raise SystemExit(1)
+    if not dst.startswith("/content/"):
+        sys.stderr.write(f"Remote path must be under /content/: {{dst}}\\n")
+        raise SystemExit(1)
+    vm_dst = vm_fs / dst.removeprefix("/content/")
+    vm_dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, vm_dst)
+    print(f"Uploaded {{src}} -> {{dst}}")
+    raise SystemExit(0)
+
+if subcmd == "download":
+    sid = _get_opt("-s", "--session")
+    if not sid or len(positionals) != 2:
+        sys.stderr.write("Usage: colab download -s SESSION <remote_path> <local_path>\\n")
+        raise SystemExit(2)
+    src, dst = positionals[0], positionals[1]
+    if not any(s.get("session_id") == sid for s in sessions):
+        sys.stderr.write(f"Session {{sid}} not found\\n")
+        raise SystemExit(1)
+    if not src.startswith("/content/"):
+        sys.stderr.write(f"Remote path must be under /content/: {{src}}\\n")
+        raise SystemExit(1)
+    vm_src = vm_fs / src.removeprefix("/content/")
+    fetch_sleep_s = float(os.environ.get("FAKE_COLAB_FETCH_SLEEP", "0"))
+    if fetch_sleep_s > 0 and src == "/content/result.tar.gz":
+        if vm_src.is_file():
+            raw_bytes = vm_src.read_bytes()
+            Path(dst).parent.mkdir(parents=True, exist_ok=True)
+            Path(dst).write_bytes(raw_bytes[: max(1, len(raw_bytes) // 2)])
+        time.sleep(fetch_sleep_s)
+        sessions_now = json.loads(sessions_file.read_text(encoding="utf-8"))
+        if not any(s.get("session_id") == sid for s in sessions_now):
             raise SystemExit(1)
-        vm_src = vm_fs / src.removeprefix("/content/")
-        fetch_sleep_s = float(os.environ.get("FAKE_COLAB_FETCH_SLEEP", "0"))
-        if fetch_sleep_s > 0 and src == "/content/result.tar.gz":
-            if vm_src.is_file():
-                raw_bytes = vm_src.read_bytes()
-                Path(dst).parent.mkdir(parents=True, exist_ok=True)
-                Path(dst).write_bytes(raw_bytes[: max(1, len(raw_bytes) // 2)])
-            time.sleep(fetch_sleep_s)
-            sessions_now = json.loads(sessions_file.read_text(encoding="utf-8"))
-            if not any(s.get("session_id") == sid for s in sessions_now):
-                raise SystemExit(1)
-        elif fetch_sleep_s > 0:
-            time.sleep(fetch_sleep_s)
-        if not vm_src.is_file():
-            raise SystemExit(1)
-        Path(dst).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(vm_src, dst)
-    elif dst.startswith("/content/"):
-        vm_dst = vm_fs / dst.removeprefix("/content/")
-        vm_dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, vm_dst)
+    elif fetch_sleep_s > 0:
+        time.sleep(fetch_sleep_s)
+    if not vm_src.is_file():
+        sys.stderr.write(f"Remote file not found: {{src}}\\n")
+        raise SystemExit(1)
+    Path(dst).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(vm_src, dst)
+    print(f"Downloaded {{src}} -> {{dst}}")
     raise SystemExit(0)
 
 if subcmd == "exec":
-    s_idx = args.index("-s")
-    sid = args[s_idx + 1]
-    sep_idx = args.index("--")
-    remote_cmd = " ".join(args[sep_idx + 1:])
-    mapped_cmd = remote_cmd.replace("/content", str(vm_fs))
+    if positionals:
+        sys.stderr.write(f"colab exec does not take positional shell arguments ({{' '.join(positionals)}})\\n")
+        raise SystemExit(2)
+    sid = _get_opt("-s", "--session")
+    py_file = _get_opt("-f", "--file")
+    if not sid or not py_file:
+        sys.stderr.write("colab exec requires -s/--session and -f/--file\\n")
+        raise SystemExit(2)
+    if not any(s.get("session_id") == sid for s in sessions):
+        sys.stderr.write(f"Session {{sid}} not found\\n")
+        raise SystemExit(1)
+    py_path = Path(py_file)
+    if not py_path.is_file() or py_path.suffix != ".py":
+        sys.stderr.write(f"colab exec -f must point to an existing Python (.py) file: {{py_file}}\\n")
+        raise SystemExit(2)
+    timeout_raw = _get_opt("--timeout")
+    timeout_s = float(timeout_raw) if timeout_raw is not None else 30.0
+    if timeout_s <= 0:
+        sys.stderr.write(f"Invalid --timeout={{timeout_raw}}\\n")
+        raise SystemExit(2)
+
+    exec_env = os.environ.copy()
+    for kv in parsed_opts.get("--env", []):
+        if "=" not in kv:
+            sys.stderr.write(f"Invalid --env value (expected KEY=VALUE): {{kv}}\\n")
+            raise SystemExit(2)
+        k, v = kv.split("=", 1)
+        if v.startswith("/content/"):
+            v = str(vm_fs / v.removeprefix("/content/"))
+        elif v == "/content":
+            v = str(vm_fs)
+        exec_env[k] = v
+
     sleep_s = float(os.environ.get("FAKE_COLAB_EXEC_SLEEP", "0"))
-    if "vm_udlab.py" in mapped_cmd and sleep_s > 0:
-        time.sleep(sleep_s)
-    proc = subprocess.run(["bash", "-c", mapped_cmd], check=False)
+    step = exec_env.get("UDLAB_STEP", "run")
+    try:
+        if step == "run" and sleep_s > 0:
+            if sleep_s > timeout_s:
+                time.sleep(timeout_s)
+                sys.stderr.write(f"Execution timed out after {{timeout_s}}s\\n")
+                raise SystemExit(124)
+            time.sleep(sleep_s)
+        proc = subprocess.run(
+            ["python3", str(py_path)],
+            env=exec_env,
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(f"Execution timed out after {{timeout_s}}s\\n")
+        raise SystemExit(124)
     raise SystemExit(proc.returncode)
 
 if subcmd == "stop":
-    s_idx = args.index("-s")
-    sid = args[s_idx + 1]
+    if positionals:
+        sys.stderr.write(f"Got unexpected extra arguments ({{' '.join(positionals)}})\\n")
+        raise SystemExit(2)
+    sid = _get_opt("-s", "--session")
+    if not sid:
+        sys.stderr.write("colab stop requires -s/--session\\n")
+        raise SystemExit(2)
     stopped_file = state_dir / "stopped_sessions.jsonl"
     with stopped_file.open("a", encoding="utf-8", newline="\\n") as fh:
-        fh.write(json.dumps({"session_id": sid, "ts": time.time()}) + "\\n")
+        fh.write(json.dumps({{"session_id": sid, "ts": time.time()}}) + "\\n")
     sessions = [s for s in sessions if s.get("session_id") != sid]
     sessions_file.write_text(json.dumps(sessions), encoding="utf-8", newline="\\n")
-    print(json.dumps({"stopped": sid}))
+    print(f"Stopped session [{{sid}}]")
+    raise SystemExit(0)
+
+if subcmd == "status":
+    sid = _get_opt("-s", "--session")
+    print(f"Session [{{sid or '?'}}] Status: IDLE")
+    raise SystemExit(0)
+
+if subcmd == "usage":
+    print("Compute units balance: 100.0 | Usage rate: 0.08/hr | Active assignments: 1")
     raise SystemExit(0)
 
 raise SystemExit(2)
@@ -472,10 +648,13 @@ raise SystemExit(2)
     )
     fake_colab_sh.chmod(fake_colab_sh.stat().st_mode | stat.S_IEXEC)
 
+    os.environ["COLAB_RECONCILE_SH"] = _to_wsl_path(state_dir / "nonexistent_reconcile.sh")
+
     return {
         "fake_bin": fake_bin,
         "sentinel_bin": sentinel_bin,
         "state_dir": state_dir,
+        "colab_locks_dir": colab_locks_dir,
         "sentinel_called": sentinel_called,
         "calls_log": state_dir / "calls.jsonl",
         "sessions_file": sessions_file,
@@ -492,6 +671,7 @@ def test_launch_sh_stub_trap_ordering_and_outcome_with_fake_colab(tmp_path: Path
     wsl_fake_bin = _to_wsl_path(env_paths["fake_bin"])
     wsl_sentinel_bin = _to_wsl_path(env_paths["sentinel_bin"])
     wsl_state_dir = _to_wsl_path(env_paths["state_dir"])
+    wsl_locks_dir = _to_wsl_path(env_paths["colab_locks_dir"])
     wsl_prompts_dir = _to_wsl_path(prompts_dir)
     wsl_index_json = _to_wsl_path(index_json)
     wsl_out_dir = _to_wsl_path(out_dir)
@@ -501,6 +681,7 @@ def test_launch_sh_stub_trap_ordering_and_outcome_with_fake_colab(tmp_path: Path
     cmd = (
         f"export PATH='{wsl_fake_bin}:{wsl_sentinel_bin}':\"$PATH\"; "
         f"export FAKE_COLAB_STATE_DIR='{wsl_state_dir}'; "
+        f"export COLAB_LOCK_DIR='{wsl_locks_dir}'; "
         f"export UDLAB_OPEN_LOCK='{wsl_lock_file}'; "
         f"export UDLAB_EXACT_CTX_PROMPTS='{wsl_prompts_dir}'; "
         f"export UDLAB_EXACT_CTX_INDEX='{wsl_index_json}'; "
@@ -526,12 +707,17 @@ def test_launch_sh_stub_trap_ordering_and_outcome_with_fake_colab(tmp_path: Path
     new_call = next(c for c in calls if c["subcmd"] == "new")
     assert new_call["lock_held"] is True
 
-    # Result fetch (`cp` from /content/result.tar.gz) happened BEFORE `stop`
+    # Reconciler lock was present during gate exec and removed after stop
+    gate_call = next(c for c in calls if c["subcmd"] == "exec")
+    assert "udlab-test-stub-window.lock" in gate_call["reconcile_locks"]
+    assert not (env_paths["colab_locks_dir"] / "udlab-test-stub-window.lock").exists()
+
+    # Result fetch (`download` from /content/result.tar.gz) happened BEFORE `stop`
     stop_idx = next(i for i, c in enumerate(calls) if c["subcmd"] == "stop")
     fetch_idx = next(
         i
         for i, c in enumerate(calls)
-        if c["subcmd"] == "cp" and "/content/result.tar.gz" in c["args"]
+        if c["subcmd"] == "download" and "/content/result.tar.gz" in c["args"]
     )
     assert fetch_idx < stop_idx
 
@@ -540,7 +726,7 @@ def test_launch_sh_stub_trap_ordering_and_outcome_with_fake_colab(tmp_path: Path
         json.loads(line)["session_id"]
         for line in env_paths["stopped_file"].read_text(encoding="utf-8").splitlines()
     ]
-    assert stopped == ["sess-udlab-test-001"]
+    assert stopped == ["udlab-test-stub-window"]
     remaining_sessions = json.loads(env_paths["sessions_file"].read_text(encoding="utf-8"))
     assert [s["session_id"] for s in remaining_sessions] == ["sess-neighbour-keep"]
 
@@ -598,7 +784,7 @@ def test_launch_sh_trap_stops_session_on_refusal_failure(tmp_path: Path) -> None
         json.loads(line)["session_id"]
         for line in env_paths["stopped_file"].read_text(encoding="utf-8").splitlines()
     ]
-    assert stopped == ["sess-udlab-test-001"]
+    assert stopped == ["udlab-test-gpu-refusal"]
     remaining_sessions = json.loads(env_paths["sessions_file"].read_text(encoding="utf-8"))
     assert [s["session_id"] for s in remaining_sessions] == ["sess-neighbour-keep"]
 
@@ -645,7 +831,7 @@ def test_launch_sh_wall_timeout_stops_own_session_and_writes_outcome(tmp_path: P
         json.loads(line)["session_id"]
         for line in env_paths["stopped_file"].read_text(encoding="utf-8").splitlines()
     ]
-    assert "sess-udlab-test-001" in stopped
+    assert "udlab-test-wall-timeout" in stopped
     remaining_sessions = json.loads(env_paths["sessions_file"].read_text(encoding="utf-8"))
     assert [s["session_id"] for s in remaining_sessions] == ["sess-neighbour-keep"]
 
@@ -1260,7 +1446,7 @@ def test_finding4_watchdog_fetches_before_stop_and_bounds_hanging_fetch(tmp_path
     fetch_idx = next(
         i
         for i, c in enumerate(calls)
-        if c["subcmd"] == "cp" and "/content/result.tar.gz" in c["args"]
+        if c["subcmd"] == "download" and "/content/result.tar.gz" in c["args"]
     )
     stop_idx = next(i for i, c in enumerate(calls) if c["subcmd"] == "stop")
     assert fetch_idx < stop_idx, f"Expected fetch before stop in watchdog, got calls={calls}"
@@ -1295,7 +1481,7 @@ def test_finding4_watchdog_fetches_before_stop_and_bounds_hanging_fetch(tmp_path
     fetch_hang_idx = next(
         i
         for i, c in enumerate(calls_hang)
-        if c["subcmd"] == "cp" and "/content/result.tar.gz" in c["args"]
+        if c["subcmd"] == "download" and "/content/result.tar.gz" in c["args"]
     )
     stop_hang_idx = next(i for i, c in enumerate(calls_hang) if c["subcmd"] == "stop")
     assert fetch_hang_idx < stop_hang_idx
@@ -1303,7 +1489,7 @@ def test_finding4_watchdog_fetches_before_stop_and_bounds_hanging_fetch(tmp_path
         json.loads(line)["session_id"]
         for line in env_paths_hang["stopped_file"].read_text(encoding="utf-8").splitlines()
     ]
-    assert "sess-udlab-test-001" in stopped_hang
+    assert "udlab-test-f4-hang" in stopped_hang
 
 
 def test_finding5_disk_space_check_refuses_below_40gib_and_records_in_receipt(
@@ -1419,11 +1605,11 @@ def test_fetch_race_watchdog_waits_for_in_progress_main_fetch_before_stop(
         json.loads(line)
         for line in env_paths["calls_log"].read_text(encoding="utf-8").splitlines()
     ]
-    result_tar_cp_calls = [
-        c for c in calls if c["subcmd"] == "cp" and "/content/result.tar.gz" in c["args"]
+    result_tar_dl_calls = [
+        c for c in calls if c["subcmd"] == "download" and "/content/result.tar.gz" in c["args"]
     ]
     # Exactly one fetch of result.tar.gz runs
-    assert len(result_tar_cp_calls) == 1
+    assert len(result_tar_dl_calls) == 1
 
     # Watchdog fired while main fetch was in progress, waited for FETCH_DONE, then stopped
     cli_log_text = (out_dir / "colab-cli.log").read_text(encoding="utf-8")
@@ -1440,6 +1626,303 @@ def test_fetch_race_watchdog_waits_for_in_progress_main_fetch_before_stop(
     assert "vm_receipt.json" in tar_members
     assert "generations.jsonl" in tar_members
     assert proc.returncode == 0
+
+
+_CONTRACT_STOP_TOKENS = {"|", "||", "&&", ";", ">", ">>", "2>&1", ")", "&"}
+_CONTRACT_VALUE_OPTS_BY_CMD: dict[str, set[str]] = {
+    "new": {"-s", "--session", "--gpu", "--tpu"},
+    "exec": {"-s", "--session", "-f", "--file", "--timeout", "--env", "--output-image"},
+    "upload": {"-s", "--session"},
+    "download": {"-s", "--session"},
+    "stop": {"-s", "--session"},
+    "sessions": set(),
+    "usage": set(),
+    "status": {"-s", "--session"},
+}
+
+
+def _shlex_tokens(line: str) -> list[str]:
+    import re
+    import shlex
+
+    # Strip outer assignment quotes around $(...) so inner `colab`/`run_colab` calls are tokenized
+    unwrapped = re.sub(r'([A-Za-z_][A-Za-z0-9_]*=)"\$\((.*)\)"', r"\1 \2", line)
+    unwrapped = re.sub(r"\$\(([^()]*)\)", r" \1 ", unwrapped)
+    lex = shlex.shlex(unwrapped, posix=True, punctuation_chars="|&;<>()")
+    lex.whitespace_split = True
+    try:
+        return list(lex)
+    except ValueError:
+        return unwrapped.split()
+
+
+def extract_and_check_colab_invocations(
+    script_text: str,
+    contract_data: dict[str, object] | None = None,
+    script_name: str = "launch.sh",
+) -> tuple[list[tuple[int, str, list[str]]], list[str]]:
+    """Extract every `colab ...` or `run_colab ...` invocation from a bash script and check against contract."""
+    import re
+
+    if contract_data is None:
+        contract_data = json.loads(CLI_CONTRACT_JSON.read_text(encoding="utf-8"))
+    commands = contract_data["commands"]  # type: ignore[index]
+    cli_name = contract_data["cli"]  # type: ignore[index]
+    cli_ver = contract_data["version"]  # type: ignore[index]
+
+    array_flags: set[str] = set()
+    for m in re.finditer(r"COLAB_NEW_FLAGS=\(([^)]*)\)", script_text):
+        array_flags.update(t for t in m.group(1).split() if t.startswith("-"))
+    for m in re.finditer(r"EXEC_ENV_ARGS\+?=\(([^)]*)\)", script_text, flags=re.S):
+        array_flags.update(
+            t.split("=", 1)[0]
+            for t in _shlex_tokens(m.group(1))
+            if t.startswith("-") and len(t) > 1
+        )
+
+    extracted: list[tuple[int, str, list[str]]] = []
+    errors: list[str] = []
+
+    joined = re.sub(r"\\\n", " ", script_text)
+    for lineno, raw_line in enumerate(joined.splitlines(), start=1):
+        stripped = raw_line.lstrip()
+        if stripped.startswith("#") or stripped.startswith("printf ") or stripped.startswith("echo "):
+            continue
+        code = raw_line.split("#", 1)[0]
+        toks = _shlex_tokens(code)
+        for i, tok in enumerate(toks):
+            if tok not in ("colab", "run_colab", "cli"):
+                continue
+            if i + 1 >= len(toks):
+                continue
+            nxt = toks[i + 1]
+            if nxt in ("()", "$@", '"$@"') or (i > 0 and toks[i - 1] == "function"):
+                continue
+            if not re.fullmatch(r"[a-z][a-z0-9-]*", nxt):
+                continue
+            subcmd = nxt
+            rest = toks[i + 2:]
+            opts: list[str] = []
+            value_opts = _CONTRACT_VALUE_OPTS_BY_CMD.get(subcmd, set())
+            skip_next = False
+            for r in rest:
+                if r in _CONTRACT_STOP_TOKENS:
+                    break
+                if skip_next:
+                    skip_next = False
+                    continue
+                if "COLAB_NEW_FLAGS" in r or "EXEC_ENV_ARGS" in r or r == "$NEW_ARGS":
+                    for af in sorted(array_flags):
+                        if subcmd == "new" and af in ("--gpu", "--high-mem", "--tpu", "-s", "--session"):
+                            opts.append(af)
+                        elif subcmd == "exec" and af in ("--env", "-f", "--file", "--timeout", "-s", "--session"):
+                            opts.append(af)
+                    continue
+                if r == "--":
+                    opts.append("--")
+                    break
+                if r.startswith("-") and len(r) > 1:
+                    opt_name = r.split("=", 1)[0]
+                    opts.append(opt_name)
+                    if "=" not in r and opt_name in value_opts:
+                        skip_next = True
+                elif (
+                    re.fullmatch(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", r)
+                    and subcmd not in ("upload", "download", "cp")
+                    and r not in ("$live", "$S", "$SESSION_NAME", "$1")
+                ):
+                    errors.append(
+                        f"{script_name}:{lineno}: colab {subcmd} {r}: unchecked variable in option position"
+                    )
+            extracted.append((lineno, subcmd, opts))
+            if subcmd not in commands:
+                errors.append(f"{script_name}:{lineno}: colab {subcmd} is not in the contract")
+                continue
+            allowed = set(commands[subcmd]["options"])
+            for o in opts:
+                if o not in allowed:
+                    errors.append(
+                        f"{script_name}:{lineno}: colab {subcmd} {o}: not an option of {cli_name} {cli_ver} "
+                        f"(allowed: {' '.join(sorted(allowed))})"
+                    )
+    return extracted, errors
+
+
+def test_colab_cli_contract_file_sha256_and_static_invocation_check() -> None:
+    assert CLI_CONTRACT_JSON.is_file()
+    assert vm_udlab.sha256_file(CLI_CONTRACT_JSON) == CLI_CONTRACT_SHA256
+
+    # 1. Verify current launch.sh passes static contract check with zero errors
+    script_text = LAUNCH_SH.read_text(encoding="utf-8")
+    extracted, errors = extract_and_check_colab_invocations(script_text)
+    assert errors == [], f"Static CLI contract errors in launch.sh: {errors}"
+    subcmds_used = {sub for _, sub, _ in extracted}
+    assert {"sessions", "new", "exec", "upload", "download", "stop"}.issubset(subcmds_used)
+    assert "cp" not in subcmds_used
+    assert "ls" not in subcmds_used
+
+    # 2. Verify the static checker fails on fix-3's invalid calls: cp, ls --json, new --json, exec --
+    legacy_snippet = "\n".join(
+        [
+            'colab cp -s "$1" "/content/result.tar.gz" "$2/result.tar.gz"',
+            'run_colab cp -s "$S" "/content/result.tar.gz" "$OUT_DIR/result.tar.gz"',
+            'PRE_LS="$(run_colab ls --json || echo "[]")"',
+            'NEW_OUT="$(run_colab new "${COLAB_NEW_FLAGS[@]+"${COLAB_NEW_FLAGS[@]}"}" --json)"',
+            'GATE_OUT="$(run_colab exec -s "$S" -- "echo VM_GATE_OK && uname -a")"',
+            'colab exec -s "$S" -- "timeout --signal=TERM --kill-after=30 ${WALL_SECONDS}s python3 /content/udlab/scripts/colab/vm_udlab.py"',
+        ]
+    )
+    _, legacy_errors = extract_and_check_colab_invocations(legacy_snippet, script_name="legacy_launch.sh")
+    assert any("colab cp is not in the contract" in e for e in legacy_errors)
+    assert any("colab ls is not in the contract" in e for e in legacy_errors)
+    assert any("colab new --json: not an option" in e for e in legacy_errors)
+    assert any("colab exec --: not an option" in e for e in legacy_errors)
+
+
+def test_fake_colab_enforces_contract_and_rejects_unknown_commands_and_flags(tmp_path: Path) -> None:
+    env_paths = _setup_fake_colab_env(tmp_path)
+    wsl_fake_colab = _to_wsl_path(env_paths["fake_bin"] / "colab")
+    wsl_state_dir = _to_wsl_path(env_paths["state_dir"])
+    wsl_lock_file = _to_wsl_path(tmp_path / "open.lock")
+
+    def _run_fake(args_str: str) -> subprocess.CompletedProcess[str]:
+        cmd = (
+            f"export FAKE_COLAB_STATE_DIR='{wsl_state_dir}'; "
+            f"export UDLAB_OPEN_LOCK='{wsl_lock_file}'; "
+            f"'{wsl_fake_colab}' {args_str}"
+        )
+        return subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+
+    # Rejects unknown subcommand `cp`
+    res_cp = _run_fake("cp -s udlab-1 /content/a /tmp/b")
+    assert res_cp.returncode != 0
+    assert "No such command 'cp'" in res_cp.stderr
+
+    # Rejects `ls --json`
+    res_ls = _run_fake("ls --json")
+    assert res_ls.returncode != 0
+    assert "No such command 'ls'" in res_ls.stderr
+
+    # Rejects `new --json`
+    res_new_json = _run_fake("new -s udlab-1 --json")
+    assert res_new_json.returncode != 0
+    assert "colab new --json: not an option" in res_new_json.stderr
+
+    # Open a valid session so we can test `exec` rejections and timeout semantics
+    res_new_ok = _run_fake("new -s udlab-1")
+    assert res_new_ok.returncode == 0
+
+    # Rejects `exec` with `--` trailing shell command
+    res_exec_dash = _run_fake("exec -s udlab-1 -- 'echo hi'")
+    assert res_exec_dash.returncode != 0
+    assert "colab exec --: not an option" in res_exec_dash.stderr
+
+    # Rejects `exec` without `-f`
+    res_exec_nof = _run_fake("exec -s udlab-1 --timeout 10")
+    assert res_exec_nof.returncode != 0
+    assert "requires -s/--session and -f/--file" in res_exec_nof.stderr
+
+    # Enforces `--timeout` semantics on `exec -f <pyfile>`
+    slow_py = tmp_path / "slow_job.py"
+    slow_py.write_text("import time\ntime.sleep(5)\n", encoding="utf-8", newline="\n")
+    res_exec_timeout = _run_fake(f"exec -s udlab-1 -f '{_to_wsl_path(slow_py)}' --timeout 0.2")
+    assert res_exec_timeout.returncode == 124
+    assert "timed out" in res_exec_timeout.stderr
+
+
+def test_launch_sh_dry_mode_prints_expected_command_sequence_without_secrets(tmp_path: Path) -> None:
+    env_paths = _setup_fake_colab_env(tmp_path)
+    out_dir = tmp_path / "dry_out"
+    wsl_launch = _to_wsl_path(LAUNCH_SH)
+    wsl_out_dir = _to_wsl_path(out_dir)
+    wsl_vm_py = _to_wsl_path(VM_UDLAB_PY)
+
+    # 1. Stub mode dry output
+    cmd_stub = (
+        f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"bash '{wsl_launch}' --stub --dry --out-dir '{wsl_out_dir}' --run-id dry-stub-01"
+    )
+    proc_stub = subprocess.run(["bash", "-c", cmd_stub], capture_output=True, text=True, check=False)
+    assert proc_stub.returncode == 0, proc_stub.stderr
+    assert not env_paths["sentinel_called"].exists()
+    assert not env_paths["calls_log"].exists()
+
+    lines_stub = [ln.strip() for ln in proc_stub.stdout.splitlines() if ln.strip()]
+    assert lines_stub == [
+        "colab sessions",
+        "colab new -s udlab-dry-stub-01",
+        f"colab exec -s udlab-dry-stub-01 --env UDLAB_STEP=gate -f {wsl_vm_py} --timeout 180",
+        f"colab upload -s udlab-dry-stub-01 {wsl_out_dir}/stage/repo_bundle.tar.gz /content/repo_bundle.tar.gz",
+        f"colab upload -s udlab-dry-stub-01 {wsl_out_dir}/stage/exact_ctx_prompts.tar.gz /content/exact_ctx_prompts.tar.gz",
+        (
+            f"colab exec -s udlab-dry-stub-01 --env UDLAB_STEP=run --env UDLAB_MODE=stub --env UDLAB_WRITER=mock "
+            f"--env UDLAB_COUNT=3 --env UDLAB_SEED=5 --env UDLAB_GRANT_ID=cpu-stub-none-no-gpu "
+            f"--env UDLAB_VRAM_HALT_MIB=0 --env UDLAB_WALL_SECONDS=7200 --env UDLAB_REPO_DIR=/content/udlab "
+            f"--env UDLAB_REPO_TAR=/content/repo_bundle.tar.gz --env UDLAB_PROMPTS_DIR=/content/udlab_prompts "
+            f"--env UDLAB_PROMPTS_TAR=/content/exact_ctx_prompts.tar.gz --env UDLAB_RUN_DIR=/content/udlab_run "
+            f"--env UDLAB_RESULT_TAR=/content/result.tar.gz --env UDLAB_RESUME=0 -f {wsl_vm_py} --timeout 7200"
+        ),
+        f"colab download -s udlab-dry-stub-01 /content/result.tar.gz {wsl_out_dir}/result.tar.gz",
+        f"colab download -s udlab-dry-stub-01 /content/udlab_run/vm_receipt.json {wsl_out_dir}/vm_receipt.json",
+        "colab stop -s udlab-dry-stub-01",
+    ]
+
+    # 2. GPU mode dry output
+    cmd_gpu = (
+        f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"bash '{wsl_launch}' --dry --grant-id grant-a100-xyz --out-dir '{wsl_out_dir}' --run-id dry-gpu-01"
+    )
+    proc_gpu = subprocess.run(["bash", "-c", cmd_gpu], capture_output=True, text=True, check=False)
+    assert proc_gpu.returncode == 0, proc_gpu.stderr
+    lines_gpu = [ln.strip() for ln in proc_gpu.stdout.splitlines() if ln.strip()]
+    assert lines_gpu[0] == "colab sessions"
+    assert lines_gpu[1] == "colab new --gpu A100 -s udlab-dry-gpu-01"
+    assert f"-f {wsl_vm_py} --timeout 5400" in lines_gpu[5]
+    assert lines_gpu[-1] == "colab stop -s udlab-dry-gpu-01"
+
+
+def test_launch_sh_session_smoke_mode_with_fake_colab(tmp_path: Path) -> None:
+    env_paths = _setup_fake_colab_env(tmp_path)
+    out_dir = tmp_path / "run_session_smoke"
+    lock_file = tmp_path / "colab-open-smoke.lock"
+    locks_dir = env_paths["colab_locks_dir"]
+
+    cmd = (
+        f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_paths['state_dir'])}'; "
+        f"export COLAB_LOCK_DIR='{_to_wsl_path(locks_dir)}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file)}'; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --session-smoke --out-dir '{_to_wsl_path(out_dir)}' --run-id smoke-01"
+    )
+    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert not env_paths["sentinel_called"].exists()
+
+    calls = [
+        json.loads(line)
+        for line in env_paths["calls_log"].read_text(encoding="utf-8").splitlines()
+    ]
+    # Exact sequence of subcommands: sessions, new, sessions, stop, sessions
+    assert [c["subcmd"] for c in calls] == ["sessions", "new", "sessions", "stop", "sessions"]
+    assert calls[1]["args"] == ["-s", "udlab-smoke-01"]
+    assert calls[1]["lock_held"] is True
+
+    # Lock file was written after `colab new` (visible during second `colab sessions` and `colab stop`)
+    assert "udlab-smoke-01.lock" in calls[2]["reconcile_locks"]
+    assert "udlab-smoke-01.lock" in calls[3]["reconcile_locks"]
+    # And removed in the trap after `colab stop` (absent by the final `colab sessions` and after exit)
+    assert "udlab-smoke-01.lock" not in calls[4]["reconcile_locks"]
+    assert not (locks_dir / "udlab-smoke-01.lock").exists()
+
+    # Neighbour session untouched
+    remaining_sessions = json.loads(env_paths["sessions_file"].read_text(encoding="utf-8"))
+    assert [s["session_id"] for s in remaining_sessions] == ["sess-neighbour-keep"]
+
+    outcome = json.loads((out_dir / "outcome.draft.json").read_text(encoding="utf-8"))
+    assert outcome["id"] == "smoke-01"
+    assert outcome["hardware"] == "CPU"
+    assert outcome["outcome"] == "ok"
+
 
 
 
