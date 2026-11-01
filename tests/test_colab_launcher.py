@@ -410,6 +410,9 @@ if subcmd == "cp":
     src = args[s_idx + 2]
     dst = args[s_idx + 3]
     if src.startswith("/content/"):
+        fetch_sleep_s = float(os.environ.get("FAKE_COLAB_FETCH_SLEEP", "0"))
+        if fetch_sleep_s > 0:
+            time.sleep(fetch_sleep_s)
         vm_src = vm_fs / src.removeprefix("/content/")
         if not vm_src.is_file():
             raise SystemExit(1)
@@ -932,5 +935,375 @@ def test_partial_offload_refusal_on_fake_api_ps(tmp_path: Path) -> None:
     receipt = json.loads((out_dir / "vm_receipt.json").read_text(encoding="utf-8"))
     assert receipt["status"] == "refused"
     assert receipt["failure_class"] == "MODEL_PARTIAL_OFFLOAD"
+
+
+def test_finding1_verify_logs_clean_prompt_line_hashes_refusal_and_pass(tmp_path: Path) -> None:
+    synthetic_prompt = (
+        "short header line\n"
+        "The quick brown fox jumps over the lazy dog near the riverbank every single morning\n"
+        "Another distinct synthetic prompt line with plenty of characters to exceed forty easily\n"
+    )
+    line_hashes = vm_udlab.collect_prompt_line_sha256s(synthetic_prompt)
+    assert len(line_hashes) == 2
+    for h in line_hashes:
+        assert len(h) == 64
+
+    # 1. Log that does NOT contain any prompt line passes
+    clean_log = tmp_path / "clean_no_prompt.log"
+    clean_log.write_text(
+        "2026-11-01T00:00:00Z normal status message with unrelated forty plus characters here\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    vm_udlab.verify_logs_clean([clean_log], prompt_line_hashes=line_hashes)
+
+    # 2. Log containing the whole prompt line (even with extra whitespace) is refused
+    leaked_full_log = tmp_path / "leaked_full.log"
+    leaked_full_log.write_text(
+        "  The   quick brown fox jumps over the lazy dog near the riverbank every single morning  \n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    with pytest.raises(vm_udlab.RefusalError) as exc_full:
+        vm_udlab.verify_logs_clean([leaked_full_log], prompt_line_hashes=line_hashes)
+    assert exc_full.value.failure_class == "LOG_POLICY_VIOLATION"
+
+    # 3. Log containing a 40+ char prompt line as a segment split at sentence punctuation or tab is refused
+    leaked_seg_log = tmp_path / "leaked_segment.log"
+    leaked_seg_log.write_text(
+        "prefix=ok\tAnother distinct synthetic prompt line with plenty of characters to exceed forty easily; suffix=done\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    with pytest.raises(vm_udlab.RefusalError) as exc_seg:
+        vm_udlab.verify_logs_clean([leaked_seg_log], prompt_line_hashes=line_hashes)
+    assert exc_seg.value.failure_class == "LOG_POLICY_VIOLATION"
+
+
+def test_finding2_receipt_records_raw_sha256_deleted_and_absent_verified(tmp_path: Path) -> None:
+    env_paths = _setup_fake_colab_env(tmp_path)
+    fixture_dir = tmp_path / "f2_exact_ctx"
+    prompts_dir = fixture_dir / "prompts"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    counts = vm_udlab.EXPECTED_EXACT_COUNTS
+    entries = []
+    expected_raw_shas: dict[str, str] = {}
+    for idx, expected_count in enumerate(counts):
+        fname = f"synthetic-{idx}.prompt.txt"
+        body_text = (
+            f"synthetic prompt #{idx} for count {expected_count} with a forty-plus character line for hashing check #{idx}\n"
+        )
+        raw_bytes = body_text.encode("utf-8")
+        expected_raw_shas[fname] = hashlib.sha256(raw_bytes).hexdigest()
+        sha = vm_udlab.compute_prompt_messages_sha256(body_text)
+        (prompts_dir / fname).write_bytes(raw_bytes)
+        entries.append(
+            {
+                "run": "synthetic-run",
+                "call_id": f"scen_000{idx}:r0:call_0001",
+                "file": fname,
+                "prompt_sha256": sha,
+                "prompt_eval_count": expected_count,
+                "think": False,
+            }
+        )
+    index_json = fixture_dir / "index.json"
+    index_json.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+    out_dir = tmp_path / "run_f2_receipt"
+    lock_file = tmp_path / "colab-open-f2.lock"
+    cmd = (
+        f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_paths['state_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file)}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{_to_wsl_path(prompts_dir)}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{_to_wsl_path(index_json)}'; "
+        f"export VM_DRYRUN=1; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir)}' --run-id test-f2-receipt"
+    )
+    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert not env_paths["sentinel_called"].exists()
+
+    receipt = json.loads((out_dir / "vm_receipt.json").read_text(encoding="utf-8"))
+    gate_entries = receipt["exact_count_gate"]
+    assert len(gate_entries) == 4
+    for entry in gate_entries:
+        fname = entry["file"]
+        assert entry["raw_file_sha256"] == expected_raw_shas[fname]
+        assert len(entry["prompt_sha256"]) == 64
+        assert entry["raw_file_sha256"] != entry["prompt_sha256"]
+        assert entry["deleted"] is True
+        assert entry["absent_verified"] is True
+    assert len(receipt["prompt_line_sha256s"]) == 4
+
+
+def test_finding3a_prompts_extracted_just_before_gate_and_deleted_on_early_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+    prompts_tar = tmp_path / "exact_ctx_prompts.tar.gz"
+    with tarfile.open(prompts_tar, "w:gz") as tf:
+        for p in sorted(prompts_dir.glob("*.prompt.txt")):
+            tf.add(p, arcname=p.name, recursive=False)
+
+    vm_prompts_dir = tmp_path / "vm_prompts"
+    run_dir = tmp_path / "vm_run"
+    work_dir = tmp_path / "vm_work"
+    models_root = tmp_path / "vm_models"
+    result_tar = tmp_path / "result.tar.gz"
+
+    # Simulate an early non-refusal failure in install_pinned_ollama before the gate:
+    # prompts_dir must never have .prompt.txt files extracted during install, and
+    # prompts_tar + prompts_dir must be cleaned up by the top-level finally block.
+    prompts_seen_during_install: list[Path] = []
+
+    def _boom_install(w_dir: Path, log_fh: object) -> tuple[str, str]:
+        if vm_prompts_dir.exists():
+            prompts_seen_during_install.extend(vm_prompts_dir.glob("*.prompt.txt"))
+        raise subprocess.CalledProcessError(100, ["apt-get", "update"])
+
+    monkeypatch.setattr(vm_udlab, "install_pinned_ollama", _boom_install)
+
+    rc = vm_udlab.main(
+        [
+            "--mode",
+            "stub",
+            "--writer",
+            "mock",
+            "--grant-id",
+            "test-grant",
+            "--vram-halt-mib",
+            "0",
+            "--wall-seconds",
+            "60",
+            "--repo-dir",
+            str(REPO_ROOT),
+            "--index-path",
+            str(index_json),
+            "--prompts-dir",
+            str(vm_prompts_dir),
+            "--prompts-tar",
+            str(prompts_tar),
+            "--run-dir",
+            str(run_dir),
+            "--work-dir",
+            str(work_dir),
+            "--models-root",
+            str(models_root),
+            "--result-tar",
+            str(result_tar),
+        ]
+    )
+    assert rc == 2
+    assert prompts_seen_during_install == []
+    assert not prompts_tar.exists()
+    assert not list(vm_prompts_dir.glob("*.prompt.txt")) if vm_prompts_dir.exists() else True
+
+
+def test_finding3b_unexpected_exception_writes_refusal_receipt_and_result_tar(
+    tmp_path: Path,
+) -> None:
+    env_paths = _setup_fake_colab_env(tmp_path)
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+    out_dir = tmp_path / "run_f3b_unexpected"
+    lock_file = tmp_path / "colab-open-f3b.lock"
+
+    secret_leak_msg = "secret_path=/root/private_token_xyz colab-runtime-proxy-token=LEAK999"
+    cmd = (
+        f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_paths['state_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file)}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{_to_wsl_path(prompts_dir)}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{_to_wsl_path(index_json)}'; "
+        f"export VM_DRYRUN=1; "
+        f"export UDLAB_DRYRUN_INJECT_UNEXPECTED='{secret_leak_msg}'; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir)}' --run-id test-f3b-unexpected"
+    )
+    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    assert proc.returncode == 2
+    assert not env_paths["sentinel_called"].exists()
+
+    # Receipt and result.tar.gz must both be fetched back to out_dir
+    assert (out_dir / "vm_receipt.json").is_file()
+    assert (out_dir / "result.tar.gz").is_file()
+    receipt = json.loads((out_dir / "vm_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["status"] == "refused"
+    assert receipt["failure_class"] == "UNEXPECTED_ERROR"
+    assert receipt["step"] == "dryrun_pipeline"
+    assert receipt["exception_type"] == "RuntimeError"
+    # Exception message text must NOT be recorded in receipt or logs
+    receipt_raw = (out_dir / "vm_receipt.json").read_text(encoding="utf-8")
+    assert "private_token_xyz" not in receipt_raw
+    assert "LEAK999" not in receipt_raw
+
+    tar_members = vm_udlab.validate_tar_file(out_dir / "result.tar.gz")
+    assert "vm_receipt.json" in tar_members
+    assert "logs/vm.log" in tar_members
+
+    # Prompts on the fake VM were cleaned up
+    vm_fs = env_paths["state_dir"] / "vm_fs"
+    assert not (vm_fs / "exact_ctx_prompts.tar.gz").exists()
+    assert not list((vm_fs / "udlab_prompts").glob("*.prompt.txt")) if (vm_fs / "udlab_prompts").exists() else True
+
+
+def test_finding4_watchdog_fetches_before_stop_and_bounds_hanging_fetch(tmp_path: Path) -> None:
+    # Part A: Watchdog fires at WALL - FETCH_MARGIN, runs fetch_results_once, then colab stop
+    env_paths = _setup_fake_colab_env(tmp_path)
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+    out_dir = tmp_path / "run_f4_order"
+    lock_file = tmp_path / "colab-open-f4-order.lock"
+
+    cmd = (
+        f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_paths['state_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file)}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{_to_wsl_path(prompts_dir)}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{_to_wsl_path(index_json)}'; "
+        f"export VM_DRYRUN=1; "
+        f"export UDLAB_WALL_SECONDS=2; "
+        f"export UDLAB_FETCH_MARGIN_SECONDS=1; "
+        f"export UDLAB_WATCHDOG_FETCH_TIMEOUT_SECONDS=1; "
+        f"export FAKE_COLAB_EXEC_SLEEP=4; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir)}' --run-id test-f4-order"
+    )
+    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    assert proc.returncode != 0
+    assert not env_paths["sentinel_called"].exists()
+
+    calls = [
+        json.loads(line)
+        for line in env_paths["calls_log"].read_text(encoding="utf-8").splitlines()
+    ]
+    fetch_idx = next(
+        i
+        for i, c in enumerate(calls)
+        if c["subcmd"] == "cp" and "/content/result.tar.gz" in c["args"]
+    )
+    stop_idx = next(i for i, c in enumerate(calls) if c["subcmd"] == "stop")
+    assert fetch_idx < stop_idx, f"Expected fetch before stop in watchdog, got calls={calls}"
+
+    # Part B: Hanging fake fetch is killed by watchdog fetch timeout and session is still stopped
+    env_paths_hang = _setup_fake_colab_env(tmp_path / "hang_case")
+    out_dir_hang = tmp_path / "run_f4_hang"
+    lock_file_hang = tmp_path / "colab-open-f4-hang.lock"
+
+    cmd_hang = (
+        f"export PATH='{_to_wsl_path(env_paths_hang['fake_bin'])}:{_to_wsl_path(env_paths_hang['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_paths_hang['state_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file_hang)}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{_to_wsl_path(prompts_dir)}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{_to_wsl_path(index_json)}'; "
+        f"export VM_DRYRUN=1; "
+        f"export UDLAB_WALL_SECONDS=3; "
+        f"export UDLAB_FETCH_MARGIN_SECONDS=2; "
+        f"export UDLAB_WATCHDOG_FETCH_TIMEOUT_SECONDS=1; "
+        f"export FAKE_COLAB_EXEC_SLEEP=5; "
+        f"export FAKE_COLAB_FETCH_SLEEP=30; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir_hang)}' --run-id test-f4-hang"
+    )
+    proc_hang = subprocess.run(["bash", "-c", cmd_hang], capture_output=True, text=True, check=False)
+    assert proc_hang.returncode != 0
+    assert not env_paths_hang["sentinel_called"].exists()
+
+    calls_hang = [
+        json.loads(line)
+        for line in env_paths_hang["calls_log"].read_text(encoding="utf-8").splitlines()
+    ]
+    fetch_hang_idx = next(
+        i
+        for i, c in enumerate(calls_hang)
+        if c["subcmd"] == "cp" and "/content/result.tar.gz" in c["args"]
+    )
+    stop_hang_idx = next(i for i, c in enumerate(calls_hang) if c["subcmd"] == "stop")
+    assert fetch_hang_idx < stop_hang_idx
+    stopped_hang = [
+        json.loads(line)["session_id"]
+        for line in env_paths_hang["stopped_file"].read_text(encoding="utf-8").splitlines()
+    ]
+    assert "sess-udlab-test-001" in stopped_hang
+
+
+def test_finding5_disk_space_check_refuses_below_40gib_and_records_in_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from collections import namedtuple
+
+    FakeUsage = namedtuple("usage", ["total", "used", "free"])
+
+    # 1. Below 40 GiB refuses with DISK_TOO_SMALL
+    small_free = vm_udlab.MIN_FREE_DISK_BYTES - 1024
+    monkeypatch.setattr(
+        vm_udlab.shutil,
+        "disk_usage",
+        lambda _p: FakeUsage(100 * 1024**3, 61 * 1024**3, small_free),
+    )
+    with pytest.raises(vm_udlab.RefusalError) as exc_disk:
+        vm_udlab.check_model_disk_space(tmp_path / "models")
+    assert exc_disk.value.failure_class == "DISK_TOO_SMALL"
+
+    # 2. At or above 40 GiB passes and is recorded in vm_receipt.json
+    ample_free = 55 * 1024 * 1024 * 1024
+    monkeypatch.setattr(
+        vm_udlab.shutil,
+        "disk_usage",
+        lambda _p: FakeUsage(100 * 1024**3, 45 * 1024**3, ample_free),
+    )
+    assert vm_udlab.check_model_disk_space(tmp_path / "models") == ample_free
+
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+    run_dir = tmp_path / "run_disk_ok"
+    result_tar = tmp_path / "result_disk_ok.tar.gz"
+    rc = vm_udlab.main(
+        [
+            "--mode",
+            "stub",
+            "--writer",
+            "mock",
+            "--grant-id",
+            "test-grant",
+            "--vram-halt-mib",
+            "0",
+            "--wall-seconds",
+            "60",
+            "--repo-dir",
+            str(REPO_ROOT),
+            "--index-path",
+            str(index_json),
+            "--prompts-dir",
+            str(prompts_dir),
+            "--run-dir",
+            str(run_dir),
+            "--models-root",
+            str(tmp_path / "models"),
+            "--result-tar",
+            str(result_tar),
+            "--dryrun",
+        ]
+    )
+    assert rc == 0
+    receipt = json.loads((run_dir / "vm_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["free_disk_bytes"] == ample_free
+
+
+def test_finding6_launch_sh_refuses_drive_path_for_exact_ctx_prompts(tmp_path: Path) -> None:
+    env_paths = _setup_fake_colab_env(tmp_path)
+    out_dir = tmp_path / "run_f6_drive_prompts"
+    lock_file = tmp_path / "colab-open-f6.lock"
+
+    for bad_prompts_path in ("/content/drive/MyDrive/prompts", "/gdrive/MyDrive/prompts"):
+        cmd = (
+            f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+            f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_paths['state_dir'])}'; "
+            f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file)}'; "
+            f"export UDLAB_EXACT_CTX_PROMPTS='{bad_prompts_path}'; "
+            f"export VM_DRYRUN=1; "
+            f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir)}' --run-id test-f6-drive"
+        )
+        proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+        assert proc.returncode == 2
+        assert "FORBIDDEN_STORAGE_PATH" in proc.stderr
+        assert not env_paths["sentinel_called"].exists()
+
 
 

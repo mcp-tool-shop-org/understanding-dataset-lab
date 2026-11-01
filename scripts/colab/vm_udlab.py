@@ -70,6 +70,9 @@ NVIDIA_SMI_QUERY_CMD: tuple[str, ...] = (
 # A change to tests/fixtures/exact_ctx/index.json must update this tuple in the same PR.
 EXPECTED_EXACT_COUNTS: tuple[int, ...] = (3124, 3423, 3393, 3394)
 MAX_LOG_LINE_CHARS = 2000
+MIN_PROMPT_LINE_HASH_CHARS = 40
+LOG_SEGMENT_SPLIT_RE = re.compile(r"(?:[.!?;]|\t)+")
+MIN_FREE_DISK_BYTES = 40 * 1024 * 1024 * 1024  # 40 GiB: 22 GB model + hashing + build
 
 PROXY_TOKEN_RE = re.compile(r"colab-runtime-proxy-token=[^\s\"'&;]+")
 UNREDACTED_PROXY_TOKEN_RE = re.compile(
@@ -142,11 +145,36 @@ def scrub_log_file_in_place(path: Path) -> None:
         path.write_text(scrubbed, encoding="utf-8", newline="\n")
 
 
+def normalize_whitespace_line(text: str) -> str:
+    """Collapse consecutive whitespace to a single space and strip leading/trailing whitespace."""
+    return " ".join(text.split())
+
+
+def collect_prompt_line_sha256s(
+    raw_prompt_text: str,
+    min_chars: int = MIN_PROMPT_LINE_HASH_CHARS,
+) -> list[str]:
+    """Return sorted unique sha256 hex digests of normalized prompt lines >= min_chars."""
+    seen: set[str] = set()
+    for raw_line in raw_prompt_text.splitlines():
+        norm = normalize_whitespace_line(raw_line)
+        if len(norm) >= min_chars:
+            seen.add(hashlib.sha256(norm.encode("utf-8")).hexdigest())
+    return sorted(seen)
+
+
 def verify_logs_clean(
     log_paths: Iterable[Path],
     max_line_chars: int = MAX_LOG_LINE_CHARS,
+    prompt_line_hashes: Iterable[str] | None = None,
+    min_prompt_line_chars: int = MIN_PROMPT_LINE_HASH_CHARS,
 ) -> None:
-    """Fail the window if any log has a line > max_line_chars, response_text, or token."""
+    """Fail the window if any log has a line > max_line_chars, response_text, token, or prompt line hash."""
+    forbidden_hashes: frozenset[str] = (
+        frozenset(h.lower() for h in prompt_line_hashes)
+        if prompt_line_hashes is not None
+        else frozenset()
+    )
     for path in log_paths:
         if not path.is_file():
             continue
@@ -167,6 +195,24 @@ def verify_logs_clean(
                     "LOG_POLICY_VIOLATION",
                     f"{path.name}:{lineno} contains unredacted colab-runtime-proxy-token=",
                 )
+            if forbidden_hashes:
+                norm_line = normalize_whitespace_line(line)
+                if len(norm_line) >= min_prompt_line_chars:
+                    line_sha = hashlib.sha256(norm_line.encode("utf-8")).hexdigest()
+                    if line_sha in forbidden_hashes:
+                        raise RefusalError(
+                            "LOG_POLICY_VIOLATION",
+                            f"{path.name}:{lineno} matches forbidden prompt line sha256 {line_sha[:12]}",
+                        )
+                for seg in LOG_SEGMENT_SPLIT_RE.split(line):
+                    norm_seg = normalize_whitespace_line(seg)
+                    if len(norm_seg) >= min_prompt_line_chars:
+                        seg_sha = hashlib.sha256(norm_seg.encode("utf-8")).hexdigest()
+                        if seg_sha in forbidden_hashes:
+                            raise RefusalError(
+                                "LOG_POLICY_VIOLATION",
+                                f"{path.name}:{lineno} segment matches forbidden prompt line sha256 {seg_sha[:12]}",
+                            )
 
 
 def is_allowed_tar_member(rel_posix_path: str) -> bool:
@@ -611,6 +657,61 @@ def compute_prompt_messages_sha256(raw_prompt_text: str) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def cleanup_prompts_dir(
+    prompts_dir: Path,
+    prompts_tar: Path | None = None,
+) -> None:
+    """Remove all .prompt.txt files, prompts_dir if empty, and optional prompts_tar."""
+    if prompts_tar is not None and prompts_tar.exists():
+        try:
+            prompts_tar.unlink()
+        except OSError:
+            pass
+    if prompts_dir.exists():
+        for p in list(prompts_dir.glob("*.prompt.txt")):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        try:
+            if not any(prompts_dir.iterdir()):
+                prompts_dir.rmdir()
+        except OSError:
+            pass
+
+
+def extract_prompts_tar(prompts_tar: Path, prompts_dir: Path) -> None:
+    """Extract prompts_tar into prompts_dir just before the exact-count gate and delete the tar."""
+    ensure_not_drive_path(prompts_tar)
+    ensure_not_drive_path(prompts_dir)
+    if not prompts_tar.is_file():
+        raise RefusalError(
+            "EXACT_COUNT_PROMPT_MISSING",
+            f"Prompts archive missing: {prompts_tar}",
+        )
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with tarfile.open(prompts_tar, "r:*") as tf:
+            for member in tf.getmembers():
+                if (
+                    member.issym()
+                    or member.islnk()
+                    or ".." in member.name
+                    or member.name.startswith("/")
+                    or "\\" in member.name
+                ):
+                    raise RefusalError(
+                        "EXACT_COUNT_INDEX_MISMATCH",
+                        f"Forbidden prompts tar member: {member.name!r}",
+                    )
+            tf.extractall(prompts_dir)
+    finally:
+        try:
+            prompts_tar.unlink()
+        except OSError:
+            pass
+
+
 def run_exact_count_gate(
     index_path: Path,
     prompts_dir: Path,
@@ -619,6 +720,8 @@ def run_exact_count_gate(
     count_fn: Callable[[str], int] | None = None,
     repo_dir: Path | None = None,
     uv_bin: Path | str = "uv",
+    prompt_line_hashes_out: set[str] | None = None,
+    prompts_tar: Path | None = None,
 ) -> list[dict[str, object]]:
     """Verify the 4 recorded prompts hash and tokenize to 3124, 3423, 3393, 3394, then delete them.
 
@@ -627,8 +730,14 @@ def run_exact_count_gate(
     """
     ensure_not_drive_path(index_path)
     ensure_not_drive_path(prompts_dir)
+    if prompts_tar is not None:
+        ensure_not_drive_path(prompts_tar)
 
+    verified: list[dict[str, object]] = []
+    prompt_paths_checked: list[Path] = []
     try:
+        if prompts_tar is not None and prompts_tar.is_file():
+            extract_prompts_tar(prompts_tar, prompts_dir)
         if not index_path.is_file():
             raise RefusalError(
                 "EXACT_COUNT_INDEX_MISMATCH",
@@ -701,7 +810,6 @@ def run_exact_count_gate(
 
             count_fn = _default_count_fn
 
-        verified: list[dict[str, object]] = []
         for idx, entry in enumerate(entries):
             prompt_file = str(entry.get("file") or entry.get("prompt_file") or "")
             if not prompt_file:
@@ -715,7 +823,12 @@ def run_exact_count_gate(
                     "EXACT_COUNT_PROMPT_MISSING",
                     f"Missing prompt file for entry {idx}: {prompt_file}",
                 )
-            raw_prompt = prompt_path.read_bytes().decode("utf-8")
+            prompt_paths_checked.append(prompt_path)
+            raw_bytes = prompt_path.read_bytes()
+            raw_file_sha = hashlib.sha256(raw_bytes).hexdigest()
+            raw_prompt = raw_bytes.decode("utf-8")
+            if prompt_line_hashes_out is not None:
+                prompt_line_hashes_out.update(collect_prompt_line_sha256s(raw_prompt))
             actual_sha = compute_prompt_messages_sha256(raw_prompt)
             expected_sha = str(entry["prompt_sha256"])
             if actual_sha.lower() != expected_sha.lower():
@@ -735,23 +848,32 @@ def run_exact_count_gate(
                     "run": entry.get("run"),
                     "call_id": entry.get("call_id"),
                     "file": prompt_file,
+                    "raw_file_sha256": raw_file_sha,
                     "prompt_sha256": actual_sha,
                     "expected_count": expected_count,
                     "actual_count": actual_count,
+                    "deleted": False,
+                    "absent_verified": False,
                 }
             )
     finally:
-        if prompts_dir.exists():
-            for p in list(prompts_dir.glob("*.prompt.txt")):
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
-            try:
-                if not any(prompts_dir.iterdir()):
-                    prompts_dir.rmdir()
-            except OSError:
-                pass
+        cleanup_prompts_dir(prompts_dir, prompts_tar=prompts_tar)
+
+    for rec, p_path in zip(verified, prompt_paths_checked):
+        try:
+            p_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        rec["deleted"] = True
+        still_exists = p_path.exists() or p_path.is_file()
+        rec["absent_verified"] = not still_exists
+        if still_exists:
+            raise RefusalError(
+                "EXACT_COUNT_CLEANUP_FAILED",
+                f"Prompt file still exists after delete: {p_path.name}",
+            )
 
     remaining = list(prompts_dir.glob("*.prompt.txt")) if prompts_dir.exists() else []
     if remaining:
@@ -919,6 +1041,25 @@ def install_pinned_uv_and_sync_repo(
     return actual_sha, cleaned_uv_ver, cleaned_py_ver, uv_bin
 
 
+def check_model_disk_space(
+    models_root: Path,
+    min_free_bytes: int = MIN_FREE_DISK_BYTES,
+) -> int:
+    """Measure free disk on models_root's filesystem and refuse with DISK_TOO_SMALL below min_free_bytes."""
+    ensure_not_drive_path(models_root)
+    probe_dir = models_root
+    while not probe_dir.exists() and probe_dir.parent != probe_dir:
+        probe_dir = probe_dir.parent
+    usage = shutil.disk_usage(probe_dir)
+    free_bytes = int(usage.free)
+    if free_bytes < min_free_bytes:
+        raise RefusalError(
+            "DISK_TOO_SMALL",
+            f"free_bytes={free_bytes} < min_free_bytes={min_free_bytes}",
+        )
+    return free_bytes
+
+
 def pull_and_verify_writer_model(
     models_root: Path,
     ollama_log_path: Path,
@@ -927,6 +1068,7 @@ def pull_and_verify_writer_model(
     """Start Ollama temporarily to pull qwen3.6:35b, stop it, and verify digests."""
     ensure_not_drive_path(models_root)
     models_root.mkdir(parents=True, exist_ok=True)
+    check_model_disk_space(models_root)
     env = os.environ.copy()
     env["OLLAMA_MODELS"] = str(models_root)
     env["OLLAMA_HOST"] = "127.0.0.1:11434"
@@ -1097,14 +1239,21 @@ def run_dryrun_pipeline(
     logs_dir: Path,
     vm_log_path: Path,
     gpu_info: dict[str, object] | None = None,
+    prompt_line_hashes_out: set[str] | None = None,
 ) -> dict[str, object]:
     """Execute deterministic dry-run pipeline for rig fake-CLI testing (no GPU/network)."""
     inject_failure = os.environ.get("UDLAB_DRYRUN_INJECT_FAILURE", "").strip()
     if inject_failure:
         raise RefusalError(inject_failure, f"Injected dry-run failure: {inject_failure}")
 
+    inject_unexpected = os.environ.get("UDLAB_DRYRUN_INJECT_UNEXPECTED", "").strip()
+    if inject_unexpected:
+        raise RuntimeError(inject_unexpected)
+
     if gpu_info is None:
         gpu_info = probe_vm_gpu(args.mode, allow_missing_in_dryrun=True)
+
+    free_disk_bytes = check_model_disk_space(args.models_root)
 
     index_path = args.index_path or (
         args.repo_dir / "tests" / "fixtures" / "exact_ctx" / "index.json"
@@ -1118,10 +1267,15 @@ def run_dryrun_pipeline(
         sha = compute_prompt_messages_sha256(raw_prompt).lower()
         return count_map.get(sha, -1)
 
+    local_line_hashes: set[str] = (
+        prompt_line_hashes_out if prompt_line_hashes_out is not None else set()
+    )
     verified_gate = run_exact_count_gate(
         index_path=index_path,
         prompts_dir=args.prompts_dir,
         count_fn=_dryrun_counter,
+        prompt_line_hashes_out=local_line_hashes,
+        prompts_tar=getattr(args, "prompts_tar", None),
     )
 
     if args.mode == "gpu":
@@ -1217,6 +1371,7 @@ def run_dryrun_pipeline(
         "vram_halt_mib": args.vram_halt_mib,
         "resume": bool(args.resume),
         **gpu_info,
+        "free_disk_bytes": free_disk_bytes,
         "uv_version": f"uv {UV_VERSION}",
         "uv_archive_sha256": UV_ARCHIVE_SHA256,
         "python_version": f"Python {REQUIRED_PYTHON_VERSION}.0",
@@ -1227,6 +1382,7 @@ def run_dryrun_pipeline(
         "model_layer_blob": EXPECTED_MODEL_LAYER_BLOB,
         "llama_cpp_commit": LLAMA_CPP_COMMIT,
         "exact_count_gate": verified_gate,
+        "prompt_line_sha256s": sorted(local_line_hashes),
         "gpu_offload_check": gpu_offload_check,
         "dryrun": True,
     }
@@ -1244,6 +1400,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--repo-dir", type=Path, required=True)
     parser.add_argument("--index-path", type=Path, default=None)
     parser.add_argument("--prompts-dir", type=Path, required=True)
+    parser.add_argument("--prompts-tar", type=Path, default=None)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, default=Path("/content/udlab_work"))
     parser.add_argument("--models-root", type=Path, default=Path("/root/.ollama/models"))
@@ -1257,6 +1414,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     for p in (args.repo_dir, args.prompts_dir, args.run_dir, args.work_dir, args.result_tar):
         ensure_not_drive_path(p)
+    if args.prompts_tar is not None:
+        ensure_not_drive_path(args.prompts_tar)
 
     args.run_dir.mkdir(parents=True, exist_ok=True)
     logs_dir = args.run_dir / "logs"
@@ -1268,31 +1427,44 @@ def main(argv: list[str] | None = None) -> int:
 
     dryrun = args.dryrun or os.environ.get("VM_DRYRUN") == "1"
     gpu_info: dict[str, object] = {}
+    free_disk_bytes: int | None = None
+    prompt_line_hashes: set[str] = set()
+    current_step = "probe_vm_gpu"
 
     try:
         gpu_info = probe_vm_gpu(args.mode, allow_missing_in_dryrun=dryrun)
         if dryrun:
+            current_step = "dryrun_pipeline"
             receipt = run_dryrun_pipeline(
                 args,
                 logs_dir,
                 vm_log_path,
                 gpu_info=gpu_info,
+                prompt_line_hashes_out=prompt_line_hashes,
             )
+            free_disk_bytes = int(receipt["free_disk_bytes"])
         else:
             with vm_log_path.open("a", encoding="utf-8", newline="\n") as vm_log_fh:
+                current_step = "install_pinned_ollama"
                 archive_sha, ollama_ver = install_pinned_ollama(args.work_dir, vm_log_fh)
+                current_step = "install_pinned_uv_and_sync_repo"
                 uv_archive_sha, uv_ver, py_ver, uv_bin = install_pinned_uv_and_sync_repo(
                     work_dir=args.work_dir,
                     repo_dir=args.repo_dir,
                     log_fh=vm_log_fh,
                 )
+                current_step = "check_model_disk_space"
+                free_disk_bytes = check_model_disk_space(args.models_root)
+                current_step = "pull_and_verify_writer_model"
                 manifest_digest, layer_blob, blob_path = pull_and_verify_writer_model(
                     models_root=args.models_root,
                     ollama_log_path=ollama_log_path,
                     vm_log_fh=vm_log_fh,
                 )
+                current_step = "build_llama_tokenize"
                 llama_tokenize_bin = build_llama_tokenize(args.work_dir, vm_log_fh)
 
+                current_step = "run_exact_count_gate"
                 index_path = args.index_path or (
                     args.repo_dir / "tests" / "fixtures" / "exact_ctx" / "index.json"
                 )
@@ -1303,9 +1475,12 @@ def main(argv: list[str] | None = None) -> int:
                     gguf_path=blob_path,
                     repo_dir=args.repo_dir,
                     uv_bin=uv_bin,
+                    prompt_line_hashes_out=prompt_line_hashes,
+                    prompts_tar=args.prompts_tar,
                 )
 
                 if args.mode == "gpu":
+                    current_step = "warmup_and_verify_full_gpu_offload"
                     gpu_offload_check = warmup_and_verify_full_gpu_offload(
                         models_root=args.models_root,
                         ollama_log_path=ollama_log_path,
@@ -1314,6 +1489,7 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     gpu_offload_check = {"checked": False, "reason": "stub_mode"}
 
+            current_step = "run_udlab_gen"
             gen_cmd = [
                 str(uv_bin),
                 "run",
@@ -1379,6 +1555,7 @@ def main(argv: list[str] | None = None) -> int:
                 "vram_halt_mib": args.vram_halt_mib,
                 "resume": bool(args.resume),
                 **gpu_info,
+                "free_disk_bytes": free_disk_bytes,
                 "uv_version": uv_ver,
                 "uv_archive_sha256": uv_archive_sha,
                 "python_version": py_ver,
@@ -1389,10 +1566,12 @@ def main(argv: list[str] | None = None) -> int:
                 "model_layer_blob": layer_blob,
                 "llama_cpp_commit": LLAMA_CPP_COMMIT,
                 "exact_count_gate": verified_gate,
+                "prompt_line_sha256s": sorted(prompt_line_hashes),
                 "gpu_offload_check": gpu_offload_check,
                 "dryrun": False,
             }
 
+        current_step = "verify_logs_and_pack_tar"
         receipt_path.write_text(
             json.dumps(receipt, indent=2) + "\n",
             encoding="utf-8",
@@ -1400,12 +1579,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         for log_file in logs_dir.glob("*.log"):
             scrub_log_file_in_place(log_file)
-        verify_logs_clean(logs_dir.glob("*.log"))
+        verify_logs_clean(
+            logs_dir.glob("*.log"),
+            prompt_line_hashes=prompt_line_hashes,
+        )
         build_allowlisted_result_tar(args.run_dir, args.result_tar)
         return 0
 
     except RefusalError as err:
-        fail_receipt = {
+        fail_receipt: dict[str, object] = {
             "status": "refused",
             "failure_class": err.failure_class,
             "detail": scrub_log_text(err.detail),
@@ -1415,6 +1597,10 @@ def main(argv: list[str] | None = None) -> int:
             "seed": args.seed,
             **gpu_info,
         }
+        if free_disk_bytes is not None:
+            fail_receipt["free_disk_bytes"] = free_disk_bytes
+        if prompt_line_hashes:
+            fail_receipt["prompt_line_sha256s"] = sorted(prompt_line_hashes)
         receipt_path.write_text(
             json.dumps(fail_receipt, indent=2) + "\n",
             encoding="utf-8",
@@ -1424,8 +1610,50 @@ def main(argv: list[str] | None = None) -> int:
             fh.write(f"REFUSAL {err.failure_class}: {scrub_log_text(err.detail)}\n")
         for log_file in logs_dir.glob("*.log"):
             scrub_log_file_in_place(log_file)
+        try:
+            build_allowlisted_result_tar(args.run_dir, args.result_tar)
+        except Exception:
+            pass
         sys.stderr.write(f"{err.failure_class}: {scrub_log_text(err.detail)}\n")
         return 2
+
+    except Exception as exc:
+        exc_type = type(exc).__name__
+        detail = f"step={current_step} exception_type={exc_type}"
+        unexpected_receipt: dict[str, object] = {
+            "status": "refused",
+            "failure_class": "UNEXPECTED_ERROR",
+            "step": current_step,
+            "exception_type": exc_type,
+            "detail": detail,
+            "mode": args.mode,
+            "writer": args.writer,
+            "count": args.count,
+            "seed": args.seed,
+            **gpu_info,
+        }
+        if free_disk_bytes is not None:
+            unexpected_receipt["free_disk_bytes"] = free_disk_bytes
+        if prompt_line_hashes:
+            unexpected_receipt["prompt_line_sha256s"] = sorted(prompt_line_hashes)
+        receipt_path.write_text(
+            json.dumps(unexpected_receipt, indent=2) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        with vm_log_path.open("a", encoding="utf-8", newline="\n") as fh:
+            fh.write(f"REFUSAL UNEXPECTED_ERROR: {detail}\n")
+        for log_file in logs_dir.glob("*.log"):
+            scrub_log_file_in_place(log_file)
+        try:
+            build_allowlisted_result_tar(args.run_dir, args.result_tar)
+        except Exception:
+            pass
+        sys.stderr.write(f"UNEXPECTED_ERROR: {detail}\n")
+        return 2
+
+    finally:
+        cleanup_prompts_dir(args.prompts_dir, prompts_tar=args.prompts_tar)
 
 
 if __name__ == "__main__":

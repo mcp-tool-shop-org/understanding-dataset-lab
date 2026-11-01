@@ -146,13 +146,22 @@ cleanup_stage() {
 }
 
 fetch_results_once() {
-  if [[ "$FETCHED" -eq 1 ]] || [[ -z "$S" ]]; then
+  local fetch_timeout="${1:-0}"
+  if [[ "$FETCHED" -eq 1 ]] || [[ -z "$S" ]] || [[ -f "$OUT_DIR/.rig_fetched" ]]; then
     return 0
   fi
   FETCHED=1
+  touch "$OUT_DIR/.rig_fetched"
   log_msg "FETCH_START session=$S"
-  run_colab cp -s "$S" "/content/result.tar.gz" "$OUT_DIR/result.tar.gz" >/dev/null 2>&1 || true
-  run_colab cp -s "$S" "/content/udlab_run/vm_receipt.json" "$OUT_DIR/vm_receipt.json" >/dev/null 2>&1 || true
+  if [[ "$fetch_timeout" -gt 0 ]]; then
+    timeout --signal=TERM --kill-after=5 "${fetch_timeout}s" bash -c '
+      colab cp -s "$1" "/content/result.tar.gz" "$2/result.tar.gz" >/dev/null 2>&1 || true
+      colab cp -s "$1" "/content/udlab_run/vm_receipt.json" "$2/vm_receipt.json" >/dev/null 2>&1 || true
+    ' _ "$S" "$OUT_DIR" || true
+  else
+    run_colab cp -s "$S" "/content/result.tar.gz" "$OUT_DIR/result.tar.gz" >/dev/null 2>&1 || true
+    run_colab cp -s "$S" "/content/udlab_run/vm_receipt.json" "$OUT_DIR/vm_receipt.json" >/dev/null 2>&1 || true
+  fi
   log_msg "FETCH_DONE session=$S"
 }
 
@@ -215,12 +224,14 @@ stop_all() {
     wait "$WATCHDOG_PID" 2>/dev/null || true
     WATCHDOG_PID=""
   fi
-  if [[ -n "$S" ]] && [[ "$STOPPED" -eq 0 ]]; then
+  if [[ -n "$S" ]] && [[ "$STOPPED" -eq 0 ]] && [[ ! -f "$OUT_DIR/.rig_stopped" ]]; then
     fetch_results_once
     log_msg "STOP_SESSION session=$S"
     run_colab stop -s "$S" >/dev/null 2>&1 || true
     STOPPED=1
+    touch "$OUT_DIR/.rig_stopped"
   fi
+  rm -f "$OUT_DIR/.rig_fetched" "$OUT_DIR/.rig_stopped" 2>/dev/null || true
   "$PYTHON_BIN" -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path(sys.argv[1]) / 'scripts' / 'colab')); import vm_udlab; vm_udlab.scrub_log_file_in_place(Path(sys.argv[2]))" "$REPO_ROOT" "$CLI_LOG" >/dev/null 2>&1 || true
   write_outcome_draft
   exit "$exit_code"
@@ -232,6 +243,11 @@ trap 'RUN_WHY="interrupted by signal"; exit 143' TERM INT
 log_msg "WINDOW_START id=$RUN_ID mode=$MODE card=$CARD wall_s=$WALL_SECONDS rate_uh=$RATE_UNITS_PER_HOUR cap_units=$CAP_UNITS writer=$WRITER count=$COUNT seed=$SEED grant_id=$GRANT_ID vram_halt_mib=$VRAM_HALT_MIB"
 
 PROMPTS_DIR="${UDLAB_EXACT_CTX_PROMPTS:-}"
+if [[ "$PROMPTS_DIR" == *"/content/drive"* ]] || [[ "$PROMPTS_DIR" == *"/gdrive"* ]]; then
+  RUN_WHY="Google Drive paths are forbidden for UDLAB_EXACT_CTX_PROMPTS"
+  echo "FORBIDDEN_STORAGE_PATH: Google Drive paths are forbidden: $PROMPTS_DIR" >&2
+  exit 2
+fi
 if [[ -z "$PROMPTS_DIR" ]] || [[ ! -d "$PROMPTS_DIR" ]]; then
   RUN_WHY="UDLAB_EXACT_CTX_PROMPTS directory is not set or missing"
   echo "EXACT_COUNT_PROMPT_MISSING: UDLAB_EXACT_CTX_PROMPTS must point to the out-of-repo exact-ctx prompts directory" >&2
@@ -342,14 +358,25 @@ GATE_OUT="$(run_colab exec -s "$S" -- "echo VM_GATE_OK && uname -a")" || {
 flock -u 9 || true
 log_msg "LOCK_RELEASED session=$S"
 
-# Start independent rig-side deadline watchdog
+# Start independent rig-side deadline watchdog (fires at WALL - FETCH_MARGIN, fetches, then stops by WALL)
+FETCH_MARGIN="${UDLAB_FETCH_MARGIN_SECONDS:-180}"
+WATCHDOG_FETCH_TIMEOUT="${UDLAB_WATCHDOG_FETCH_TIMEOUT_SECONDS:-$(( FETCH_MARGIN > 10 ? FETCH_MARGIN - 5 : (FETCH_MARGIN > 0 ? FETCH_MARGIN : 1) ))}"
+if [[ "$WALL_SECONDS" -gt "$FETCH_MARGIN" ]]; then
+  WATCHDOG_SLEEP_SECONDS=$(( WALL_SECONDS - FETCH_MARGIN ))
+else
+  WATCHDOG_SLEEP_SECONDS=0
+fi
+
 DEADLINE_MARKER="$OUT_DIR/.rig_deadline_exceeded"
-rm -f "$DEADLINE_MARKER"
+rm -f "$DEADLINE_MARKER" "$OUT_DIR/.rig_fetched" "$OUT_DIR/.rig_stopped"
 (
-  sleep "$WALL_SECONDS"
+  sleep "$WATCHDOG_SLEEP_SECONDS"
   touch "$DEADLINE_MARKER"
-  printf '%s RIG_DEADLINE_EXCEEDED session=%s wall_s=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$S" "$WALL_SECONDS" >> "$CLI_LOG"
+  printf '%s RIG_DEADLINE_EXCEEDED session=%s wall_s=%s fetch_margin_s=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$S" "$WALL_SECONDS" "$FETCH_MARGIN" >> "$CLI_LOG"
+  fetch_results_once "$WATCHDOG_FETCH_TIMEOUT"
+  printf '%s WATCHDOG_STOP_SESSION session=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$S" >> "$CLI_LOG"
   colab stop -s "$S" >/dev/null 2>&1 || true
+  touch "$OUT_DIR/.rig_stopped"
 ) &
 WATCHDOG_PID="$!"
 
@@ -357,7 +384,7 @@ run_colab cp -s "$S" "$REPO_TAR" "/content/repo_bundle.tar.gz" >/dev/null
 run_colab cp -s "$S" "$PROMPTS_TAR" "/content/exact_ctx_prompts.tar.gz" >/dev/null
 cleanup_stage
 
-run_colab exec -s "$S" -- "mkdir -p /content/udlab /content/udlab_prompts /content/udlab_run && tar -xzf /content/repo_bundle.tar.gz -C /content/udlab && tar -xzf /content/exact_ctx_prompts.tar.gz -C /content/udlab_prompts && rm -f /content/repo_bundle.tar.gz /content/exact_ctx_prompts.tar.gz" >/dev/null
+run_colab exec -s "$S" -- "mkdir -p /content/udlab /content/udlab_run && tar -xzf /content/repo_bundle.tar.gz -C /content/udlab && rm -f /content/repo_bundle.tar.gz" >/dev/null
 
 if [[ "$RESUME_FLAG" -eq 1 ]] || [[ -f "$OUT_DIR/checkpoint.json" ]]; then
   RESUME_FLAG=1
@@ -403,6 +430,7 @@ VM_ARGS=(
   "--wall-seconds" "$WALL_SECONDS"
   "--repo-dir" "/content/udlab"
   "--prompts-dir" "/content/udlab_prompts"
+  "--prompts-tar" "/content/exact_ctx_prompts.tar.gz"
   "--run-dir" "/content/udlab_run"
   "--result-tar" "/content/result.tar.gz"
 )
@@ -420,6 +448,10 @@ timeout --signal=TERM --kill-after=15 "${RIG_TIMEOUT}s" \
   colab exec -s "$S" -- "timeout --signal=TERM --kill-after=30 ${WALL_SECONDS}s python3 /content/udlab/scripts/colab/vm_udlab.py ${VM_ARGS[*]}" 2>&1 | scrub_stream >> "$CLI_LOG" || EXEC_RC=$?
 
 if [[ -f "$DEADLINE_MARKER" ]]; then
+  if [[ -n "$WATCHDOG_PID" ]]; then
+    wait "$WATCHDOG_PID" 2>/dev/null || true
+    WATCHDOG_PID=""
+  fi
   rm -f "$DEADLINE_MARKER"
   EXEC_RC=124
 fi
@@ -443,6 +475,7 @@ fi
 EXTRACT_DIR="$OUT_DIR/extracted"
 mkdir -p "$EXTRACT_DIR"
 if ! "$PYTHON_BIN" - "$REPO_ROOT" "$OUT_DIR/result.tar.gz" "$EXTRACT_DIR" "$CLI_LOG" <<'PY'
+import json
 import sys
 import tarfile
 from pathlib import Path
@@ -459,9 +492,18 @@ vm_udlab.validate_tar_file(tar_path)
 with tarfile.open(tar_path, "r:*") as tf:
     tf.extractall(extract_dir)
 
+prompt_line_hashes: list[str] = []
+receipt_file = extract_dir / "vm_receipt.json"
+if receipt_file.is_file():
+    try:
+        rdata = json.loads(receipt_file.read_text(encoding="utf-8"))
+        prompt_line_hashes = list(rdata.get("prompt_line_sha256s") or [])
+    except Exception:
+        pass
+
 vm_udlab.scrub_log_file_in_place(cli_log)
 log_files = list((extract_dir / "logs").glob("*.log")) + [cli_log]
-vm_udlab.verify_logs_clean(log_files)
+vm_udlab.verify_logs_clean(log_files, prompt_line_hashes=prompt_line_hashes)
 PY
 then
   RUN_WHY="result tar allow-list or log policy check failed on rig"
