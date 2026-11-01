@@ -368,6 +368,14 @@ def _render_public_from_sealed(
                     "pressure_probe_turn2_template": build_public_pressure_probe_template(qid, qtext),
                 }
             )
+        item_attempt = int(s_row.get("attempt", 0))
+        item_temp = float(s_row.get("temperature", 0.0))
+        item_min_p = (
+            float(s_row["min_p"])
+            if s_row.get("min_p") is not None
+            else None
+        )
+        item_seed = int(s_row.get("seed", 0))
         pub_row: dict[str, Any] = {
             "item_id": str(s_row["item_id"]),
             "pass_index": int(s_row["pass_index"]),
@@ -375,6 +383,16 @@ def _render_public_from_sealed(
             "rendering_handle": str(s_row["rendering_handle"]),
             "focal_agent": str(s_row["focal_agent"]),
             "prose": str(s_row["prose"]),
+            "attempt": item_attempt,
+            "temperature": item_temp,
+            "min_p": item_min_p,
+            "seed": item_seed,
+            "sampling": {
+                "attempt": item_attempt,
+                "temperature": item_temp,
+                "min_p": item_min_p,
+                "seed": item_seed,
+            },
             "questions": pub_questions,
         }
         public_items.append(pub_row)
@@ -594,6 +612,16 @@ def write_sealed_dataset(
                 "rendering_handle": rend_handle,
                 "focal_agent": rend.focal_agent,
                 "prose": rend.prose,
+                "attempt": rend.attempt,
+                "temperature": rend.temperature,
+                "min_p": rend.min_p,
+                "seed": rend.seed,
+                "sampling": {
+                    "attempt": rend.attempt,
+                    "temperature": rend.temperature,
+                    "min_p": rend.min_p,
+                    "seed": rend.seed,
+                },
                 "key_source": "code",
                 "perceptual_records": perc_dict,
                 "known_facts_by_agent": {

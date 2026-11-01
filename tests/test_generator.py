@@ -3344,7 +3344,10 @@ def test_43_fake_transport_keep_and_continue_and_max_retries(tmp_path: Path) -> 
     assert summary_1["scenarios_kept"] == 0
     assert summary_1["scenarios_refused"] == 1
     assert summary_1["refusals_by_check_id"] == {"c_fidelity_missing_event": 1}
-    assert seen_seeds_1 == [int(w0.seed), int(w0.seed)]
+    assert seen_seeds_1 == [
+        ug_render.derive_call_seed(int(w0.seed), 0, 0),
+        ug_render.derive_call_seed(int(w0.seed), 1, 0),
+    ]
 
     # Verify CLI entrypoint also returns rc == 0 on the same one-passing/one-failing fake transport:
     import udlab_generator.cli as ug_cli
@@ -3531,14 +3534,17 @@ def test_43_fake_transport_keep_and_continue_and_max_retries(tmp_path: Path) -> 
         start_owned_server=False,
     )
     assert len(retry_calls) == 3
-    # Assert the retry call carries the first user prompt, attempt 0 as assistant turn, and the single repair line as the next user turn
-    assert retry_calls[2][1][0]["content"] == retry_calls[1][1][0]["content"]
-    assert retry_calls[2][1][1] == {"role": "assistant", "content": failing_r1}
-    assert retry_calls[2][1][2]["content"].startswith(
-        "Keep your earlier text exactly as it was; change only event 1 (see, check c_fidelity_missing_event) so that it "
+    # Assert the default single-turn retry call carries only 1 user message (original prompt + repair note), without the refused draft
+    assert len(retry_calls[2][1]) == 1
+    assert retry_calls[2][1][0]["content"].startswith(retry_calls[1][1][0]["content"].rstrip("\n") + "\n")
+    assert failing_r1 not in retry_calls[2][1][0]["content"]
+    retry_tail = retry_calls[2][1][0]["content"].splitlines()[-1]
+    assert retry_tail.startswith(
+        "Repair note (rule broken: event 1 (see, check c_fidelity_missing_event), altered): "
     )
-    assert retry_calls[1][0] == int(w0.seed)
-    assert retry_calls[2][0] == int(w0.seed)
+    assert retry_calls[0][0] == ug_render.derive_call_seed(int(w0.seed), 0, 0)
+    assert retry_calls[1][0] == ug_render.derive_call_seed(int(w0.seed), 1, 0)
+    assert retry_calls[2][0] == ug_render.derive_call_seed(int(w0.seed), 1, 1)
     assert summary_retry["scenarios_kept"] == 1
     assert summary_retry["scenarios_refused"] == 0
     assert summary_retry["renderings_kept"] == 2
@@ -3552,9 +3558,9 @@ def test_43_fake_transport_keep_and_continue_and_max_retries(tmp_path: Path) -> 
         if line.strip()
     ]
     assert [(r["attempt"], r["seed"], r["checks_passed"]) for r in gen_retry] == [
-        (0, int(w0.seed), True),
-        (0, int(w0.seed), False),
-        (1, int(w0.seed), True),
+        (0, ug_render.derive_call_seed(int(w0.seed), 0, 0), True),
+        (0, ug_render.derive_call_seed(int(w0.seed), 1, 0), False),
+        (1, ug_render.derive_call_seed(int(w0.seed), 1, 1), True),
     ]
 
 
@@ -4588,12 +4594,13 @@ def test_53_card_st_repair_retry_instead_of_blind_retry(tmp_path: Path) -> None:
     seed_0, temp_0, prompt_attempt_0 = seen_calls[1]
     seed_1, temp_1, prompt_attempt_1 = seen_calls[2]
 
-    # Do not add temperature or seed noise:
-    assert temp_0 == 0.0 and temp_1 == 0.0
-    assert seed_0 == int(w0.seed) and seed_1 == int(w0.seed)
+    # Attempt 0 uses temperature 0.0 and derived attempt-0 seed; retry uses RETRY_TEMPERATURE and derived attempt-1 seed:
+    assert temp_0 == 0.0 and temp_1 == ug_render.RETRY_TEMPERATURE
+    assert seed_0 == ug_render.derive_call_seed(int(w0.seed), 1, 0)
+    assert seed_1 == ug_render.derive_call_seed(int(w0.seed), 1, 1)
+    assert seed_0 != seed_1
 
-    # Second attempt keeps the original prompt in messages[0] and sends one repair line in messages[-1]:
-    assert prompt_attempt_1 == prompt_attempt_0
+    # Second attempt (single-turn by default) appends the single-turn repair line to the original prompt:
     appended_tail = ug_render.format_repair_retry_line(
         RenderCheckError(
             "test",
@@ -4601,8 +4608,10 @@ def test_53_card_st_repair_retry_instead_of_blind_retry(tmp_path: Path) -> None:
             failing_sentence=model_secret_text,
             event_index=17,
             event_kind="see",
+            event_variant="occluded_see",
         )
     )
+    assert prompt_attempt_1 == f"{prompt_attempt_0.rstrip('\n')}\n{appended_tail}"
     assert "\n" not in appended_tail, f"Expected exactly one repair line, got: {appended_tail!r}"
     assert "c_fidelity_missing_event" in appended_tail
     assert "event 17 (see" in appended_tail
@@ -4625,8 +4634,8 @@ def test_53_card_st_repair_retry_instead_of_blind_retry(tmp_path: Path) -> None:
         if line.strip()
     ]
     assert len(gen_rows) == 3
-    assert gen_rows[1]["attempt"] == 0 and gen_rows[1]["seed"] == int(w0.seed) and gen_rows[1]["checks_passed"] is False
-    assert gen_rows[2]["attempt"] == 1 and gen_rows[2]["seed"] == int(w0.seed) and gen_rows[2]["checks_passed"] is True
+    assert gen_rows[1]["attempt"] == 0 and gen_rows[1]["seed"] == seed_0 and gen_rows[1]["checks_passed"] is False
+    assert gen_rows[2]["attempt"] == 1 and gen_rows[2]["seed"] == seed_1 and gen_rows[2]["checks_passed"] is True
     assert gen_rows[1]["prompt_sha256"] != gen_rows[2]["prompt_sha256"]
 
 
@@ -4912,7 +4921,7 @@ def test_58_card_sw_repair_line_recorded_and_multi_turn_wording(tmp_path: Path) 
                     event_index=7,
                     event_kind=ev_k,
                 )
-                line_ev = format_repair_retry_line(exc_ev)
+                line_ev = format_repair_retry_line(exc_ev, retry_form="multi_turn")
                 assert line_ev.startswith("Keep your earlier text exactly as it was; change only event 7 ")
                 assert req.check_id in line_ev
                 assert ev_k in line_ev
@@ -4926,7 +4935,7 @@ def test_58_card_sw_repair_line_recorded_and_multi_turn_wording(tmp_path: Path) 
                 check_id=req.check_id,
                 failing_sentence="synthetic secret sentence",
             )
-            line_setup = format_repair_retry_line(exc_setup)
+            line_setup = format_repair_retry_line(exc_setup, retry_form="multi_turn")
             assert line_setup.startswith("Keep your earlier text exactly as it was; change only ")
             if "setup" in req.rule_text.lower():
                 assert "setup" in line_setup.split("so that")[0].lower()
@@ -4985,6 +4994,7 @@ def test_58_card_sw_repair_line_recorded_and_multi_turn_wording(tmp_path: Path) 
         output_dir=out_dir,
         writer_kind="ollama",
         max_retries=1,
+        retry_form="multi_turn",
         grant_id="test-grant-sw-repair",
         http_transport=_retry_transport,
         start_owned_server=False,
@@ -5057,7 +5067,8 @@ def test_59_card_sx_multiturn_fallback_not_cap(tmp_path: Path) -> None:
             "missing stake",
             check_id="c_fidelity_stake_edge",
             failing_sentence=bad_stake,
-        )
+        ),
+        retry_form="multi_turn",
     )
     repair_tokens = estimate_prompt_tokens(expected_repair)
     # Boundary budget for (p0 + e0) so that p0 + e0 + repair_tokens + 4096 + 256 == 9216:
@@ -5107,6 +5118,7 @@ def test_59_card_sx_multiturn_fallback_not_cap(tmp_path: Path) -> None:
         output_dir=out_fit,
         writer_kind="ollama",
         max_retries=1,
+        retry_form="multi_turn",
         grant_id="test-grant-sx-fit",
         http_transport=_transport_fit,
         start_owned_server=False,
@@ -5168,6 +5180,7 @@ def test_59_card_sx_multiturn_fallback_not_cap(tmp_path: Path) -> None:
         output_dir=out_over,
         writer_kind="ollama",
         max_retries=1,
+        retry_form="multi_turn",
         grant_id="test-grant-sx-over",
         http_transport=_transport_over,
         start_owned_server=False,
@@ -5600,6 +5613,7 @@ def test_66_card_sz_single_turn_repair_wording(tmp_path: Path) -> None:
         output_dir=out_dir,
         writer_kind="ollama",
         max_retries=1,
+        retry_form="multi_turn",
         grant_id="test-grant-sz-wording",
         http_transport=_transport,
         start_owned_server=False,
@@ -5681,6 +5695,7 @@ def test_60_card_sx_attempt_0_carried_unmodified_and_sha_asserted(
         output_dir=out_dir,
         writer_kind="ollama",
         max_retries=1,
+        retry_form="multi_turn",
         grant_id="test-grant-sx-unmodified",
         http_transport=_transport,
         start_owned_server=False,
@@ -5720,6 +5735,7 @@ def test_60_card_sx_attempt_0_carried_unmodified_and_sha_asserted(
             output_dir=tmp_path / "sx_tampered_check",
             writer_kind="ollama",
             max_retries=1,
+            retry_form="multi_turn",
             grant_id="test-grant-sx-tampered",
             http_transport=_transport,
             start_owned_server=False,
@@ -5800,6 +5816,7 @@ def test_61_card_sx_echoed_text_stays_local_and_sealed(
         output_dir=out_dir,
         writer_kind="ollama",
         max_retries=1,
+        retry_form="multi_turn",
         grant_id="test-grant-sx-grep",
         http_transport=_transport,
         start_owned_server=False,
@@ -5928,6 +5945,7 @@ def test_62_card_sx_retry_row_canonical_prompt_sha_and_fields(tmp_path: Path) ->
         output_dir=out_dir,
         writer_kind="ollama",
         max_retries=1,
+        retry_form="multi_turn",
         grant_id="test-grant-sx-row",
         http_transport=_transport,
         start_owned_server=False,
@@ -7917,17 +7935,20 @@ def test_83_card_tn_repair_wording_absent_altered_false_forms(tmp_path: Path) ->
                 failing_sentence="synthetic secret sentence",
                 failure_kind=f_kind,
             )
-            line_setup = format_repair_retry_line(exc_setup)
+            line_setup_st = format_repair_retry_line(exc_setup)
+            line_setup = format_repair_retry_line(exc_setup, retry_form="multi_turn")
+            assert line_setup_st.startswith(f"Repair note (rule broken: check {req.check_id}, {f_kind}): ")
+            assert "earlier text" not in line_setup_st.lower()
             if f_kind == "absent":
                 assert line_setup.startswith("Keep your earlier text as it was; add one sentence naming ")
             else:
                 assert line_setup.startswith("Keep your earlier text exactly as it was; change only ")
                 if f_kind == "false":
                     assert "false statement" in line_setup
-            assert req.check_id in line_setup
-            assert "synthetic secret sentence" not in line_setup
+            assert req.check_id in line_setup and req.check_id in line_setup_st
+            assert "synthetic secret sentence" not in line_setup and "synthetic secret sentence" not in line_setup_st
             for k_str in forbidden_key_strings:
-                assert k_str not in line_setup.lower()
+                assert k_str not in line_setup.lower() and k_str not in line_setup_st.lower()
 
     for f_kind in ("absent", "altered", "false"):
         exc_ev = RenderCheckError(
@@ -7938,16 +7959,21 @@ def test_83_card_tn_repair_wording_absent_altered_false_forms(tmp_path: Path) ->
             event_kind="see",
             failure_kind=f_kind,
         )
-        line_ev = format_repair_retry_line(exc_ev)
+        line_ev_st = format_repair_retry_line(exc_ev)
+        line_ev = format_repair_retry_line(exc_ev, retry_form="multi_turn")
+        assert line_ev_st.startswith(
+            f"Repair note (rule broken: event 5 (see, check c_fidelity_missing_event), {f_kind}): "
+        )
+        assert "earlier text" not in line_ev_st.lower()
         if f_kind == "absent":
             assert line_ev.startswith(
                 "Keep your earlier text as it was; add one sentence for event 5 immediately after the sentence for event 4 "
             )
         else:
             assert line_ev.startswith("Keep your earlier text exactly as it was; change only event 5 ")
-        assert "synthetic secret event sentence" not in line_ev
+        assert "synthetic secret event sentence" not in line_ev and "synthetic secret event sentence" not in line_ev_st
         for k_str in forbidden_key_strings:
-            assert k_str not in line_ev.lower()
+            assert k_str not in line_ev.lower() and k_str not in line_ev_st.lower()
 
     # 2. End-to-end test through `check_rendered_prose` and `build_and_probe_dataset` for all 3 forms:
     passing_r0 = render_world_template(w0, w0.agents[0])
@@ -7961,6 +7987,9 @@ def test_83_card_tn_repair_wording_absent_altered_false_forms(tmp_path: Path) ->
     assert exc_abs.value.check_id == "c_fidelity_stake_edge"
     assert exc_abs.value.failure_kind == "absent"
     assert format_repair_retry_line(exc_abs.value).startswith(
+        "Repair note (rule broken: check c_fidelity_stake_edge, absent): include one sentence naming the setup stake description"
+    )
+    assert format_repair_retry_line(exc_abs.value, retry_form="multi_turn").startswith(
         "Keep your earlier text as it was; add one sentence naming the setup stake description"
     )
 
@@ -7974,6 +8003,9 @@ def test_83_card_tn_repair_wording_absent_altered_false_forms(tmp_path: Path) ->
     assert exc_alt.value.check_id == "c_fidelity_stake_edge"
     assert exc_alt.value.failure_kind == "altered"
     assert format_repair_retry_line(exc_alt.value).startswith(
+        "Repair note (rule broken: check c_fidelity_stake_edge, altered): ensure the setup stake description"
+    )
+    assert format_repair_retry_line(exc_alt.value, retry_form="multi_turn").startswith(
         "Keep your earlier text exactly as it was; change only the setup stake description"
     )
 
@@ -7985,6 +8017,9 @@ def test_83_card_tn_repair_wording_absent_altered_false_forms(tmp_path: Path) ->
     assert exc_false.value.check_id == "c_fidelity_false_statement"
     assert exc_false.value.failure_kind == "false"
     assert format_repair_retry_line(exc_false.value).startswith(
+        "Repair note (rule broken: check c_fidelity_false_statement, false): remove any false setup statement"
+    )
+    assert format_repair_retry_line(exc_false.value, retry_form="multi_turn").startswith(
         "Keep your earlier text exactly as it was; change only the false setup statement"
     )
 
@@ -8039,12 +8074,12 @@ def test_83_card_tn_repair_wording_absent_altered_false_forms(tmp_path: Path) ->
     assert len(gen_rows) == 4
     # Retry on r0 (absent stake):
     assert gen_rows[1]["repair_line"].startswith(
-        "Keep your earlier text as it was; add one sentence naming the setup stake description"
+        "Repair note (rule broken: check c_fidelity_stake_edge, absent): include one sentence naming the setup stake description"
     )
     assert gen_rows[1]["repair_line_sha256"] == hashlib.sha256(gen_rows[1]["repair_line"].encode("utf-8")).hexdigest()
     # Retry on r1 (false occluder statement):
     assert gen_rows[3]["repair_line"].startswith(
-        "Keep your earlier text exactly as it was; change only the false setup statement"
+        "Repair note (rule broken: check c_fidelity_false_statement, false): remove any false setup statement"
     )
     assert gen_rows[3]["repair_line_sha256"] == hashlib.sha256(gen_rows[3]["repair_line"].encode("utf-8")).hexdigest()
 
@@ -9523,4 +9558,543 @@ def test_95_collect_all_fault_vectors_and_structural_no_text_guard(tmp_path: Pat
         ProseFaultRecord(check_id="c_fidelity_missing_event", event_index=1, event_kind="move", failure_kind="sentence text")
     with pytest.raises(ValueError, match="registered check_ids"):
         summarize_fault_vector_counts([["free text leak"]])
+
+
+def test_96_retry_sampling_single_turn_derived_seeds_kept_items_and_short_circuit(tmp_path: Path) -> None:
+    """Test 96 (Card udlab-retry-sampling, Req 1-7):
+    1. Attempt 0 identical to `main` apart from `options["seed"]` (fake transport proving `messages` and `options`
+       are byte-identical to `main` except `seed`, with `"temperature": 0` and no `"min_p"`).
+    2. Retries single-turn by default, without the refused draft, using the rewritten rule note (`check_id`,
+       `event_index` and `event_kind` where present, and what must hold; no `'keep your earlier text'`, no model
+       text, no literal checker regex), with retry options (`temperature == RETRY_TEMPERATURE == 0.6`,
+       `min_p == RETRY_MIN_P == 0.05`, `seed == derive_call_seed(scenario_seed, rendering_index, attempt)`),
+       and keeping card-`ul` exact context-cap sizing when `prompt_token_counter` is configured.
+    3. Derived seeds (`derive_call_seed(scenario_seed, rendering_index, attempt)`) distinct across renderings and
+       attempts and stable across runs.
+    4. The multi-turn option (`retry_form='multi_turn'` / `multi_turn_retries=True`) still works when chosen.
+    5. Recorded fields (`attempt`, `temperature`, `min_p`, `seed`, `retry_form`) on rows (`generations.jsonl`,
+       `sealed_store/responses.sealed.jsonl`) and (`attempt`, `temperature`, `min_p`, `seed`, `sampling`) on kept
+       items (`RenderedScenario`, `part_public/items.jsonl`, `sealed_store/keys.sealed.jsonl`, `checkpoint.json`,
+       `sealed_store/checkpoint.sealed.json`), with no evaluation-split filter in code.
+    6. Short-circuit switch (`--short-circuit-dead-scenarios` / `short_circuit_dead_scenarios`): default off
+       (rendering 1 still written after a dead rendering 0) and on (scenario stops after rendering 0 fails all
+       attempts), and the run summary and run records show the mode.
+    7. No model text in any new field.
+    """
+    from typing import Any
+    from udlab_generator import (
+        ATTEMPT_0_TEMPERATURE,
+        CALL_SEED_DOMAIN_TAG,
+        CALL_SEED_MASK_31BIT,
+        DEFAULT_RETRY_FORM,
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+        RETRY_MIN_P,
+        RETRY_TEMPERATURE,
+        VALID_RETRY_FORMS,
+        derive_call_seed,
+    )
+    from udlab_generator.cli import build_and_probe_dataset
+    from udlab_generator.render import (
+        DEFAULT_WRITER_MAX_NUM_CTX,
+        DEFAULT_WRITER_NUM_PREDICT,
+        NUM_CTX_MARGIN_TOKENS,
+        NUM_CTX_STEP_TOKENS,
+        OllamaWriter,
+        WRITER_PROSE_REQUIREMENTS,
+        decide_num_ctx,
+        estimate_prompt_tokens,
+        format_repair_retry_line,
+        format_writer_prompt,
+        load_writer_prompt_template,
+        render_ollama_qwen35_prompt,
+    )
+
+    # --- Requirement 3: Derived seeds distinct across renderings & attempts and stable across runs ---
+    assert DEFAULT_RETRY_FORM == "single_turn"
+    assert VALID_RETRY_FORMS == frozenset({"single_turn", "multi_turn"})
+    assert ATTEMPT_0_TEMPERATURE == 0.0
+    assert RETRY_TEMPERATURE == 0.6
+    assert RETRY_MIN_P == 0.05
+    assert CALL_SEED_DOMAIN_TAG == "udlab.call_seed.v1"
+    assert CALL_SEED_MASK_31BIT == 0x7FFFFFFF
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    w1 = generate_world(make_balanced_configs(2, base_seed=20261030)[1])
+    s0 = int(w0.seed)
+
+    # Pin exact deterministic values so stability across runs is verified:
+    expected_s0_r0_a0 = (
+        int.from_bytes(
+            hashlib.blake2b(f"udlab.call_seed.v1:{s0}:0:0".encode("utf-8"), digest_size=8).digest()[:4],
+            "big",
+        )
+        & 0x7FFFFFFF
+    )
+    assert derive_call_seed(s0, 0, 0) == expected_s0_r0_a0
+    assert derive_call_seed(20261030, 0, 0) == 454800033
+    assert derive_call_seed(20261030, 1, 0) == 2099905771
+    assert derive_call_seed(20261030, 0, 1) == 109349287
+    assert derive_call_seed(20261030, 1, 1) == 293191637
+
+    grid_seeds = [
+        derive_call_seed(scen_s, r_idx, att)
+        for scen_s in (int(w0.seed), int(w1.seed), 5, 42)
+        for r_idx in (0, 1)
+        for att in range(6)
+    ]
+    assert len(set(grid_seeds)) == len(grid_seeds), "Every (scenario_seed, rendering_index, attempt) seed must be distinct"
+    assert all(0 <= sd <= CALL_SEED_MASK_31BIT for sd in grid_seeds)
+    with pytest.raises(ValueError, match="rendering_index"):
+        derive_call_seed(s0, 2, 0)
+    with pytest.raises(ValueError, match="attempt"):
+        derive_call_seed(s0, 0, -1)
+
+    # --- Requirement 1: Attempt 0 byte-identical to `main` apart from `options["seed"]` ---
+    passing_r0 = render_world_template(w0, w0.agents[0])
+    passing_r1 = render_world_template(w0, w0.agents[1])
+    attempt0_payloads: list[dict[str, Any]] = []
+
+    def _attempt0_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            assert payload is not None
+            idx = len(attempt0_payloads)
+            attempt0_payloads.append(json.loads(json.dumps(payload)))
+            return {
+                "message": {"role": "assistant", "content": passing_r0 if idx == 0 else passing_r1},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3100,
+                "eval_count": 780,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    writer_a0 = OllamaWriter(
+        grant_id="test-grant-req1",
+        http_transport=_attempt0_transport,
+        start_owned_server=False,
+    )
+    pair_a0 = writer_a0.render_scenario_pair(w0)
+    assert pair_a0 is not None and len(attempt0_payloads) == 2
+    tmpl = load_writer_prompt_template()
+    for r_idx, got_payload in enumerate(attempt0_payloads):
+        expected_prompt = format_writer_prompt(w0, w0.agents[r_idx], tmpl)
+        expected_messages = [{"role": "user", "content": expected_prompt}]
+        expected_num_ctx = decide_num_ctx(
+            estimate_prompt_tokens(expected_messages),
+            DEFAULT_WRITER_NUM_PREDICT,
+            max_num_ctx=DEFAULT_WRITER_MAX_NUM_CTX,
+            margin=NUM_CTX_MARGIN_TOKENS,
+            step=NUM_CTX_STEP_TOKENS,
+        )
+        main_payload = {
+            "model": PINNED_WRITER_MODEL_TAG,
+            "messages": expected_messages,
+            "think": False,
+            "stream": False,
+            "options": {
+                "temperature": 0,
+                "seed": int(w0.seed),
+                "num_predict": DEFAULT_WRITER_NUM_PREDICT,
+                "num_ctx": expected_num_ctx,
+            },
+        }
+        assert got_payload["options"]["seed"] == derive_call_seed(int(w0.seed), r_idx, 0)
+        assert got_payload["options"]["seed"] != int(w0.seed)
+        assert "min_p" not in got_payload["options"]
+        assert got_payload["options"]["temperature"] == 0
+        # Byte-identical to `main` once `options["seed"]` is replaced by `int(w0.seed)`:
+        got_with_main_seed = json.loads(json.dumps(got_payload))
+        got_with_main_seed["options"]["seed"] = int(w0.seed)
+        assert json.dumps(got_with_main_seed, sort_keys=True, separators=(",", ":")) == json.dumps(
+            main_payload, sort_keys=True, separators=(",", ":")
+        )
+
+    # --- Requirement 2 & 7: Single-turn retries by default, rewritten rule note, retry options, exact counter, no model text ---
+    draft_secret_marker = "REFUSED_DRAFT_MODEL_PROSE_SECRET_MARKER_ALPHA"
+    orig_stake = w0.stake_edges[0].description
+    bad_stake = (
+        f"Gia is an absent party ({draft_secret_marker}) who depends on the location of the index reel "
+        "for tomorrow's courier handoff."
+    )
+    failing_r0_draft = passing_r0.replace(orig_stake, bad_stake)
+
+    # Check every check_id and event variant in format_repair_retry_line for single-turn rules:
+    for req in WRITER_PROSE_REQUIREMENTS:
+        for fk in ("absent", "altered", "false"):
+            exc_s = RenderCheckError(
+                "reason",
+                check_id=req.check_id,
+                failing_sentence=draft_secret_marker,
+                failure_kind=fk,
+            )
+            note_s = format_repair_retry_line(exc_s)
+            assert note_s.startswith(f"Repair note (rule broken: check {req.check_id}, {fk}): ")
+            assert "keep your earlier text" not in note_s.lower()
+            assert "earlier text" not in note_s.lower()
+            assert draft_secret_marker not in note_s
+            assert "\\b" not in note_s and "(?:" not in note_s
+    for fk in ("absent", "altered", "false"):
+        for variant in (None, "station_move", "occluded_see"):
+            exc_e = RenderCheckError(
+                "reason",
+                check_id="c_fidelity_missing_event",
+                failing_sentence=draft_secret_marker,
+                event_index=12,
+                event_kind="move" if variant != "occluded_see" else "see",
+                failure_kind=fk,
+                event_variant=variant,
+            )
+            note_e = format_repair_retry_line(exc_e)
+            ev_k_expected = "move" if variant != "occluded_see" else "see"
+            assert note_e.startswith(
+                f"Repair note (rule broken: event 12 ({ev_k_expected}, check c_fidelity_missing_event), {fk}): "
+            )
+            assert "keep your earlier text" not in note_e.lower()
+            assert "earlier text" not in note_e.lower()
+            assert draft_secret_marker not in note_e
+            assert "\\b" not in note_e and "(?:" not in note_e
+
+    single_turn_payloads: list[dict[str, Any]] = []
+    counted_prompts: list[str] = []
+
+    def _exact_counter(rendered_text: str) -> int:
+        counted_prompts.append(rendered_text)
+        # Return 3200 on attempt 0 and 3260 on the single-turn retry (which adds the repair line)
+        return 3260 if "Repair note (rule broken:" in rendered_text else 3200
+
+    def _single_turn_retry_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            assert payload is not None
+            idx = len(single_turn_payloads)
+            single_turn_payloads.append(json.loads(json.dumps(payload)))
+            # Call 0: r0 attempt 0 fails; Call 1: r0 attempt 1 passes; Call 2: r1 attempt 0 passes
+            txt = failing_r0_draft if idx == 0 else (passing_r0 if idx == 1 else passing_r1)
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3200 if idx != 1 else 3260,
+                "eval_count": 790,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_st = tmp_path / "single_turn_default_run"
+    summary_st = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_st,
+        writer_kind="ollama",
+        max_retries=2,
+        grant_id="test-grant-req2",
+        http_transport=_single_turn_retry_transport,
+        start_owned_server=False,
+        prompt_token_counter=_exact_counter,
+    )
+    assert len(single_turn_payloads) == 3
+    # Call 0 (r0 attempt 0):
+    assert single_turn_payloads[0]["options"] == {
+        "temperature": 0,
+        "seed": derive_call_seed(int(w0.seed), 0, 0),
+        "num_predict": DEFAULT_WRITER_NUM_PREDICT,
+        "num_ctx": decide_num_ctx(3200, DEFAULT_WRITER_NUM_PREDICT, max_num_ctx=DEFAULT_WRITER_MAX_NUM_CTX),
+    }
+    # Call 1 (r0 attempt 1 - single-turn retry):
+    retry_msgs = single_turn_payloads[1]["messages"]
+    assert len(retry_msgs) == 1
+    assert retry_msgs[0]["role"] == "user"
+    assert draft_secret_marker not in json.dumps(retry_msgs)
+    assert failing_r0_draft not in json.dumps(retry_msgs)
+    assert "Repair note (rule broken: check c_fidelity_stake_edge, altered):" in retry_msgs[0]["content"]
+    assert "keep your earlier text" not in retry_msgs[0]["content"].lower()
+    assert single_turn_payloads[1]["options"] == {
+        "temperature": RETRY_TEMPERATURE,
+        "min_p": RETRY_MIN_P,
+        "seed": derive_call_seed(int(w0.seed), 0, 1),
+        "num_predict": DEFAULT_WRITER_NUM_PREDICT,
+        "num_ctx": decide_num_ctx(3260, DEFAULT_WRITER_NUM_PREDICT, max_num_ctx=DEFAULT_WRITER_MAX_NUM_CTX),
+    }
+    # Verify exact tokenizer was invoked on the single-turn retry messages as well:
+    assert render_ollama_qwen35_prompt(retry_msgs, think=False) in counted_prompts
+
+    # --- Requirement 5 & 7: Recorded fields on rows and kept items; no evaluation-split filter in code; no model text in new fields ---
+    gen_rows_st = [
+        json.loads(line)
+        for line in (out_st / "generations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(gen_rows_st) == 3
+    assert gen_rows_st[0]["attempt"] == 0
+    assert gen_rows_st[0]["temperature"] == 0.0
+    assert gen_rows_st[0]["min_p"] is None
+    assert gen_rows_st[0]["seed"] == derive_call_seed(int(w0.seed), 0, 0)
+    assert gen_rows_st[0]["retry_form"] == ""
+    assert gen_rows_st[0]["prompt_tokens_exact"] == 3200
+
+    assert gen_rows_st[1]["attempt"] == 1
+    assert gen_rows_st[1]["temperature"] == RETRY_TEMPERATURE
+    assert gen_rows_st[1]["min_p"] == RETRY_MIN_P
+    assert gen_rows_st[1]["seed"] == derive_call_seed(int(w0.seed), 0, 1)
+    assert gen_rows_st[1]["retry_form"] == "single_turn"
+    assert gen_rows_st[1]["prompt_tokens_exact"] == 3260
+    assert draft_secret_marker not in json.dumps(gen_rows_st[1])
+
+    assert gen_rows_st[2]["attempt"] == 0
+    assert gen_rows_st[2]["temperature"] == 0.0
+    assert gen_rows_st[2]["min_p"] is None
+    assert gen_rows_st[2]["seed"] == derive_call_seed(int(w0.seed), 1, 0)
+    assert gen_rows_st[2]["retry_form"] == ""
+
+    # Check kept items in part_public/items.jsonl and sealed_store/keys.sealed.jsonl:
+    # Both r0 (passed on attempt 1) and r1 (passed on attempt 0) are in the outputs (no evaluation-split filter in code),
+    # and each carries its attempt, temperature, min_p, seed, and sampling dict.
+    pub_items = [
+        json.loads(line)
+        for line in (out_st / "part_public" / "items.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    sealed_items = [
+        json.loads(line)
+        for line in (out_st / "sealed_store" / "keys.sealed.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(pub_items) == 2 and len(sealed_items) == 2
+    by_r_idx = {row["rendering_index"]: row for row in sealed_items}
+    assert by_r_idx[0]["attempt"] == 1
+    assert by_r_idx[0]["temperature"] == RETRY_TEMPERATURE
+    assert by_r_idx[0]["min_p"] == RETRY_MIN_P
+    assert by_r_idx[0]["seed"] == derive_call_seed(int(w0.seed), 0, 1)
+    assert by_r_idx[0]["sampling"] == {
+        "attempt": 1,
+        "temperature": RETRY_TEMPERATURE,
+        "min_p": RETRY_MIN_P,
+        "seed": derive_call_seed(int(w0.seed), 0, 1),
+    }
+    assert by_r_idx[1]["attempt"] == 0
+    assert by_r_idx[1]["temperature"] == 0.0
+    assert by_r_idx[1]["min_p"] is None
+    assert by_r_idx[1]["seed"] == derive_call_seed(int(w0.seed), 1, 0)
+    assert by_r_idx[1]["sampling"] == {
+        "attempt": 0,
+        "temperature": 0.0,
+        "min_p": None,
+        "seed": derive_call_seed(int(w0.seed), 1, 0),
+    }
+    pub_by_focal = {row["focal_agent"]: row for row in pub_items}
+    assert pub_by_focal[w0.agents[0]]["attempt"] == 1
+    assert pub_by_focal[w0.agents[0]]["temperature"] == RETRY_TEMPERATURE
+    assert pub_by_focal[w0.agents[0]]["min_p"] == RETRY_MIN_P
+    assert pub_by_focal[w0.agents[0]]["seed"] == derive_call_seed(int(w0.seed), 0, 1)
+    assert pub_by_focal[w0.agents[0]]["sampling"] == by_r_idx[0]["sampling"]
+    assert pub_by_focal[w0.agents[1]]["attempt"] == 0
+    assert pub_by_focal[w0.agents[1]]["sampling"] == by_r_idx[1]["sampling"]
+
+    # Check checkpoint.json and checkpoint.sealed.json:
+    ckpt_pub = json.loads((out_st / "checkpoint.json").read_text(encoding="utf-8"))
+    ckpt_sealed = json.loads((out_st / "sealed_store" / "checkpoint.sealed.json").read_text(encoding="utf-8"))
+    assert ckpt_pub["header"]["short_circuit_dead_scenarios"] is False
+    assert ckpt_pub["header"]["dead_scenario_mode"] == "continue_other_rendering"
+    assert ckpt_pub["header"]["retry_form"] == "single_turn"
+    ckpt_pub_kr = ckpt_pub["scenarios"][0]["kept_renderings"]
+    assert ckpt_pub_kr[0]["attempt"] == 1 and ckpt_pub_kr[0]["temperature"] == RETRY_TEMPERATURE
+    assert ckpt_pub_kr[0]["min_p"] == RETRY_MIN_P and ckpt_pub_kr[0]["seed"] == derive_call_seed(int(w0.seed), 0, 1)
+    assert ckpt_pub_kr[1]["attempt"] == 0 and ckpt_pub_kr[1]["temperature"] == 0.0 and ckpt_pub_kr[1]["min_p"] is None
+    assert ckpt_sealed["scenarios"][0]["rendering_0"]["sampling"] == by_r_idx[0]["sampling"]
+    assert ckpt_sealed["scenarios"][0]["rendering_1"]["sampling"] == by_r_idx[1]["sampling"]
+    assert draft_secret_marker not in (out_st / "checkpoint.json").read_text(encoding="utf-8")
+
+    # --- Requirement 4: Explicit multi-turn option still works when chosen (with retry sampling options & derived seed) ---
+    mt_payloads: list[dict[str, Any]] = []
+
+    def _mt_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            assert payload is not None
+            idx = len(mt_payloads)
+            mt_payloads.append(json.loads(json.dumps(payload)))
+            txt = failing_r0_draft if idx == 0 else (passing_r0 if idx == 1 else passing_r1)
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3100,
+                "eval_count": 780,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_mt = tmp_path / "multi_turn_opt_in_run"
+    summary_mt = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_mt,
+        writer_kind="ollama",
+        max_retries=1,
+        multi_turn_retries=True,
+        grant_id="test-grant-req4",
+        http_transport=_mt_transport,
+        start_owned_server=False,
+    )
+    assert summary_mt["retry_form"] == "multi_turn"
+    assert len(mt_payloads) == 3
+    assert len(mt_payloads[1]["messages"]) == 3
+    assert mt_payloads[1]["messages"][1] == {"role": "assistant", "content": failing_r0_draft}
+    assert mt_payloads[1]["messages"][2]["content"].startswith("Keep your earlier text exactly as it was; change only ")
+    assert mt_payloads[1]["options"]["temperature"] == RETRY_TEMPERATURE
+    assert mt_payloads[1]["options"]["min_p"] == RETRY_MIN_P
+    assert mt_payloads[1]["options"]["seed"] == derive_call_seed(int(w0.seed), 0, 1)
+
+    # --- Requirement 6: Short-circuit switch off (default) vs on, recorded in summary and run records ---
+    sc_calls_off: list[int] = []
+
+    def _dead_r0_transport_off(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            assert payload is not None
+            idx = len(sc_calls_off)
+            sc_calls_off.append(idx)
+            # r0 fails attempt 0 and attempt 1; r1 passes attempt 0
+            txt = failing_r0_draft if idx < 2 else passing_r1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3100,
+                "eval_count": 780,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_sc_off = tmp_path / "sc_off_run"
+    summary_sc_off = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_sc_off,
+        writer_kind="ollama",
+        max_retries=1,
+        short_circuit_dead_scenarios=False,
+        grant_id="test-grant-req6-off",
+        http_transport=_dead_r0_transport_off,
+        start_owned_server=False,
+    )
+    # With short-circuit OFF (default), r1 is still written and checked after dead r0 (3 calls total: r0 a0, r0 a1, r1 a0):
+    assert len(sc_calls_off) == 3
+    assert summary_sc_off["short_circuit_dead_scenarios"] is False
+    assert summary_sc_off["dead_scenario_mode"] == "continue_other_rendering"
+    assert summary_sc_off["calls_refused"] == 2 and summary_sc_off["calls_kept"] == 1
+    assert summary_sc_off["renderings_refused"] == 1 and summary_sc_off["renderings_kept"] == 1
+    assert summary_sc_off["scenarios_refused"] == 1 and summary_sc_off["scenarios_kept"] == 0
+    sealing_off = json.loads((out_sc_off / "sealed_store" / "sealing.sealed.json").read_text(encoding="utf-8"))
+    assert sealing_off["writer_provenance"]["short_circuit_dead_scenarios"] is False
+    assert sealing_off["writer_provenance"]["dead_scenario_mode"] == "continue_other_rendering"
+
+    sc_calls_on: list[int] = []
+
+    def _dead_r0_transport_on(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            assert payload is not None
+            idx = len(sc_calls_on)
+            sc_calls_on.append(idx)
+            txt = failing_r0_draft if idx < 2 else passing_r1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3100,
+                "eval_count": 780,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_sc_on = tmp_path / "sc_on_run"
+    summary_sc_on = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_sc_on,
+        writer_kind="ollama",
+        max_retries=1,
+        short_circuit_dead_scenarios=True,
+        grant_id="test-grant-req6-on",
+        http_transport=_dead_r0_transport_on,
+        start_owned_server=False,
+    )
+    # With short-circuit ON, rendering 1 is NOT called once rendering 0 fails all attempts (only 2 calls: r0 a0, r0 a1):
+    assert len(sc_calls_on) == 2
+    assert summary_sc_on["short_circuit_dead_scenarios"] is True
+    assert summary_sc_on["dead_scenario_mode"] == "short_circuit"
+    assert summary_sc_on["calls_refused"] == 2 and summary_sc_on["calls_kept"] == 0
+    assert summary_sc_on["renderings_refused"] == 1 and summary_sc_on["renderings_kept"] == 0
+    assert summary_sc_on["scenarios_refused"] == 1 and summary_sc_on["scenarios_kept"] == 0
+    sealing_on = json.loads((out_sc_on / "sealed_store" / "sealing.sealed.json").read_text(encoding="utf-8"))
+    assert sealing_on["writer_provenance"]["short_circuit_dead_scenarios"] is True
+    assert sealing_on["writer_provenance"]["dead_scenario_mode"] == "short_circuit"
+    ckpt_on = json.loads((out_sc_on / "checkpoint.json").read_text(encoding="utf-8"))
+    assert ckpt_on["header"]["short_circuit_dead_scenarios"] is True
+    assert ckpt_on["header"]["dead_scenario_mode"] == "short_circuit"
+
 
