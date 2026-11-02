@@ -375,6 +375,11 @@ def _render_public_from_sealed(
             if s_row.get("min_p") is not None
             else None
         )
+        item_presence_penalty = (
+            float(s_row["presence_penalty"])
+            if s_row.get("presence_penalty") is not None
+            else None
+        )
         item_seed = int(s_row.get("seed", 0))
         item_goal_mode = str(s_row.get("goal_mode", "copy"))
         item_goal_source = dict(s_row.get("goal_source") or {})
@@ -390,6 +395,7 @@ def _render_public_from_sealed(
             "attempt": item_attempt,
             "temperature": item_temp,
             "min_p": item_min_p,
+            "presence_penalty": item_presence_penalty,
             "seed": item_seed,
             "sampling": {
                 "attempt": item_attempt,
@@ -629,6 +635,7 @@ def write_sealed_dataset(
                 "attempt": rend.attempt,
                 "temperature": rend.temperature,
                 "min_p": rend.min_p,
+                "presence_penalty": rend.presence_penalty,
                 "seed": rend.seed,
                 "sampling": {
                     "attempt": rend.attempt,
