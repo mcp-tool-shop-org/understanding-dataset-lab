@@ -488,11 +488,25 @@ if lock_file.exists():
 
 reconcile_locks_present = sorted(p.name for p in reconcile_lock_dir.glob("*.lock")) if reconcile_lock_dir.is_dir() else []
 
+try:
+    stdin_is_devnull = os.path.samefile("/proc/self/fd/0", "/dev/null")
+except Exception:
+    try:
+        s0 = os.fstat(0)
+        sn = os.stat("/dev/null")
+        stdin_is_devnull = (s0.st_rdev == sn.st_rdev and s0.st_rdev != 0)
+    except Exception:
+        stdin_is_devnull = False
+
+if os.environ.get("FAKE_COLAB_READ_STDIN") == "1":
+    _ = sys.stdin.read()
+
 record = {{
     "subcmd": subcmd,
     "args": args,
     "lock_held": lock_held,
     "reconcile_locks": reconcile_locks_present,
+    "stdin_is_devnull": stdin_is_devnull,
     "ts": time.time(),
 }}
 with calls_log.open("a", encoding="utf-8", newline="\\n") as fh:
@@ -507,10 +521,11 @@ if subcmd == "sessions":
     if positionals:
         sys.stderr.write(f"Got unexpected extra arguments ({{' '.join(positionals)}})\\n")
         raise SystemExit(2)
+    row_tpl = os.environ.get("FAKE_COLAB_SESSIONS_TEMPLATE", "[{{sid}}] m-s-fake-{{sid}} | {{gpu}}")
     for s in sessions:
         sid = s.get("session_id", "?")
         gpu = s.get("gpu", "CPU")
-        print(f"[{{sid}}] m-s-fake-{{sid}} | {{gpu}}")
+        print(row_tpl.format(sid=sid, gpu=gpu))
     raise SystemExit(0)
 
 if subcmd == "new":
@@ -1663,7 +1678,8 @@ def test_fetch_race_watchdog_waits_for_in_progress_main_fetch_before_stop(
     assert proc.returncode == 0
 
 
-_CONTRACT_STOP_TOKENS = {"|", "||", "&&", ";", ">", ">>", "2>&1", ")", "&"}
+_CONTRACT_STOP_TOKENS = {"|", "||", "&&", ";", ">", ">>", "2>&1", "<", "</dev/null", "0</dev/null", ")", "&"}
+_STDIN_CMD_BOUNDARY_TOKENS = {"|", "||", "&&", ";", ")", "&"}
 _CONTRACT_VALUE_OPTS_BY_CMD: dict[str, set[str]] = {
     "new": {"-s", "--session", "--gpu", "--tpu"},
     "exec": {"-s", "--session", "-f", "--file", "--timeout", "--env", "--output-image"},
@@ -1783,6 +1799,57 @@ def extract_and_check_colab_invocations(
     return extracted, errors
 
 
+def check_colab_invocations_have_stdin_devnull(
+    script_text: str,
+    script_name: str = "launch.sh",
+) -> tuple[list[tuple[int, str, str]], list[str]]:
+    """Parse a bash script and fail if any `colab` or `run_colab` invocation lacks `</dev/null`."""
+    import re
+
+    checked: list[tuple[int, str, str]] = []
+    errors: list[str] = []
+
+    joined = re.sub(r"\\\n", " ", script_text)
+    for lineno, raw_line in enumerate(joined.splitlines(), start=1):
+        stripped = raw_line.lstrip()
+        if stripped.startswith("#") or stripped.startswith("printf ") or stripped.startswith("echo "):
+            continue
+        code = raw_line.split("#", 1)[0]
+        toks = _shlex_tokens(code)
+        for i, tok in enumerate(toks):
+            if tok not in ("colab", "run_colab", "cli"):
+                continue
+            if i + 1 >= len(toks):
+                continue
+            nxt = toks[i + 1]
+            if nxt == "()" or (i > 0 and toks[i - 1] == "function"):
+                continue
+            is_subcmd = bool(re.fullmatch(r"[a-z][a-z0-9-]*", nxt))
+            is_passthrough = nxt in ("$@", '"$@"')
+            if not (is_subcmd or is_passthrough):
+                continue
+            rest = toks[i + 2 :]
+            cmd_slice: list[str] = []
+            for r in rest:
+                if r in _STDIN_CMD_BOUNDARY_TOKENS:
+                    break
+                cmd_slice.append(r)
+            has_devnull = False
+            for k, r in enumerate(cmd_slice):
+                if r in ("</dev/null", "0</dev/null"):
+                    has_devnull = True
+                    break
+                if r in ("<", "0<") and k + 1 < len(cmd_slice) and cmd_slice[k + 1] == "/dev/null":
+                    has_devnull = True
+                    break
+            checked.append((lineno, tok, nxt))
+            if not has_devnull:
+                errors.append(
+                    f"{script_name}:{lineno}: {tok} {nxt}: missing </dev/null stdin redirect"
+                )
+    return checked, errors
+
+
 def test_colab_cli_contract_file_sha256_and_static_invocation_check() -> None:
     assert CLI_CONTRACT_JSON.is_file()
     assert vm_udlab.sha256_file(CLI_CONTRACT_JSON) == CLI_CONTRACT_SHA256
@@ -1886,7 +1953,7 @@ def test_launch_sh_dry_mode_prints_expected_command_sequence_without_secrets(tmp
     assert lines_stub == [
         "colab sessions",
         "colab new -s udlab-dry-stub-01",
-        f"colab exec -s udlab-dry-stub-01 --env UDLAB_STEP=gate -f {wsl_vm_py} --timeout 180",
+        f"colab exec -s udlab-dry-stub-01 --env UDLAB_STEP=gate -f {wsl_vm_py} --timeout=180",
         f"colab upload -s udlab-dry-stub-01 {wsl_out_dir}/stage/repo_bundle.tar.gz /content/repo_bundle.tar.gz",
         f"colab upload -s udlab-dry-stub-01 {wsl_out_dir}/stage/exact_ctx_prompts.tar.gz /content/exact_ctx_prompts.tar.gz",
         (
@@ -1896,7 +1963,7 @@ def test_launch_sh_dry_mode_prints_expected_command_sequence_without_secrets(tmp
             f"--env UDLAB_REPO_TAR=/content/repo_bundle.tar.gz --env UDLAB_PROMPTS_DIR=/content/udlab_prompts "
             f"--env UDLAB_PROMPTS_TAR=/content/exact_ctx_prompts.tar.gz --env UDLAB_RUN_DIR=/content/udlab_run "
             f"--env UDLAB_RESULT_TAR=/content/result.tar.gz --env UDLAB_STATUS_FILE=/content/vm_status.json "
-            f"--env UDLAB_RESUME=0 -f {wsl_vm_py} --timeout 6960"
+            f"--env UDLAB_RESUME=0 -f {wsl_vm_py} --timeout=6960"
         ),
         f"colab download -s udlab-dry-stub-01 /content/result.tar.gz {wsl_out_dir}/result.tar.gz",
         f"colab download -s udlab-dry-stub-01 /content/vm_status.json {wsl_out_dir}/vm_status.json",
@@ -1915,7 +1982,7 @@ def test_launch_sh_dry_mode_prints_expected_command_sequence_without_secrets(tmp
     assert lines_gpu == [
         "colab sessions",
         "colab new --gpu A100 -s udlab-dry-gpu-01",
-        f"colab exec -s udlab-dry-gpu-01 --env UDLAB_STEP=gate -f {wsl_vm_py} --timeout 180",
+        f"colab exec -s udlab-dry-gpu-01 --env UDLAB_STEP=gate -f {wsl_vm_py} --timeout=180",
         f"colab upload -s udlab-dry-gpu-01 {wsl_out_dir}/stage/repo_bundle.tar.gz /content/repo_bundle.tar.gz",
         f"colab upload -s udlab-dry-gpu-01 {wsl_out_dir}/stage/exact_ctx_prompts.tar.gz /content/exact_ctx_prompts.tar.gz",
         (
@@ -1925,7 +1992,7 @@ def test_launch_sh_dry_mode_prints_expected_command_sequence_without_secrets(tmp
             f"--env UDLAB_REPO_TAR=/content/repo_bundle.tar.gz --env UDLAB_PROMPTS_DIR=/content/udlab_prompts "
             f"--env UDLAB_PROMPTS_TAR=/content/exact_ctx_prompts.tar.gz --env UDLAB_RUN_DIR=/content/udlab_run "
             f"--env UDLAB_RESULT_TAR=/content/result.tar.gz --env UDLAB_STATUS_FILE=/content/vm_status.json "
-            f"--env UDLAB_RESUME=0 -f {wsl_vm_py} --timeout 5160"
+            f"--env UDLAB_RESUME=0 -f {wsl_vm_py} --timeout=5160"
         ),
         f"colab download -s udlab-dry-gpu-01 /content/result.tar.gz {wsl_out_dir}/result.tar.gz",
         f"colab download -s udlab-dry-gpu-01 /content/vm_status.json {wsl_out_dir}/vm_status.json",
@@ -2162,7 +2229,7 @@ def test_fix5_4_timeout_hierarchy_margins_and_single_wall_derivation(tmp_path: P
     proc_custom = subprocess.run(["bash", "-c", cmd_custom], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc_custom.returncode == 0
     assert "--env UDLAB_WALL_SECONDS=3300" in proc_custom.stdout
-    assert "--timeout 3360" in proc_custom.stdout
+    assert "--timeout=3360" in proc_custom.stdout
 
 
 def test_fix5_5_session_name_reuse_refused_before_new_and_failed_new_does_not_stop_existing(
@@ -2279,6 +2346,245 @@ def test_fix5_6_fake_colab_help_flag_prints_and_exits_zero_with_no_side_effects(
     assert not env_paths["calls_log"].exists()
     assert env_paths["sessions_file"].read_text(encoding="utf-8") == before_sessions
     assert not env_paths["stopped_file"].exists()
+
+
+def test_fix6_1_and_3_all_colab_calls_redirect_stdin_from_devnull_and_static_guard(
+    tmp_path: Path,
+) -> None:
+    # 1. Static guard check on launch.sh: every colab / run_colab invocation must have </dev/null
+    script_text = LAUNCH_SH.read_text(encoding="utf-8")
+    checked, errors = check_colab_invocations_have_stdin_devnull(script_text)
+    assert errors == [], f"Missing </dev/null on colab invocations in launch.sh: {errors}"
+    assert len(checked) >= 16
+    checked_targets = {nxt for _, _, nxt in checked}
+    assert {"sessions", "new", "exec", "upload", "download", "stop", "$@"}.issubset(checked_targets)
+
+    # 2. Negative fixture: any colab or run_colab invocation without </dev/null must fail the static guard
+    negative_fixture = "\n".join(
+        [
+            'out="$(colab "$@" 2>"$err_file")" || rc=$?',
+            'PRE_SESSIONS="$(run_colab sessions || true)"',
+            'run_colab new -s "$SESSION_NAME" >/dev/null',
+            'timeout "$GATE_TIMEOUT_SECONDS" colab exec -s "$S" --env UDLAB_STEP=gate -f "$SCRIPT_DIR/vm_udlab.py" --timeout="$GATE_TIMEOUT_SECONDS" 2>&1',
+            'timeout "$UPLOAD_TIMEOUT_SECONDS" colab upload -s "$S" "$REPO_TAR" "/content/repo_bundle.tar.gz" 2>&1',
+            'colab download -s "$1" "/content/result.tar.gz" "$2/result.tar.gz" >/dev/null 2>&1 || true',
+            'colab stop -s "$S" >/dev/null 2>&1 || true',
+            'colab stop -s "$S" </dev/null >/dev/null 2>&1 || true',
+        ]
+    )
+    neg_checked, neg_errors = check_colab_invocations_have_stdin_devnull(
+        negative_fixture, script_name="negative_fixture.sh"
+    )
+    assert len(neg_checked) == 8
+    assert len(neg_errors) == 7
+    assert any("negative_fixture.sh:1: colab $@: missing </dev/null stdin redirect" in e for e in neg_errors)
+    assert any("negative_fixture.sh:2: run_colab sessions: missing </dev/null stdin redirect" in e for e in neg_errors)
+    assert any("negative_fixture.sh:3: run_colab new: missing </dev/null stdin redirect" in e for e in neg_errors)
+    assert any("negative_fixture.sh:4: colab exec: missing </dev/null stdin redirect" in e for e in neg_errors)
+    assert any("negative_fixture.sh:5: colab upload: missing </dev/null stdin redirect" in e for e in neg_errors)
+    assert any("negative_fixture.sh:6: colab download: missing </dev/null stdin redirect" in e for e in neg_errors)
+    assert any("negative_fixture.sh:7: colab stop: missing </dev/null stdin redirect" in e for e in neg_errors)
+
+    # 3. Runtime verification: run launch.sh with a non-/dev/null stdin and FAKE_COLAB_READ_STDIN=1;
+    # every colab CLI invocation must see /dev/null on fd 0 and never block on caller stdin.
+    env_paths = _setup_fake_colab_env(tmp_path)
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+    out_dir = tmp_path / "run_stdin_closed"
+    lock_file = tmp_path / "colab-open-stdin.lock"
+    caller_stdin_file = tmp_path / "caller_stdin.txt"
+    caller_stdin_file.write_text("caller terminal input line\n", encoding="utf-8", newline="\n")
+
+    cmd = (
+        f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_paths['state_dir'])}'; "
+        f"export FAKE_COLAB_READ_STDIN=1; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file)}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{_to_wsl_path(prompts_dir)}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{_to_wsl_path(index_json)}'; "
+        f"export VM_DRYRUN=1; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir)}' --run-id stdin-check-01 < '{_to_wsl_path(caller_stdin_file)}'"
+    )
+    proc = subprocess.run(
+        ["bash", "-c", cmd],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    calls = [
+        json.loads(line)
+        for line in env_paths["calls_log"].read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(calls) == 10
+    assert all(c.get("stdin_is_devnull") is True for c in calls), f"Expected all calls to have stdin=/dev/null: {calls}"
+
+
+def test_fix6_2_dry_and_live_timeout_forms_and_argument_order_match(tmp_path: Path) -> None:
+    env_paths = _setup_fake_colab_env(tmp_path)
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+    out_dir = tmp_path / "run_match_forms"
+    lock_file = tmp_path / "colab-open-match.lock"
+    wsl_launch = _to_wsl_path(LAUNCH_SH)
+    wsl_out_dir = _to_wsl_path(out_dir)
+
+    base_exports = (
+        f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_paths['state_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file)}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{_to_wsl_path(prompts_dir)}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{_to_wsl_path(index_json)}'; "
+        f"export VM_DRYRUN=1; "
+    )
+
+    proc_dry = subprocess.run(
+        ["bash", "-c", f"{base_exports} bash '{wsl_launch}' --stub --dry --out-dir '{wsl_out_dir}' --run-id match-01"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc_dry.returncode == 0, proc_dry.stderr
+    dry_tokens_list = [ln.strip().split() for ln in proc_dry.stdout.splitlines() if ln.strip()]
+
+    proc_live = subprocess.run(
+        ["bash", "-c", f"{base_exports} bash '{wsl_launch}' --stub --out-dir '{wsl_out_dir}' --run-id match-01"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc_live.returncode == 0, f"stdout={proc_live.stdout}\nstderr={proc_live.stderr}"
+    calls = [
+        json.loads(line)
+        for line in env_paths["calls_log"].read_text(encoding="utf-8").splitlines()
+    ]
+    live_tokens_list = [["colab", c["subcmd"], *c["args"]] for c in calls]
+
+    assert len(dry_tokens_list) == len(live_tokens_list) == 10
+    for dry_toks, live_toks in zip(dry_tokens_list, live_tokens_list, strict=True):
+        if dry_toks[1] == "upload":
+            # Stage directory in live mode is a mktemp dir, but option positions and archive basenames match
+            assert dry_toks[:4] == live_toks[:4]
+            assert Path(dry_toks[4]).name == Path(live_toks[4]).name
+            assert dry_toks[5:] == live_toks[5:]
+        else:
+            assert dry_toks == live_toks, f"Dry command {dry_toks} != live command {live_toks}"
+
+    # Specifically verify both gate exec and run exec use `--timeout=<seconds>` in both dry and live
+    assert dry_tokens_list[2][-1] == "--timeout=180"
+    assert live_tokens_list[2][-1] == "--timeout=180"
+    assert dry_tokens_list[5][-1] == "--timeout=6960"
+    assert live_tokens_list[5][-1] == "--timeout=6960"
+
+
+def test_fix6_4_unverified_sessions_format_documented_and_smoke_receipt_records_shape_without_ids(
+    tmp_path: Path,
+) -> None:
+    readme_path = SCRIPTS_COLAB_DIR / "README.md"
+    launch_text = LAUNCH_SH.read_text(encoding="utf-8")
+    readme_text = readme_path.read_text(encoding="utf-8")
+
+    # 1. Verify comment in launch.sh and line in README.md state that the real `colab sessions` row format
+    # has not been checked yet, while leaving the `[name]` match in place.
+    assert 'grep -Fq "[$SESSION_NAME]"' in launch_text
+    assert "colab sessions" in launch_text and "row format has not been checked yet" in launch_text
+    assert "colab sessions" in readme_text and "row format has not been checked yet" in readme_text
+
+    # 2. Run CPU `--session-smoke` and verify its receipt records the real output's shape with no tokens or ids.
+    env_paths = _setup_fake_colab_env(tmp_path / "smoke_ok")
+    out_dir = tmp_path / "smoke_ok_out"
+    lock_file = tmp_path / "smoke_ok.lock"
+
+    cmd = (
+        f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_paths['state_dir'])}'; "
+        f"export COLAB_LOCK_DIR='{_to_wsl_path(env_paths['colab_locks_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file)}'; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --session-smoke --out-dir '{_to_wsl_path(out_dir)}' --run-id smoke-shape-01"
+    )
+    proc = subprocess.run(
+        ["bash", "-c", cmd],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+
+    receipt_path = out_dir / "vm_receipt.json"
+    assert receipt_path.is_file()
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    outcome = json.loads((out_dir / "outcome.draft.json").read_text(encoding="utf-8"))
+
+    for doc in (receipt, outcome):
+        assert "sessions_output_shape" in doc
+        shape = doc["sessions_output_shape"]
+        assert shape["format_verified_on_real_cli"] is False
+        assert shape["pre_sessions"] == {
+            "line_count": 1,
+            "line_shapes": ["[<TOKEN>] <TOKEN> | <TOKEN>"],
+            "contains_bracketed_session": False,
+            "matches_bracket_prefix": False,
+        }
+        assert shape["mid_sessions"] == {
+            "line_count": 2,
+            "line_shapes": [
+                "[<TOKEN>] <TOKEN> | <TOKEN>",
+                "[<SESSION>] <TOKEN> | <TOKEN>",
+            ],
+            "contains_bracketed_session": True,
+            "matches_bracket_prefix": True,
+        }
+        assert shape["post_sessions"] == {
+            "line_count": 1,
+            "line_shapes": ["[<TOKEN>] <TOKEN> | <TOKEN>"],
+            "contains_bracketed_session": False,
+            "matches_bracket_prefix": False,
+        }
+        serialized_shape = json.dumps(shape)
+        assert "sess-neighbour-keep" not in serialized_shape
+        assert "m-s-fake" not in serialized_shape
+        assert "udlab-smoke-shape-01" not in serialized_shape
+        assert "FAKE_SECRET_TOKEN" not in serialized_shape
+
+    # 3. Even if `colab sessions` outputs an unbracketed format, `--session-smoke` still records the shape
+    # (without tokens or ids) in the receipt and stops the session via the trap.
+    env_alt = _setup_fake_colab_env(tmp_path / "smoke_alt")
+    out_alt = tmp_path / "smoke_alt_out"
+    lock_alt = tmp_path / "smoke_alt.lock"
+    cmd_alt = (
+        f"export PATH='{_to_wsl_path(env_alt['fake_bin'])}:{_to_wsl_path(env_alt['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_alt['state_dir'])}'; "
+        f"export FAKE_COLAB_SESSIONS_TEMPLATE='{{sid}} :: m-s-secret-{{sid}} ({{gpu}})'; "
+        f"export COLAB_LOCK_DIR='{_to_wsl_path(env_alt['colab_locks_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_alt)}'; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --session-smoke --out-dir '{_to_wsl_path(out_alt)}' --run-id smoke-alt-01"
+    )
+    proc_alt = subprocess.run(
+        ["bash", "-c", cmd_alt],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc_alt.returncode != 0
+    receipt_alt = json.loads((out_alt / "vm_receipt.json").read_text(encoding="utf-8"))
+    shape_alt = receipt_alt["sessions_output_shape"]
+    assert shape_alt["mid_sessions"]["line_shapes"] == [
+        "<TOKEN> :: <TOKEN> (<TOKEN>)",
+        "<SESSION> :: <TOKEN> (<TOKEN>)",
+    ]
+    assert shape_alt["mid_sessions"]["contains_bracketed_session"] is False
+    assert "m-s-secret" not in json.dumps(shape_alt)
+    assert "sess-neighbour-keep" not in json.dumps(shape_alt)
+    assert "udlab-smoke-alt-01" not in json.dumps(shape_alt)
+
 
 
 

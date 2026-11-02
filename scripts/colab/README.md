@@ -4,7 +4,7 @@ Per-window Google Colab launcher (`launch.sh`) and VM runner (`vm_udlab.py`) for
 
 ## Usage
 
-- **First-rung CPU session smoke** (opens `udlab-<run-id>`, writes reconciler lock, checks `colab sessions`, stops session in trap, verifies removal; no upload or model pull):
+- **First-rung CPU session smoke** (opens `udlab-<run-id>`, writes reconciler lock, checks `colab sessions`, records the real `colab sessions` output shape without tokens or ids in `vm_receipt.json` and `outcome.draft.json`, stops session in trap, verifies removal; no upload or model pull):
   ```bash
   bash scripts/colab/launch.sh --session-smoke --out-dir runs/smoke-window --run-id smoke-01
   ```
@@ -28,3 +28,4 @@ Per-window Google Colab launcher (`launch.sh`) and VM runner (`vm_udlab.py`) for
 - **(c)** The log check matches prompt lines of 40 or more characters, after whitespace is collapsed. Shorter lines, and a prompt line split across two log lines, are not detected.
 - **(d)** The prompts tar is on the VM's local disk from upload until the exact-count gate. If the wall timeout hard-kills the job in that span, the tar stays on the VM until the session is stopped, which the trap and watchdog always do.
 - **(e)** Stub-rung disk behaviour: the CPU stub pulls the full model, and below 40 GiB free it refuses with `DISK_TOO_SMALL` and records the free bytes in the receipt (`free_disk_bytes` in `vm_receipt.json`).
+- **(f)** Name-reuse guard and session listing: the real `colab sessions` row format has not been checked yet. The `[<name>]` match is left in place and unverified until the first-rung CPU `--session-smoke` run checks it and records the real output's shape (no tokens or ids) in its receipt (`vm_receipt.json` and `outcome.draft.json`).
