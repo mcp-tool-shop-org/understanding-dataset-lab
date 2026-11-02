@@ -10098,3 +10098,670 @@ def test_96_retry_sampling_single_turn_derived_seeds_kept_items_and_short_circui
     assert ckpt_on["header"]["dead_scenario_mode"] == "short_circuit"
 
 
+def test_97_goal_mode_copy_attempt0_payload_hash_matches_29c6653_and_d_rule_sentence_unchanged() -> None:
+    """Test 97 (Card udlab-goal-splice):
+    - `copy` mode is the default and its attempt-0 request payload (messages, options, seed) is byte-identical
+      to `main` at `29c6653` for the same scenario (`base_seed=20261030, count=1`).
+    - `d_rule_sentence` behavior and its prompt text are unchanged in both `copy` and `splice` modes, and
+      only the single `c_fidelity_goal` requirement line differs between the two prompt templates.
+    """
+    from typing import Any
+    from udlab_generator import (
+        DEFAULT_GOAL_MODE,
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+        VALID_GOAL_MODES,
+        OllamaWriter,
+        RenderCheckError,
+        check_rendered_prose,
+        format_writer_prompt,
+        load_writer_prompt_template,
+        render_world_template,
+        render_world_template_goal_tokens,
+        verify_prompt_and_checker_requirements_aligned,
+    )
+
+    assert DEFAULT_GOAL_MODE == "copy"
+    assert VALID_GOAL_MODES == frozenset({"copy", "splice"})
+
+    # 1. Verify prompt alignment in both modes and that ONLY the c_fidelity_goal line differs:
+    reqs_copy = verify_prompt_and_checker_requirements_aligned(goal_mode="copy")
+    reqs_splice = verify_prompt_and_checker_requirements_aligned(goal_mode="splice")
+    assert [r.check_id for r in reqs_copy] == [r.check_id for r in reqs_splice]
+    assert len(reqs_copy) == 27
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    prompt_copy_r0 = format_writer_prompt(w0, w0.agents[0], goal_mode="copy")
+    prompt_splice_r0 = format_writer_prompt(w0, w0.agents[0], goal_mode="splice")
+
+    copy_lines = prompt_copy_r0.splitlines()
+    splice_lines = prompt_splice_r0.splitlines()
+    assert len(copy_lines) == len(splice_lines)
+    diffs = [
+        (idx, c_line, s_line)
+        for idx, (c_line, s_line) in enumerate(zip(copy_lines, splice_lines))
+        if c_line != s_line
+    ]
+    assert len(diffs) == 1
+    _, copy_goal_line, splice_goal_line = diffs[0]
+    assert copy_goal_line == (
+        "- (c_fidelity_goal) Copy each agent's goal_text (goals[agent].goal_text) verbatim into setup (required)."
+    )
+    assert splice_goal_line == (
+        "- (c_fidelity_goal) For each agent in agents, write the placeholder token [[GOAL:<agent>]] as its own "
+        "sentence in setup instead of copying goal_text (required; code expands each [[GOAL:<agent>]] to goals[agent].goal_text)."
+    )
+
+    # 2. Verify d_rule_sentence prompt line and behavior are unchanged in both modes:
+    expected_d_rule_line = (
+        '- (d_rule_sentence) Include belief-persistence rule once in setup (required): '
+        '"Each agent assumes an object remains where that agent last saw it in open view or heard a witness state '
+        'it was placed, and assumes another agent looks where they last saw or communicated that agent perceiving it."'
+    )
+    assert expected_d_rule_line in copy_lines
+    assert expected_d_rule_line in splice_lines
+    assert (
+        hashlib.sha256(expected_d_rule_line.encode("utf-8")).hexdigest()
+        == "ce2efa9a5c102289f3ec869f1a2ab0c471d79ded3435fed0167556f4f3d01243"
+    )
+
+    passing_copy_r0 = render_world_template(w0, w0.agents[0])
+    passing_splice_r0 = render_world_template_goal_tokens(w0, w0.agents[0])
+    check_rendered_prose(passing_copy_r0, w0, focal_agent=w0.agents[0], goal_mode="copy")
+    check_rendered_prose(passing_splice_r0, w0, focal_agent=w0.agents[0], goal_mode="splice")
+
+    rule_sentence_literal = (
+        "Each agent assumes an object remains where that agent last saw it in open view "
+        "or heard a witness state it was placed, and assumes another agent looks "
+        "where they last saw or communicated that agent perceiving it."
+    )
+    for mode_name, base_text in (("copy", passing_copy_r0), ("splice", passing_splice_r0)):
+        missing_rule = base_text.replace(rule_sentence_literal, "")
+        with pytest.raises(RenderCheckError) as exc_d_abs:
+            check_rendered_prose(missing_rule, w0, focal_agent=w0.agents[0], goal_mode=mode_name)
+        assert exc_d_abs.value.check_id == "d_rule_sentence"
+        assert exc_d_abs.value.failure_kind == "absent"
+
+        altered_rule = base_text.replace(
+            "last saw it in open view",
+            "previously noticed it in open view",
+        )
+        with pytest.raises(RenderCheckError) as exc_d_alt:
+            check_rendered_prose(altered_rule, w0, focal_agent=w0.agents[0], goal_mode=mode_name)
+        assert exc_d_alt.value.check_id == "d_rule_sentence"
+        assert exc_d_alt.value.failure_kind == "altered"
+
+    # 3. Verify copy mode attempt-0 request payload hash matches pinned 29c6653 hash:
+    passing_copy_r1 = render_world_template(w0, w0.agents[1])
+    captured_payloads: list[dict[str, Any]] = []
+
+    def _copy_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            assert payload is not None
+            idx = len(captured_payloads)
+            captured_payloads.append(json.loads(json.dumps(payload)))
+            return {
+                "message": {"role": "assistant", "content": passing_copy_r0 if idx == 0 else passing_copy_r1},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3100,
+                "eval_count": 780,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    writer_copy = OllamaWriter(
+        grant_id="test-grant-copy-29c6653",
+        http_transport=_copy_transport,
+        start_owned_server=False,
+    )
+    assert writer_copy.goal_mode == "copy"
+    pair_copy = writer_copy.render_scenario_pair(w0)
+    assert pair_copy is not None and len(captured_payloads) == 2
+
+    r0_canonical = json.dumps(captured_payloads[0], sort_keys=True, separators=(",", ":"))
+    r1_canonical = json.dumps(captured_payloads[1], sort_keys=True, separators=(",", ":"))
+    assert (
+        hashlib.sha256(r0_canonical.encode("utf-8")).hexdigest()
+        == "029615ed90403f100152055f5f15107e9c56feda867c68546553a22978b9d2b8"
+    )
+    assert (
+        hashlib.sha256(r1_canonical.encode("utf-8")).hexdigest()
+        == "8aba5e2c4cda48c0a4b2dffe8078ce997d12c7f39802712203b49f3ee2255a59"
+    )
+    assert (
+        hashlib.sha256(captured_payloads[0]["messages"][0]["content"].encode("utf-8")).hexdigest()
+        == "f5007999c2903e9324d9f4cbcdbfebe8c8281bf88114ecad48625abdf93784ee"
+    )
+    assert (
+        hashlib.sha256(captured_payloads[1]["messages"][0]["content"].encode("utf-8")).hexdigest()
+        == "136107fd3d5fe7b9a7bc1392888bdc4365d19be84e0ec5c5abcf8e89e6e0fc08"
+    )
+    assert captured_payloads[0]["options"] == {
+        "temperature": 0,
+        "seed": 1939265819,
+        "num_predict": 4096,
+        "num_ctx": 9216,
+    }
+    assert captured_payloads[1]["options"] == {
+        "temperature": 0,
+        "seed": 645167106,
+        "num_predict": 4096,
+        "num_ctx": 9216,
+    }
+    assert pair_copy[0].goal_mode == "copy"
+    assert pair_copy[0].goal_source == {"Eva": "model_text", "Dan": "model_text", "Cara": "model_text"}
+    assert pair_copy[1].goal_mode == "copy"
+    assert pair_copy[1].goal_source == {"Eva": "model_text", "Dan": "model_text", "Cara": "model_text"}
+
+
+def test_98_goal_mode_splice_token_expansion_goal_source_and_stored_vs_sealed_prose(tmp_path: Path) -> None:
+    """Test 98 (Card udlab-goal-splice):
+    - In `splice` mode, a fake writer emitting `[[GOAL:<agent>]]` tokens in setup passes; expanded prose contains
+      each agent's exact `goal_text` once with a trailing period and no `[[` remains in any stored prose.
+    - Raw model output (with `[[GOAL:<agent>]]` tokens) is kept only in `sealed_store/responses.sealed.jsonl`,
+      while `RenderedScenario.prose`, `part_public/items.jsonl`, `sealed_store/keys.sealed.jsonl`, and checkpoints
+      store the expanded prose and record `goal_mode: "splice"` and `goal_source: {"Eva": "token", ...}`.
+    - If the model writes the goal sentence itself instead of a token, that passes in `splice` mode and records
+      `goal_source: "model_text"` for that agent.
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+        recheck_saved_responses,
+        render_world_template,
+        render_world_template_goal_tokens,
+        splice_goal_tokens,
+    )
+    from udlab_generator.cli import build_and_probe_dataset, main as cli_main, verify_written_dataset
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    assert w0.agents == ("Eva", "Dan", "Cara")
+
+    raw_token_r0 = render_world_template_goal_tokens(w0, "Eva")
+    raw_token_r1 = render_world_template_goal_tokens(w0, "Dan")
+    assert "[[GOAL:Eva]]" in raw_token_r0
+    assert "[[GOAL:Dan]]" in raw_token_r0
+    assert "[[GOAL:Cara]]" in raw_token_r0
+    for ag in w0.agents:
+        assert w0.goals[ag].goal_text not in raw_token_r0
+
+    spliced_r0 = splice_goal_tokens(raw_token_r0, w0)
+    assert spliced_r0.goal_source == {"Eva": "token", "Dan": "token", "Cara": "token"}
+    assert "[[" not in spliced_r0.expanded_prose and "]]" not in spliced_r0.expanded_prose
+    for ag in w0.agents:
+        assert spliced_r0.expanded_prose.count(f"{w0.goals[ag].goal_text}.") == 1
+    assert check_rendered_prose(raw_token_r0, w0, focal_agent="Eva", goal_mode="splice") == ()
+
+    # Rendering 0 uses all 3 tokens; Rendering 1 writes Dan's goal_text directly as prose and uses tokens for Eva & Cara:
+    mixed_r1 = raw_token_r1.replace("[[GOAL:Dan]]", f"{w0.goals['Dan'].goal_text}.")
+    assert "[[GOAL:Eva]]" in mixed_r1
+    assert "[[GOAL:Dan]]" not in mixed_r1
+    assert "[[GOAL:Cara]]" in mixed_r1
+
+    call_count = 0
+
+    def _splice_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal call_count
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            txt = raw_token_r0 if call_count == 0 else mixed_r1
+            call_count += 1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3080,
+                "eval_count": 760,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_dir = tmp_path / "splice_mode_run"
+    summary = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        goal_mode="splice",
+        grant_id="test-grant-splice-98",
+        http_transport=_splice_transport,
+        start_owned_server=False,
+    )
+    assert summary["goal_mode"] == "splice"
+    assert summary["scenarios_kept"] == 1
+    assert summary["renderings_kept"] == 2
+
+    build_summary_doc = json.loads((out_dir / "build_summary.json").read_text(encoding="utf-8"))
+    assert build_summary_doc["goal_mode"] == "splice"
+
+    sealing_doc = json.loads((out_dir / "sealed_store" / "sealing.sealed.json").read_text(encoding="utf-8"))
+    assert sealing_doc["writer_provenance"]["goal_mode"] == "splice"
+
+    # Check generations.jsonl and responses.sealed.jsonl:
+    gen_rows = [
+        json.loads(line)
+        for line in (out_dir / "generations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    resp_rows = [
+        json.loads(line)
+        for line in (out_dir / "sealed_store" / "responses.sealed.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(gen_rows) == 2 and len(resp_rows) == 2
+    assert all(r["goal_mode"] == "splice" for r in gen_rows)
+    assert all(r["goal_mode"] == "splice" for r in resp_rows)
+    assert resp_rows[0]["response_text"] == raw_token_r0
+    assert resp_rows[1]["response_text"] == mixed_r1
+    assert "[[GOAL:Eva]]" in resp_rows[0]["response_text"]
+
+    # Check public items, sealed keys, and checkpoints store expanded prose with no [[ tokens remaining:
+    pub_items = [
+        json.loads(line)
+        for line in (out_dir / "part_public" / "items.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    sealed_items = [
+        json.loads(line)
+        for line in (out_dir / "sealed_store" / "keys.sealed.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(pub_items) == 2 and len(sealed_items) == 2
+    for row in [*pub_items, *sealed_items]:
+        assert row["goal_mode"] == "splice"
+        assert "[[" not in row["prose"] and "]]" not in row["prose"]
+        for ag in w0.agents:
+            assert row["prose"].count(f"{w0.goals[ag].goal_text}.") == 1
+        if row["focal_agent"] == "Eva":
+            assert row["goal_source"] == {"Eva": "token", "Dan": "token", "Cara": "token"}
+        else:
+            assert row["goal_source"] == {"Eva": "token", "Dan": "model_text", "Cara": "token"}
+
+    ckpt_pub = json.loads((out_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    ckpt_sealed = json.loads((out_dir / "sealed_store" / "checkpoint.sealed.json").read_text(encoding="utf-8"))
+    assert ckpt_pub["header"]["goal_mode"] == "splice"
+    assert ckpt_sealed["header"]["goal_mode"] == "splice"
+    assert ckpt_pub["scenarios"][0]["kept_renderings"][0]["goal_mode"] == "splice"
+    assert ckpt_pub["scenarios"][0]["kept_renderings"][0]["goal_source"] == {
+        "Eva": "token",
+        "Dan": "token",
+        "Cara": "token",
+    }
+    assert ckpt_pub["scenarios"][0]["kept_renderings"][1]["goal_source"] == {
+        "Eva": "token",
+        "Dan": "model_text",
+        "Cara": "token",
+    }
+    assert "[[" not in ckpt_sealed["scenarios"][0]["rendering_0"]["prose"]
+    assert "[[" not in ckpt_sealed["scenarios"][0]["rendering_1"]["prose"]
+
+    # Offline recheck and verify-written both pass on the splice-mode output directory:
+    recheck_res = recheck_saved_responses(out_dir)
+    assert recheck_res["matches_recorded_verdicts"] is True
+    assert recheck_res["renderings_kept"] == 2
+    verify_res = verify_written_dataset(out_dir)
+    assert verify_res["generations_valid"] is True
+    assert verify_res["recount_verification"]["independent_b2_verified"] is True
+    assert verify_res["recount_verification"]["independent_recounts_verified"] is True
+    assert verify_res["recount_verification"]["prose_checks_passed"] is True
+
+    # Also test CLI --goal-mode splice with mock writer:
+    cli_out = tmp_path / "cli_mock_splice"
+    rc = cli_main(["--count", "2", "--seed", "20261030", "--out-dir", str(cli_out), "--goal-mode", "splice"])
+    assert rc == 0
+    cli_summary = json.loads((cli_out / "build_summary.json").read_text(encoding="utf-8"))
+    assert cli_summary["goal_mode"] == "splice"
+    assert recheck_saved_responses(cli_out)["matches_recorded_verdicts"] is True
+
+
+def test_99_goal_mode_splice_token_faults_and_single_turn_repair_notes() -> None:
+    """Test 99 (Card udlab-goal-splice):
+    - Missing token, duplicate token, unknown-agent token, and token in paragraph 2 each fail as `c_fidelity_goal`
+      with the right `failure_kind` (`absent` for missing token; `false` for duplicate, unknown-agent, or paragraph-2 token)
+      and a single-turn repair note naming `c_fidelity_goal` and quoting no model text.
+    """
+    from udlab_generator import (
+        RenderCheckError,
+        check_rendered_prose,
+        collect_prose_faults,
+        format_repair_retry_line,
+        render_world_template_goal_tokens,
+    )
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    base_splice = render_world_template_goal_tokens(w0, "Eva")
+    setup_p1, events_p2 = base_splice.split("\n\n", 1)
+
+    secret_marker = "SECRET_MODEL_GOAL_DRAFT_LEAK_99"
+
+    # 1. Missing token (Eva's token removed from setup, and Eva's goal_text not present):
+    missing_tok_prose = f"{setup_p1.replace('[[GOAL:Eva]]', f'Eva waited near the entrance ({secret_marker}).')}\n\n{events_p2}"
+    with pytest.raises(RenderCheckError) as exc_missing:
+        check_rendered_prose(missing_tok_prose, w0, focal_agent="Eva", goal_mode="splice")
+    assert exc_missing.value.check_id == "c_fidelity_goal"
+    assert exc_missing.value.failure_kind == "absent"
+    assert exc_missing.value.goal_mode == "splice"
+    faults_missing = collect_prose_faults(missing_tok_prose, w0, focal_agent="Eva", goal_mode="splice")
+    assert [f.check_id for f in faults_missing] == ["c_fidelity_goal"]
+    assert faults_missing[0].failure_kind == "absent"
+    note_missing = format_repair_retry_line(exc_missing.value)
+    assert note_missing == (
+        "Repair note (rule broken: check c_fidelity_goal, absent): include one sentence naming the setup agent goal text "
+        "(check c_fidelity_goal) so that it satisfies: For each agent in agents, write the placeholder token "
+        "[[GOAL:<agent>]] as its own sentence in setup instead of copying goal_text (required; code expands each "
+        "[[GOAL:<agent>]] to goals[agent].goal_text)."
+    )
+    assert secret_marker not in note_missing
+
+    # 2. Duplicate token (`[[GOAL:Eva]]` appears twice in setup):
+    dup_tok_prose = f"{setup_p1} [[GOAL:Eva]]\n\n{events_p2}"
+    with pytest.raises(RenderCheckError) as exc_dup:
+        check_rendered_prose(dup_tok_prose, w0, focal_agent="Eva", goal_mode="splice")
+    assert exc_dup.value.check_id == "c_fidelity_goal"
+    assert exc_dup.value.failure_kind == "false"
+    assert exc_dup.value.goal_mode == "splice"
+    faults_dup = collect_prose_faults(dup_tok_prose, w0, focal_agent="Eva", goal_mode="splice")
+    assert any(f.check_id == "c_fidelity_goal" and f.failure_kind == "false" for f in faults_dup)
+    note_dup = format_repair_retry_line(exc_dup.value)
+    assert note_dup == (
+        "Repair note (rule broken: check c_fidelity_goal, false): remove any false setup statement "
+        "(the setup agent goal text, check c_fidelity_goal) and follow: For each agent in agents, write the "
+        "placeholder token [[GOAL:<agent>]] as its own sentence in setup instead of copying goal_text "
+        "(required; code expands each [[GOAL:<agent>]] to goals[agent].goal_text)."
+    )
+    assert "[[GOAL:Eva]]" not in note_dup
+
+    # 3. Unknown-agent token (`[[GOAL:Mallory]]` in setup):
+    unknown_tok_prose = f"{setup_p1.replace('[[GOAL:Eva]]', '[[GOAL:Mallory]]')}\n\n{events_p2}"
+    with pytest.raises(RenderCheckError) as exc_unk:
+        check_rendered_prose(unknown_tok_prose, w0, focal_agent="Eva", goal_mode="splice")
+    assert exc_unk.value.check_id == "c_fidelity_goal"
+    assert exc_unk.value.failure_kind == "false"
+    assert exc_unk.value.goal_mode == "splice"
+    faults_unk = collect_prose_faults(unknown_tok_prose, w0, focal_agent="Eva", goal_mode="splice")
+    assert any(f.check_id == "c_fidelity_goal" and f.failure_kind == "false" for f in faults_unk)
+    note_unk = format_repair_retry_line(exc_unk.value)
+    assert note_unk == note_dup
+    assert "Mallory" not in note_unk
+
+    # 4. Token in paragraph 2 (event paragraph):
+    para2_tok_prose = f"{setup_p1}\n\n[[GOAL:Eva]] {events_p2}"
+    with pytest.raises(RenderCheckError) as exc_p2:
+        check_rendered_prose(para2_tok_prose, w0, focal_agent="Eva", goal_mode="splice")
+    assert exc_p2.value.check_id == "c_fidelity_goal"
+    assert exc_p2.value.failure_kind == "false"
+    assert exc_p2.value.goal_mode == "splice"
+    faults_p2 = collect_prose_faults(para2_tok_prose, w0, focal_agent="Eva", goal_mode="splice")
+    assert any(f.check_id == "c_fidelity_goal" and f.failure_kind == "false" for f in faults_p2)
+    note_p2 = format_repair_retry_line(exc_p2.value)
+    assert note_p2 == note_dup
+
+
+def test_100_paired_seed_bank_and_mcnemar_comparison_end_to_end(tmp_path: Path) -> None:
+    """Test 100 (Card udlab-goal-splice):
+    - Paired comparison tool (`run_paired_seed_bank` and `compare_paired_runs`, plus CLI flags
+      `--paired-seed-bank` and `--paired-compare`) runs attempt 0 only (`max_retries=0`) on a fixed
+      seed-bank JSON file in `copy` and `splice` modes with identical per-call seeds (`derive_call_seed`).
+    - Pairs outputs by `(scenario_seed, rendering_index)` and reports per-fault counts by mode,
+      rendering pass rate and scenario pass rate by mode, discordant pairs table, and McNemar's exact
+      two-sided p-value matching hand-calculated values.
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+        compare_paired_runs,
+        derive_call_seed,
+        mcnemar_exact_p_value,
+        render_world_template,
+        render_world_template_goal_tokens,
+        run_paired_seed_bank,
+        world_from_scenario_seed,
+    )
+    from udlab_generator.cli import main as cli_main
+
+    # 1. Verify McNemar exact two-sided binomial p-value against hand-calculated fractions:
+    # n = 0 -> p = 1.0
+    assert mcnemar_exact_p_value(0, 0) == 1.0
+    # b = 0, c = 6 -> 2 * C(6, 0) / 2^6 = 2 / 64 = 0.03125
+    assert mcnemar_exact_p_value(0, 6) == 0.03125
+    assert mcnemar_exact_p_value(6, 0) == 0.03125
+    # b = 0, c = 5 -> 2 * C(5, 0) / 2^5 = 2 / 32 = 0.0625
+    assert mcnemar_exact_p_value(0, 5) == 0.0625
+    # b = 1, c = 7 -> 2 * (C(8, 0) + C(8, 1)) / 2^8 = 2 * 9 / 256 = 18 / 256 = 0.0703125
+    assert mcnemar_exact_p_value(1, 7) == 0.0703125
+    # b = 2, c = 2 -> min(1.0, 2 * (1 + 4 + 6) / 16) = 1.0
+    assert mcnemar_exact_p_value(2, 2) == 1.0
+
+    # 2. Construct a 4-scenario seed bank (8 renderings total) and run both copy and splice modes:
+    seed_list = [20261101, 20261102, 20261103, 20261104]
+    seed_bank_path = tmp_path / "seed_bank.json"
+    seed_bank_path.write_text(json.dumps(seed_list), encoding="utf-8")
+
+    worlds = [world_from_scenario_seed(s, index=i) for i, s in enumerate(seed_list)]
+    assert [int(w.seed) for w in worlds] == seed_list
+
+    # In `copy` mode:
+    # - Scenario 0 (r0, r1): both pass
+    # - Scenario 1 (r0, r1): both fail `c_fidelity_goal` (paraphrased goal text)
+    # - Scenario 2 (r0, r1): both fail `c_fidelity_goal` (paraphrased goal text)
+    # - Scenario 3: r0 fails `c_fidelity_goal`; r1 fails `a_no_markers` ("[F1]" leaked)
+    copy_responses: list[str] = []
+    splice_responses: list[str] = []
+    for idx, w in enumerate(worlds):
+        for r_idx in (0, 1):
+            focal = w.agents[r_idx]
+            good_copy = render_world_template(w, focal)
+            good_splice = render_world_template_goal_tokens(w, focal)
+            if idx == 0:
+                copy_responses.append(good_copy)
+                splice_responses.append(good_splice)
+            elif idx in (1, 2) or (idx == 3 and r_idx == 0):
+                ag0 = w.agents[0]
+                paraphrased_copy = good_copy.replace(
+                    w.goals[ag0].goal_text,
+                    f"{ag0} hopes to finish the shift early",
+                )
+                copy_responses.append(paraphrased_copy)
+                splice_responses.append(good_splice)
+            else:
+                # idx == 3, r_idx == 1: both fail a_no_markers
+                copy_responses.append(f"[F1] {good_copy}")
+                splice_responses.append(f"[F1] {good_splice}")
+
+    copy_call_idx = 0
+
+    def _copy_paired_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal copy_call_idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            txt = copy_responses[copy_call_idx]
+            copy_call_idx += 1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3050,
+                "eval_count": 770,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    splice_call_idx = 0
+
+    def _splice_paired_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal splice_call_idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            txt = splice_responses[splice_call_idx]
+            splice_call_idx += 1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3050,
+                "eval_count": 770,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    copy_out_path = tmp_path / "paired_copy.json"
+    splice_out_path = tmp_path / "paired_splice.json"
+    comp_out_path = tmp_path / "paired_compare.json"
+
+    run_copy = run_paired_seed_bank(
+        seed_bank=seed_bank_path,
+        goal_mode="copy",
+        output_path=copy_out_path,
+        grant_id="test-grant-paired-copy",
+        http_transport=_copy_paired_transport,
+        commit_sha="29c6653",
+    )
+    run_splice = run_paired_seed_bank(
+        seed_bank=seed_bank_path,
+        goal_mode="splice",
+        output_path=splice_out_path,
+        grant_id="test-grant-paired-splice",
+        http_transport=_splice_paired_transport,
+        commit_sha="29c6653",
+    )
+
+    assert copy_call_idx == 8 and splice_call_idx == 8
+    assert run_copy["goal_mode"] == "copy"
+    assert run_copy["max_retries"] == 0
+    assert run_copy["commit"] == "29c6653"
+    assert run_copy["manifest_digest"] == PINNED_WRITER_MANIFEST_DIGEST
+    assert run_copy["passed_renderings"] == 2 and run_copy["num_renderings"] == 8
+    assert run_copy["rendering_pass_rate"] == 0.25
+    assert run_copy["passed_scenarios"] == 1 and run_copy["num_scenarios"] == 4
+    assert run_copy["scenario_pass_rate"] == 0.25
+    assert run_copy["fault_counts"] == {
+        "a_no_markers_bracket": 1,
+        "a_no_markers_fact_id": 1,
+        "c_fidelity_goal": 5,
+    }
+
+    assert run_splice["goal_mode"] == "splice"
+    assert run_splice["passed_renderings"] == 7 and run_splice["num_renderings"] == 8
+    assert run_splice["rendering_pass_rate"] == 0.875
+    assert run_splice["passed_scenarios"] == 3 and run_splice["num_scenarios"] == 4
+    assert run_splice["scenario_pass_rate"] == 0.75
+    assert run_splice["fault_counts"] == {
+        "a_no_markers_bracket": 1,
+        "a_no_markers_fact_id": 1,
+    }
+
+    # Verify identical per-call seeds in both modes:
+    for r_c, r_s in zip(run_copy["renderings"], run_splice["renderings"]):  # type: ignore[arg-type]
+        assert r_c["scenario_seed"] == r_s["scenario_seed"]
+        assert r_c["rendering_index"] == r_s["rendering_index"]
+        assert r_c["call_seed"] == r_s["call_seed"]
+        assert r_c["call_seed"] == derive_call_seed(int(r_c["scenario_seed"]), int(r_c["rendering_index"]), 0)
+
+    # Run CLI `--paired-compare`:
+    rc_comp = cli_main(
+        [
+            "--paired-compare",
+            str(copy_out_path),
+            str(splice_out_path),
+            "--paired-out",
+            str(comp_out_path),
+        ]
+    )
+    assert rc_comp == 0
+    comp = json.loads(comp_out_path.read_text(encoding="utf-8"))
+    assert comp["per_fault_counts_by_mode"] == {
+        "copy": {
+            "a_no_markers_bracket": 1,
+            "a_no_markers_fact_id": 1,
+            "c_fidelity_goal": 5,
+        },
+        "splice": {
+            "a_no_markers_bracket": 1,
+            "a_no_markers_fact_id": 1,
+        },
+    }
+    assert comp["rendering_pass_rate_by_mode"] == {
+        "copy": {"passed": 2, "total": 8, "rate": 0.25},
+        "splice": {"passed": 7, "total": 8, "rate": 0.875},
+    }
+    assert comp["scenario_pass_rate_by_mode"] == {
+        "copy": {"passed": 1, "total": 4, "rate": 0.25},
+        "splice": {"passed": 3, "total": 4, "rate": 0.75},
+    }
+    assert comp["contingency"] == {
+        "both_pass": 2,
+        "copy_pass_splice_fail": 0,
+        "copy_fail_splice_pass": 5,
+        "both_fail": 1,
+    }
+    # Hand-calculated exact McNemar p-value for b=0, c=5: 2 * (1/32) = 0.0625
+    assert comp["mcnemar_exact"] == {
+        "b": 0,
+        "c": 5,
+        "n_discordant": 5,
+        "p_value_two_sided": 0.0625,
+    }
+    assert len(comp["discordant_pairs"]) == 5
+    assert all(dp["direction"] == "splice_only" for dp in comp["discordant_pairs"])
+    assert all(dp["copy_faults"] == ["c_fidelity_goal"] and dp["splice_faults"] == [] for dp in comp["discordant_pairs"])
+
+    # Verify seed-mismatch guard in compare_paired_runs:
+    tampered_splice = json.loads(json.dumps(run_splice))
+    tampered_splice["renderings"][0]["call_seed"] += 1
+    with pytest.raises(ValueError, match="Per-call seed mismatch"):
+        compare_paired_runs(run_copy, tampered_splice)
+
+
+

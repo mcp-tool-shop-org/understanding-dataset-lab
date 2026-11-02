@@ -11,6 +11,7 @@ import datetime
 import hashlib
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -108,8 +109,18 @@ RETRY_TEMPERATURE: float = 0.6
 RETRY_MIN_P: float = 0.05
 DEFAULT_RETRY_FORM: str = "single_turn"
 VALID_RETRY_FORMS: frozenset[str] = frozenset({"single_turn", "multi_turn"})
+DEFAULT_GOAL_MODE: str = "copy"
+VALID_GOAL_MODES: frozenset[str] = frozenset({"copy", "splice"})
+VALID_GOAL_SOURCES: frozenset[str] = frozenset({"model_text", "token"})
+GOAL_TOKEN_PREFIX: str = "[[GOAL:"
+GOAL_TOKEN_SUFFIX: str = "]]"
 CALL_SEED_DOMAIN_TAG: str = "udlab.call_seed.v1"
 CALL_SEED_MASK_31BIT: int = 0x7FFFFFFF
+
+
+def format_goal_placeholder_token(agent: str) -> str:
+    """Return the unambiguous setup goal placeholder token `[[GOAL:<agent>]]` for `agent`."""
+    return f"{GOAL_TOKEN_PREFIX}{agent}{GOAL_TOKEN_SUFFIX}"
 
 
 def derive_call_seed(scenario_seed: int, rendering_index: int, attempt: int) -> int:
@@ -226,9 +237,12 @@ class RenderCheckError(ValueError):
         failing_sentence_length: int | None = None,
         failure_kind: str = "altered",
         event_variant: str | None = None,
+        goal_mode: str = DEFAULT_GOAL_MODE,
     ) -> None:
         if failure_kind not in VALID_FAILURE_KINDS:
             raise ValueError(f"failure_kind must be one of {sorted(VALID_FAILURE_KINDS)}, got {failure_kind!r}")
+        if goal_mode not in VALID_GOAL_MODES:
+            raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
         if not failing_sentence_sha256 and failing_sentence and failing_sentence != "no candidate sentence":
             norm_fail = normalize_prose_line_endings(failing_sentence)
             failing_sentence_sha256 = _sha256_bytes(norm_fail.encode("utf-8"))
@@ -240,6 +254,7 @@ class RenderCheckError(ValueError):
         # Card ue: `station_move` or `occluded_see` when the failing event is one of those forms, so the
         # repair line can name the required wording; not sealed and not recorded.
         self.event_variant = event_variant
+        self.goal_mode = goal_mode
         self.failing_sentence_sha256 = failing_sentence_sha256
         self.failing_sentence_offset = failing_sentence_offset
         self.failing_sentence_length = failing_sentence_length
@@ -289,14 +304,31 @@ class RenderedScenario:
     temperature: float = ATTEMPT_0_TEMPERATURE
     min_p: float | None = None
     seed: int = 0
+    goal_mode: str = DEFAULT_GOAL_MODE
+    goal_source: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
+        if self.goal_mode not in VALID_GOAL_MODES:
+            raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {self.goal_mode!r}")
         if self.seed == 0 and self.world is not None:
             object.__setattr__(
                 self,
                 "seed",
                 derive_call_seed(int(self.world.seed), int(self.rendering_index), int(self.attempt)),
             )
+        if self.goal_source is None and self.world is not None:
+            default_src = "token" if self.goal_mode == "splice" else "model_text"
+            object.__setattr__(
+                self,
+                "goal_source",
+                {ag: default_src for ag in self.world.agents},
+            )
+        elif self.goal_source is not None:
+            for ag, src in self.goal_source.items():
+                if src not in VALID_GOAL_SOURCES:
+                    raise ValueError(
+                        f"goal_source[{ag!r}] must be one of {sorted(VALID_GOAL_SOURCES)}, got {src!r}"
+                    )
 
 
 @dataclass(frozen=True)
@@ -992,6 +1024,14 @@ def format_setup_required_vs_optional_summary() -> str:
     return f"required in setup: {req_names}; optional in setup if not falsely stated: {opt_names}"
 
 
+COPY_GOAL_RULE_TEXT: str = (
+    "Copy each agent's goal_text (goals[agent].goal_text) verbatim into setup (required)."
+)
+SPLICE_GOAL_RULE_TEXT: str = (
+    "For each agent in agents, write the placeholder token [[GOAL:<agent>]] as its own sentence in setup "
+    "instead of copying goal_text (required; code expands each [[GOAL:<agent>]] to goals[agent].goal_text)."
+)
+
 WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ProseRequirementSpec(
         "c_fidelity_paragraph_split",
@@ -1040,7 +1080,7 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ),
     ProseRequirementSpec(
         "c_fidelity_goal",
-        "Copy each agent's goal_text (goals[agent].goal_text) verbatim into setup (required).",
+        COPY_GOAL_RULE_TEXT,
     ),
     ProseRequirementSpec(
         "c_fidelity_absent_party",
@@ -1127,17 +1167,53 @@ WRITER_PROSE_REQUIREMENTS_BY_ID: dict[str, ProseRequirementSpec] = {
 _PROMPT_REQ_LINE_RE = re.compile(r"^-\s+\(([a-z0-9_]+)\)\s+(.+)$")
 
 
+def get_writer_prose_requirements(
+    goal_mode: str = DEFAULT_GOAL_MODE,
+) -> tuple[ProseRequirementSpec, ...]:
+    """Return the writer prose requirement specs for `goal_mode` (`'copy'` or `'splice'`)."""
+    if goal_mode not in VALID_GOAL_MODES:
+        raise ValueError(
+            f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}"
+        )
+    if goal_mode == "copy":
+        return WRITER_PROSE_REQUIREMENTS
+    return tuple(
+        ProseRequirementSpec(
+            req.check_id,
+            SPLICE_GOAL_RULE_TEXT,
+            required_in_setup=req.required_in_setup,
+        )
+        if req.check_id == "c_fidelity_goal"
+        else req
+        for req in WRITER_PROSE_REQUIREMENTS
+    )
+
+
 def render_writer_prompt_constraints(
-    requirements: Sequence[ProseRequirementSpec] = WRITER_PROSE_REQUIREMENTS,
+    requirements: Sequence[ProseRequirementSpec] | None = None,
+    *,
+    goal_mode: str = DEFAULT_GOAL_MODE,
 ) -> str:
     """Render the `HARD CONSTRAINTS (MANDATORY):` bullet lines from `WRITER_PROSE_REQUIREMENTS`."""
-    return "\n".join(f"- ({req.check_id}) {req.rule_text}" for req in requirements)
+    resolved_reqs = (
+        requirements
+        if requirements is not None
+        else get_writer_prose_requirements(goal_mode)
+    )
+    return "\n".join(f"- ({req.check_id}) {req.rule_text}" for req in resolved_reqs)
 
 
-def parse_writer_prompt_requirements(prompt_text: str) -> tuple[ProseRequirementSpec, ...]:
+def parse_writer_prompt_requirements(
+    prompt_text: str,
+    *,
+    goal_mode: str = DEFAULT_GOAL_MODE,
+) -> tuple[ProseRequirementSpec, ...]:
     """Parse the mandatory requirement list from `prompt_text` (expanding `{hard_constraints_block}` if unformatted) and reject any untracked requirement lines."""
     expanded_text = (
-        prompt_text.replace(HARD_CONSTRAINTS_PLACEHOLDER, render_writer_prompt_constraints())
+        prompt_text.replace(
+            HARD_CONSTRAINTS_PLACEHOLDER,
+            render_writer_prompt_constraints(goal_mode=goal_mode),
+        )
         if HARD_CONSTRAINTS_PLACEHOLDER in prompt_text
         else prompt_text
     )
@@ -1179,6 +1255,7 @@ def parse_writer_prompt_requirements(prompt_text: str) -> tuple[ProseRequirement
 def get_checker_enforced_check_ids() -> tuple[str, ...]:
     """Extract every `check_id` enforced by `check_prose_no_markers`, `check_prose_banned_adverbs`, `check_prose_rule_and_hearing_threshold`, and `check_prose_render_fidelity`."""
     checker_fns = (
+        splice_goal_tokens,
         check_prose_no_markers,
         check_prose_banned_adverbs,
         check_prose_rule_and_hearing_threshold,
@@ -1212,8 +1289,11 @@ def get_checker_enforced_check_ids() -> tuple[str, ...]:
 
 def verify_prompt_and_checker_requirements_aligned(
     prompt_text: str | None = None,
+    *,
+    goal_mode: str = DEFAULT_GOAL_MODE,
 ) -> tuple[ProseRequirementSpec, ...]:
     """Verify that the writer prompt's parsed requirements, `WRITER_PROSE_REQUIREMENTS`, and the checker's enforced `check_id`s are identical."""
+    expected_reqs = get_writer_prose_requirements(goal_mode)
     if prompt_text is None:
         disk_raw = WRITER_PROMPT_PATH.read_text(encoding="utf-8")
         if HARD_CONSTRAINTS_PLACEHOLDER not in disk_raw:
@@ -1225,22 +1305,28 @@ def verify_prompt_and_checker_requirements_aligned(
                 raise ValueError(
                     f"On-disk writer prompt '{WRITER_PROMPT_PATH}' must not contain hand-copied requirement lines: {line!r}"
                 )
-        raw_text = disk_raw.replace(HARD_CONSTRAINTS_PLACEHOLDER, render_writer_prompt_constraints())
+        raw_text = disk_raw.replace(
+            HARD_CONSTRAINTS_PLACEHOLDER,
+            render_writer_prompt_constraints(goal_mode=goal_mode),
+        )
     else:
         raw_text = (
-            prompt_text.replace(HARD_CONSTRAINTS_PLACEHOLDER, render_writer_prompt_constraints())
+            prompt_text.replace(
+                HARD_CONSTRAINTS_PLACEHOLDER,
+                render_writer_prompt_constraints(goal_mode=goal_mode),
+            )
             if HARD_CONSTRAINTS_PLACEHOLDER in prompt_text
             else prompt_text
         )
-    parsed_prompt_reqs = parse_writer_prompt_requirements(raw_text)
-    if parsed_prompt_reqs != WRITER_PROSE_REQUIREMENTS:
+    parsed_prompt_reqs = parse_writer_prompt_requirements(raw_text, goal_mode=goal_mode)
+    if parsed_prompt_reqs != expected_reqs:
         prompt_ids = [r.check_id for r in parsed_prompt_reqs]
-        shared_ids = [r.check_id for r in WRITER_PROSE_REQUIREMENTS]
+        shared_ids = [r.check_id for r in expected_reqs]
         raise ValueError(
-            f"Writer prompt requirements diverge from WRITER_PROSE_REQUIREMENTS: prompt_ids={prompt_ids}, shared_ids={shared_ids}"
+            f"Writer prompt requirements diverge from WRITER_PROSE_REQUIREMENTS ({goal_mode}): prompt_ids={prompt_ids}, shared_ids={shared_ids}"
         )
     enforced_ids = set(get_checker_enforced_check_ids())
-    shared_id_set = {r.check_id for r in WRITER_PROSE_REQUIREMENTS}
+    shared_id_set = {r.check_id for r in expected_reqs}
     if enforced_ids != shared_id_set:
         raise ValueError(
             f"Checker enforced check_ids diverge from WRITER_PROSE_REQUIREMENTS: only_in_checker={sorted(enforced_ids - shared_id_set)}, only_in_shared={sorted(shared_id_set - enforced_ids)}"
@@ -1355,6 +1441,7 @@ def _raise_prose_check_error(
     event_kind: str | None = None,
     failure_kind: str = "altered",
     event_variant: str | None = None,
+    goal_mode: str = DEFAULT_GOAL_MODE,
 ) -> None:
     """Raise `RenderCheckError` after verifying `check_id` is registered in `WRITER_PROSE_REQUIREMENTS`, or record a `ProseFaultRecord` in collect-all mode."""
     if check_id not in WRITER_PROSE_REQUIREMENTS_BY_ID:
@@ -1378,6 +1465,7 @@ def _raise_prose_check_error(
         event_kind=event_kind,
         failure_kind=failure_kind,
         event_variant=event_variant,
+        goal_mode=goal_mode,
     )
 
 
@@ -1457,6 +1545,7 @@ def format_repair_retry_line(
     *,
     retry_form: str = DEFAULT_RETRY_FORM,
     failure_kind: str | None = None,
+    goal_mode: str | None = None,
 ) -> str:
     """Format a single repair-retry line from `exc.check_id` plus `absent`/`altered`/`false` flag, without key content or model text.
 
@@ -1471,6 +1560,13 @@ def format_repair_retry_line(
     resolved_kind = failure_kind if failure_kind is not None else getattr(exc, "failure_kind", "altered")
     if resolved_kind not in VALID_FAILURE_KINDS:
         raise ValueError(f"failure_kind must be one of {sorted(VALID_FAILURE_KINDS)}, got {resolved_kind!r}")
+    resolved_goal_mode = (
+        goal_mode
+        if goal_mode is not None
+        else str(getattr(exc, "goal_mode", DEFAULT_GOAL_MODE) or DEFAULT_GOAL_MODE)
+    )
+    if resolved_goal_mode not in VALID_GOAL_MODES:
+        raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {resolved_goal_mode!r}")
     is_single_turn = retry_form == "single_turn"
     if exc.event_index is not None and exc.event_kind is not None:
         hint = _REPAIR_HINT_BY_EVENT_VARIANT.get(
@@ -1536,7 +1632,8 @@ def format_repair_retry_line(
             f"({exc.event_kind}, check {exc.check_id}) so that it {hint}, leaving every other sentence unchanged."
         )
     target_item = _REPAIR_TARGET_BY_CHECK_ID.get(exc.check_id, "the failing item")
-    rule_spec = WRITER_PROSE_REQUIREMENTS_BY_ID.get(exc.check_id)
+    reqs_by_id = {req.check_id: req for req in get_writer_prose_requirements(resolved_goal_mode)}
+    rule_spec = reqs_by_id.get(exc.check_id)
     rule_hint = rule_spec.rule_text if rule_spec is not None else "satisfy this mandatory constraint."
     if is_single_turn:
         setup_prefix = f"Repair note (rule broken: check {exc.check_id}, {resolved_kind}): "
@@ -1594,8 +1691,14 @@ def _count_unchanged_sentences(attempt0_text: str, retry_text: str) -> tuple[int
     return unchanged, len(sents_0)
 
 
-def load_writer_prompt_template(path: Path | None = None) -> str:
+def load_writer_prompt_template(
+    path: Path | None = None,
+    *,
+    goal_mode: str = DEFAULT_GOAL_MODE,
+) -> str:
     """Load the `qwen3.6:35b` writer prompt text file, expand `{hard_constraints_block}` from `WRITER_PROSE_REQUIREMENTS`, and verify alignment."""
+    if goal_mode not in VALID_GOAL_MODES:
+        raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
     target = path or WRITER_PROMPT_PATH
     raw_disk_text = target.read_text(encoding="utf-8")
     if target == WRITER_PROMPT_PATH:
@@ -1609,7 +1712,10 @@ def load_writer_prompt_template(path: Path | None = None) -> str:
                     f"Writer prompt template '{target}' must not contain hand-maintained requirement lines: {line!r}"
                 )
     text = (
-        raw_disk_text.replace(HARD_CONSTRAINTS_PLACEHOLDER, render_writer_prompt_constraints())
+        raw_disk_text.replace(
+            HARD_CONSTRAINTS_PLACEHOLDER,
+            render_writer_prompt_constraints(goal_mode=goal_mode),
+        )
         if HARD_CONSTRAINTS_PLACEHOLDER in raw_disk_text
         else raw_disk_text
     )
@@ -1622,7 +1728,7 @@ def load_writer_prompt_template(path: Path | None = None) -> str:
             f"Writer prompt template must contain BELIEF_PERSISTENCE_RULE byte-identically exactly once; found {rule_count}."
         )
     if target == WRITER_PROMPT_PATH:
-        verify_prompt_and_checker_requirements_aligned(text)
+        verify_prompt_and_checker_requirements_aligned(text, goal_mode=goal_mode)
     return text
 
 
@@ -1690,14 +1796,26 @@ def project_events_for_writer(
     ]
 
 
-def format_writer_prompt(world: World, focal_agent: str, template: str | None = None) -> str:
+def format_writer_prompt(
+    world: World,
+    focal_agent: str,
+    template: str | None = None,
+    *,
+    goal_mode: str = DEFAULT_GOAL_MODE,
+) -> str:
     """Format the `qwen3.6:35b` writer prompt for `world` and `focal_agent`.
 
     Projects station-change events via `project_events_for_writer`, strips internal `fact_id` and
     `causal_preconditions` fields so no `F0`..`F9` markers leak into the prompt, and verifies that
     `BELIEF_PERSISTENCE_RULE` appears byte-identically once.
     """
-    raw_template = template if template is not None else load_writer_prompt_template()
+    if goal_mode not in VALID_GOAL_MODES:
+        raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
+    raw_template = (
+        template
+        if template is not None
+        else load_writer_prompt_template(goal_mode=goal_mode)
+    )
     world_setup = {
         "scenario_id": world.scenario_id,
         "domain": world.domain_name,
@@ -1723,11 +1841,21 @@ def format_writer_prompt(world: World, focal_agent: str, template: str | None = 
     }
     event_log = project_events_for_writer(world.events, world=world)
 
-    expanded_template = (
-        raw_template.replace(HARD_CONSTRAINTS_PLACEHOLDER, render_writer_prompt_constraints())
-        if HARD_CONSTRAINTS_PLACEHOLDER in raw_template
-        else raw_template
-    )
+    if HARD_CONSTRAINTS_PLACEHOLDER in raw_template:
+        expanded_template = raw_template.replace(
+            HARD_CONSTRAINTS_PLACEHOLDER,
+            render_writer_prompt_constraints(goal_mode=goal_mode),
+        )
+    elif goal_mode == "splice":
+        expanded_template = raw_template.replace(
+            f"- (c_fidelity_goal) {COPY_GOAL_RULE_TEXT}",
+            f"- (c_fidelity_goal) {SPLICE_GOAL_RULE_TEXT}",
+        )
+    else:
+        expanded_template = raw_template.replace(
+            f"- (c_fidelity_goal) {SPLICE_GOAL_RULE_TEXT}",
+            f"- (c_fidelity_goal) {COPY_GOAL_RULE_TEXT}",
+        )
     formatted = (
         expanded_template.replace("{focal_agent}", focal_agent)
         .replace("{noise_threshold}", str(world.noise_threshold))
@@ -3345,20 +3473,148 @@ def check_prose_render_fidelity(
         )
 
 
+_GOAL_TOKEN_RE = re.compile(r"\[\[GOAL:([^\[\]]*)\]\]")
+
+
+@dataclass(frozen=True)
+class GoalSpliceResult:
+    """Expanded prose and per-agent goal_source ('token' or 'model_text') produced in splice mode."""
+
+    expanded_prose: str
+    goal_source: dict[str, str]
+
+
+def splice_goal_tokens(prose: str, world: World) -> GoalSpliceResult:
+    """Validate and expand `[[GOAL:<agent>]]` placeholder tokens in `prose` before running the prose checker.
+
+    - Each valid `[[GOAL:<agent>]]` in the setup paragraph is expanded to `<goal_text>.`.
+    - Missing token, duplicated token, unknown-agent token, or token outside the setup paragraph raises/records
+      `c_fidelity_goal` (`absent` or `false` as fits) with `goal_mode='splice'`.
+    - If the model wrote `goal_text` itself instead of a token, records `goal_source[agent] = 'model_text'`.
+    """
+    norm_prose = normalize_prose_line_endings(prose)
+    paragraphs = [p.strip() for p in norm_prose.split("\n\n") if p.strip()]
+    setup_para = paragraphs[0] if paragraphs else norm_prose
+    other_paras = "\n\n".join(paragraphs[1:]) if len(paragraphs) > 1 else ""
+
+    for m_other in _GOAL_TOKEN_RE.finditer(other_paras):
+        tok_raw = m_other.group(0)
+        cand_sent = _find_sentence_with_substring(other_paras, tok_raw)
+        _raise_prose_check_error(
+            "c_fidelity_goal",
+            f"Render check (c) failed: goal placeholder token {tok_raw!r} appears outside the setup paragraph (candidate sentence: {cand_sent!r}).",
+            failing_sentence=cand_sent,
+            failure_kind="false",
+            goal_mode="splice",
+        )
+
+    for m_setup in _GOAL_TOKEN_RE.finditer(setup_para):
+        tok_raw = m_setup.group(0)
+        tok_agent = m_setup.group(1).strip()
+        if tok_agent not in world.agents:
+            cand_sent = _find_sentence_with_substring(setup_para, tok_raw)
+            _raise_prose_check_error(
+                "c_fidelity_goal",
+                f"Render check (c) failed: goal placeholder token {tok_raw!r} names unknown agent {tok_agent!r} (candidate sentence: {cand_sent!r}).",
+                failing_sentence=cand_sent,
+                failure_kind="false",
+                goal_mode="splice",
+            )
+
+    goal_source: dict[str, str] = {}
+    expanded_setup = setup_para
+    collecting_all = _ACTIVE_FAULT_COLLECTOR.get() is not None
+
+    for ag in world.agents:
+        token_str = format_goal_placeholder_token(ag)
+        goal_text = world.goals[ag].goal_text
+        goal_sent = f"{goal_text}."
+        tok_count = setup_para.count(token_str)
+        text_count = setup_para.lower().count(goal_text.lower())
+
+        if tok_count > 1:
+            cand_sent = _find_sentence_with_substring(setup_para, token_str)
+            _raise_prose_check_error(
+                "c_fidelity_goal",
+                f"Render check (c) failed: duplicate goal placeholder token {token_str!r} for agent '{ag}' in setup prose (found {tok_count}; candidate sentence: {cand_sent!r}).",
+                failing_sentence=cand_sent,
+                failure_kind="false",
+                goal_mode="splice",
+            )
+            goal_source[ag] = "token"
+            expanded_setup = expanded_setup.replace(token_str, goal_sent, 1)
+            expanded_setup = expanded_setup.replace(token_str, "")
+        elif tok_count == 1 and text_count >= 1:
+            cand_sent = _find_sentence_with_substring(setup_para, token_str)
+            _raise_prose_check_error(
+                "c_fidelity_goal",
+                f"Render check (c) failed: both goal placeholder token {token_str!r} and goal text for agent '{ag}' appear in setup prose (candidate sentence: {cand_sent!r}).",
+                failing_sentence=cand_sent,
+                failure_kind="false",
+                goal_mode="splice",
+            )
+            goal_source[ag] = "token"
+            expanded_setup = expanded_setup.replace(token_str, "")
+        elif tok_count == 0 and text_count > 1:
+            cand_sent = _find_sentence_with_substring(setup_para, goal_text)
+            _raise_prose_check_error(
+                "c_fidelity_goal",
+                f"Render check (c) failed: duplicate goal statement for agent '{ag}' in setup prose (found {text_count}; candidate sentence: {cand_sent!r}).",
+                failing_sentence=cand_sent,
+                failure_kind="false",
+                goal_mode="splice",
+            )
+            goal_source[ag] = "model_text"
+        elif tok_count == 0 and text_count == 0:
+            cand_sent = _find_sentence_with_substring(setup_para, ag)
+            _raise_prose_check_error(
+                "c_fidelity_goal",
+                f"Render check (c) failed: goal placeholder token {token_str!r} for agent '{ag}' missing from setup prose (candidate sentence: {cand_sent!r}).",
+                failing_sentence=cand_sent,
+                failure_kind="absent",
+                goal_mode="splice",
+            )
+            goal_source[ag] = "token"
+            if collecting_all:
+                expanded_setup = f"{expanded_setup} {goal_sent}".strip()
+        elif tok_count == 1 and text_count == 0:
+            goal_source[ag] = "token"
+            expanded_setup = expanded_setup.replace(token_str, goal_sent, 1)
+        else:
+            goal_source[ag] = "model_text"
+
+    if collecting_all:
+        expanded_setup = _GOAL_TOKEN_RE.sub("", expanded_setup)
+        other_paras = _GOAL_TOKEN_RE.sub("", other_paras)
+
+    if len(paragraphs) > 1:
+        expanded_prose = f"{expanded_setup}\n\n{other_paras}"
+    else:
+        expanded_prose = expanded_setup
+    return GoalSpliceResult(expanded_prose=expanded_prose, goal_source=goal_source)
+
+
 def collect_prose_faults(
     prose: str,
     world: World | None = None,
     focal_agent: str | None = None,
+    *,
+    goal_mode: str = DEFAULT_GOAL_MODE,
 ) -> tuple[ProseFaultRecord, ...]:
     """Run all prose checks (a)-(d) in collect-all mode and return every `ProseFaultRecord` (with no text)."""
+    if goal_mode not in VALID_GOAL_MODES:
+        raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
     collector: list[ProseFaultRecord] = []
     token = _ACTIVE_FAULT_COLLECTOR.set(collector)
     try:
-        check_prose_banned_adverbs(prose)
-        check_prose_no_markers(prose)
+        checked_prose = prose
+        if goal_mode == "splice" and world is not None:
+            checked_prose = splice_goal_tokens(prose, world).expanded_prose
+        check_prose_banned_adverbs(checked_prose)
+        check_prose_no_markers(checked_prose)
         if world is not None:
-            check_prose_rule_and_hearing_threshold(prose, world)
-            check_prose_render_fidelity(prose, world, focal_agent=focal_agent)
+            check_prose_rule_and_hearing_threshold(checked_prose, world)
+            check_prose_render_fidelity(checked_prose, world, focal_agent=focal_agent)
     finally:
         _ACTIVE_FAULT_COLLECTOR.reset(token)
     return tuple(collector)
@@ -3370,19 +3626,25 @@ def check_rendered_prose(
     focal_agent: str | None = None,
     *,
     collect_all: bool = False,
+    goal_mode: str = DEFAULT_GOAL_MODE,
 ) -> tuple[Any, ...]:
     """Run all prose checks (a)-(d) on `prose`.
 
     When `collect_all=False` (default), raises `RenderCheckError` on the first violation and returns `()` on pass.
     When `collect_all=True`, runs in collect-all mode without raising and returns `tuple[ProseFaultRecord, ...]`.
     """
+    if goal_mode not in VALID_GOAL_MODES:
+        raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
     if collect_all:
-        return collect_prose_faults(prose, world, focal_agent=focal_agent)
-    check_prose_banned_adverbs(prose)
-    check_prose_no_markers(prose)
+        return collect_prose_faults(prose, world, focal_agent=focal_agent, goal_mode=goal_mode)
+    checked_prose = prose
+    if goal_mode == "splice" and world is not None:
+        checked_prose = splice_goal_tokens(prose, world).expanded_prose
+    check_prose_banned_adverbs(checked_prose)
+    check_prose_no_markers(checked_prose)
     if world is not None:
-        check_prose_rule_and_hearing_threshold(prose, world)
-        check_prose_render_fidelity(prose, world, focal_agent=focal_agent)
+        check_prose_rule_and_hearing_threshold(checked_prose, world)
+        check_prose_render_fidelity(checked_prose, world, focal_agent=focal_agent)
     return ()
 
 
@@ -3461,6 +3723,56 @@ def _render_event_sentence(event: Event, focal_agent: str, noise_threshold: int)
         )
 
     raise ValueError(f"Unknown event kind: {event.kind}")
+
+
+def render_world_template_goal_tokens(world: World, focal_agent: str) -> str:
+    """Deterministically render `world` focalized on `focal_agent` with `[[GOAL:<agent>]]` placeholder tokens in setup."""
+    if focal_agent not in world.agents:
+        raise ValueError(f"focal_agent '{focal_agent}' must be one of {world.agents}")
+
+    ordered_agents = (focal_agent,) + tuple(a for a in world.agents if a != focal_agent)
+
+    doorway_strs = [f"the {a} connects to the {b}" for a, b in world.doorways]
+    room_setup_strs: list[str] = []
+    for r in world.rooms:
+        c_pair = world.containers_by_room[r]
+        fix = world.fixtures_by_room[r]
+        occ = world.occluders_by_room[r]
+        occ_art = indefinite_article(occ)
+        room_setup_strs.append(
+            f"the {r} contains the {c_pair[0]} and the {c_pair[1]} in the {CONTAINER_BAY_STATION} "
+            f"and the {fix} in the {FAR_SIDE_ALCOVE_STATION} "
+            f"(with {occ_art} {occ} standing between the {FAR_SIDE_ALCOVE_STATION} and the {CONTAINER_BAY_STATION} "
+            f"that blocks an agent in the {FAR_SIDE_ALCOVE_STATION} from seeing events at or the contents of "
+            f"the containers behind it, while an agent in the {CONTAINER_BAY_STATION} sees them in open view)"
+        )
+
+    agent_pos_strs = [
+        f"{ag} starts in the {world.initial_agent_rooms[ag]}" for ag in ordered_agents
+    ]
+    goal_token_strs = [format_goal_placeholder_token(ag) for ag in ordered_agents]
+    stake_strs = [s.description for s in world.stake_edges]
+
+    setup_para = (
+        f"Following {focal_agent} through the {world.domain_name.replace('_', ' ')}: "
+        f"{'; '.join(room_setup_strs)}. "
+        f"Doorways link the rooms as follows: {', '.join(doorway_strs)}, and the doorway hearing threshold is {world.noise_threshold} dB "
+        f"(a say at or above {world.noise_threshold} dB carries one doorway; quieter speech stays in its room). "
+        f"{BELIEF_PERSISTENCE_RULE} "
+        f"At the start, {', '.join(agent_pos_strs)}. "
+        f"Meanwhile, {', '.join(world.absent_parties)} "
+        f"{'is' if len(world.absent_parties) == 1 else 'are'} absent off-site. "
+        f"{' '.join(goal_token_strs)} "
+        f"Stakes: {' '.join(stake_strs)}"
+    )
+
+    event_sentences = [
+        _render_event_sentence(ev, focal_agent, world.noise_threshold)
+        for ev in world.events
+    ]
+    events_para = " ".join(event_sentences)
+
+    return f"{setup_para}\n\n{events_para}"
 
 
 def render_world_template(world: World, focal_agent: str) -> str:
@@ -3611,10 +3923,19 @@ class MockWriter:
     def __init__(
         self,
         custom_renderer: Callable[[World, str], str] | None = None,
+        *,
+        goal_mode: str = DEFAULT_GOAL_MODE,
     ) -> None:
+        if goal_mode not in VALID_GOAL_MODES:
+            raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
         self._custom_renderer = custom_renderer
-        self._prompt_template = load_writer_prompt_template()
+        self._goal_mode = str(goal_mode)
+        self._prompt_template = load_writer_prompt_template(goal_mode=self._goal_mode)
         self._refusals: list[ProseRefusalRecord] = []
+
+    @property
+    def goal_mode(self) -> str:
+        return self._goal_mode
 
     @property
     def refusals(self) -> tuple[ProseRefusalRecord, ...]:
@@ -3631,16 +3952,32 @@ class MockWriter:
         focal_0 = world.agents[0]
         focal_1 = world.agents[1]
 
-        prompt_0 = format_writer_prompt(world, focal_0, self._prompt_template)
-        prompt_1 = format_writer_prompt(world, focal_1, self._prompt_template)
+        prompt_0 = format_writer_prompt(world, focal_0, self._prompt_template, goal_mode=self._goal_mode)
+        prompt_1 = format_writer_prompt(world, focal_1, self._prompt_template, goal_mode=self._goal_mode)
 
-        render_fn = self._custom_renderer or render_world_template
+        default_fn = (
+            render_world_template_goal_tokens
+            if self._goal_mode == "splice"
+            else render_world_template
+        )
+        render_fn = self._custom_renderer or default_fn
         rendered_texts: list[str] = []
+        goal_sources: list[dict[str, str]] = []
         for r_idx, focal_ag in ((0, focal_0), (1, focal_1)):
+            prose_text = ""
             try:
                 prose_text = render_fn(world, focal_ag)
-                check_rendered_prose(prose_text, world, focal_agent=focal_ag)
-                rendered_texts.append(prose_text)
+                if self._goal_mode == "splice":
+                    splice_res = splice_goal_tokens(prose_text, world)
+                    expanded_text = splice_res.expanded_prose
+                    g_source = splice_res.goal_source
+                    check_rendered_prose(expanded_text, world, focal_agent=focal_ag, goal_mode="splice")
+                else:
+                    expanded_text = prose_text
+                    g_source = {ag: "model_text" for ag in world.agents}
+                    check_rendered_prose(expanded_text, world, focal_agent=focal_ag, goal_mode="copy")
+                rendered_texts.append(expanded_text)
+                goal_sources.append(g_source)
             except RenderCheckError as exc:
                 fail_sha, fail_off, fail_len = locate_failing_sentence_in_response(
                     prose_text, exc.failing_sentence
@@ -3683,6 +4020,8 @@ class MockWriter:
                 temperature=ATTEMPT_0_TEMPERATURE,
                 min_p=None,
                 seed=derive_call_seed(int(world.seed), 0, 0),
+                goal_mode=self._goal_mode,
+                goal_source=goal_sources[0],
             ),
             RenderedScenario(
                 scenario_id=world.scenario_id,
@@ -3696,6 +4035,8 @@ class MockWriter:
                 temperature=ATTEMPT_0_TEMPERATURE,
                 min_p=None,
                 seed=derive_call_seed(int(world.seed), 1, 0),
+                goal_mode=self._goal_mode,
+                goal_source=goal_sources[1],
             ),
         )
 
@@ -4267,6 +4608,7 @@ class SealedResponseEntry:
     temperature: float = ATTEMPT_0_TEMPERATURE
     min_p: float | None = None
     retry_form: str = ""
+    goal_mode: str = DEFAULT_GOAL_MODE
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -4280,6 +4622,7 @@ class SealedResponseEntry:
             "temperature": self.temperature,
             "min_p": self.min_p,
             "retry_form": self.retry_form,
+            "goal_mode": self.goal_mode,
             "response_text": self.response_text,
             "thinking_text": self.thinking_text,
             "response_sha256": self.response_sha256,
@@ -4304,6 +4647,35 @@ def compute_sealed_response_digests(
     resp_sha = _sha256_bytes(response_text.encode("utf-8"))
     think_sha = _sha256_bytes(thinking_text.encode("utf-8")) if thinking_text else ""
     return resp_sha, think_sha
+
+
+def _resolve_failing_sentence_in_raw_response(
+    raw_response: str,
+    failing_sentence: str | None,
+    world: World | None = None,
+) -> str | None:
+    """Resolve `failing_sentence` (possibly from token-expanded prose) back to an exact substring of `raw_response`."""
+    if not failing_sentence or failing_sentence == "no candidate sentence":
+        return failing_sentence
+    sha, _, _ = locate_failing_sentence_in_response(raw_response, failing_sentence)
+    if sha:
+        return failing_sentence
+    if world is not None:
+        unexpanded = failing_sentence
+        for ag in world.agents:
+            goal_sent = f"{world.goals[ag].goal_text}."
+            tok_str = format_goal_placeholder_token(ag)
+            if goal_sent in unexpanded:
+                unexpanded = unexpanded.replace(goal_sent, tok_str)
+        sha_u, _, _ = locate_failing_sentence_in_response(raw_response, unexpanded)
+        if sha_u:
+            return unexpanded
+    raw_sents = _split_prose_sentences(normalize_prose_line_endings(raw_response))
+    if raw_sents:
+        sha_0, _, _ = locate_failing_sentence_in_response(raw_response, raw_sents[0])
+        if sha_0:
+            return raw_sents[0]
+    return failing_sentence
 
 
 def locate_failing_sentence_in_response(
@@ -4360,15 +4732,20 @@ def resolve_sealed_failing_sentence(
 def sanitize_render_check_error_for_stderr(
     exc: RenderCheckError,
     prose: str,
+    *,
+    world: World | None = None,
 ) -> RenderCheckError:
     """Return a `RenderCheckError` whose message (`str(exc)`) carries only check_id, event number/kind, and sealed sentence sha/offset/length, with no sentence text."""
+    resolved_sent = _resolve_failing_sentence_in_raw_response(
+        prose, exc.failing_sentence, world=world
+    )
     fail_sha, fail_off, fail_len = locate_failing_sentence_in_response(
-        prose, exc.failing_sentence
+        prose, resolved_sent
     )
     return RenderCheckError(
         exc.reason,
         check_id=exc.check_id,
-        failing_sentence=exc.failing_sentence,
+        failing_sentence=resolved_sent,
         event_index=exc.event_index,
         event_kind=exc.event_kind,
         failing_sentence_sha256=fail_sha,
@@ -4376,6 +4753,7 @@ def sanitize_render_check_error_for_stderr(
         failing_sentence_length=fail_len,
         failure_kind=exc.failure_kind,
         event_variant=getattr(exc, "event_variant", None),
+        goal_mode=getattr(exc, "goal_mode", DEFAULT_GOAL_MODE),
     )
 
 
@@ -4561,8 +4939,13 @@ class GenerationCallRecord:
     prompt_tokens_exact: int | None = None
     # Card sp: ordered vector of all prose check_ids that fired on this call (no text).
     fault_check_ids: tuple[str, ...] = ()
+    goal_mode: str = DEFAULT_GOAL_MODE
 
     def __post_init__(self) -> None:
+        if self.goal_mode not in VALID_GOAL_MODES:
+            raise ValueError(
+                f"GenerationCallRecord.goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {self.goal_mode!r}."
+            )
         for cid in self.fault_check_ids:
             if not isinstance(cid, str) or cid not in VALID_FAULT_CHECK_IDS:
                 raise ValueError(
@@ -4578,6 +4961,7 @@ class GenerationCallRecord:
             "focal_agent": self.focal_agent,
             "attempt": self.attempt,
             "seed": self.seed,
+            "goal_mode": self.goal_mode,
             "operation": self.operation,
             "model": self.model,
             "manifest_digest": self.manifest_digest,
@@ -4806,7 +5190,10 @@ class WriterCheckpointManager:
         writer_pin: PinnedWriterModelSpec = DEFAULT_WRITER_MODEL_PIN,
         short_circuit_dead_scenarios: bool = False,
         retry_form: str = DEFAULT_RETRY_FORM,
+        goal_mode: str = DEFAULT_GOAL_MODE,
     ) -> None:
+        if goal_mode not in VALID_GOAL_MODES:
+            raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
         self.output_dir = output_dir
         self.public_path = output_dir / CHECKPOINT_FILENAME
         self.sealed_path = output_dir / "sealed_store" / SEALED_CHECKPOINT_FILENAME
@@ -4817,6 +5204,7 @@ class WriterCheckpointManager:
         self.writer_pin = writer_pin
         self.short_circuit_dead_scenarios = bool(short_circuit_dead_scenarios)
         self.retry_form = str(retry_form)
+        self.goal_mode = str(goal_mode)
 
         self._pub_entries: list[dict[str, Any]] = []
         self._sealed_entries: list[dict[str, Any]] = []
@@ -4845,6 +5233,7 @@ class WriterCheckpointManager:
                 else "continue_other_rendering"
             ),
             "retry_form": self.retry_form,
+            "goal_mode": self.goal_mode,
         }
 
     def _sealed_header(self) -> dict[str, object]:
@@ -4904,6 +5293,16 @@ class WriterCheckpointManager:
                 _sha256_bytes(r0.prose.encode("utf-8")),
                 _sha256_bytes(r1.prose.encode("utf-8")),
             ]
+            r0_goal_source = (
+                dict(r0.goal_source)
+                if r0.goal_source is not None
+                else ({ag: "model_text" for ag in w_obj.agents} if w_obj is not None else {})
+            )
+            r1_goal_source = (
+                dict(r1.goal_source)
+                if r1.goal_source is not None
+                else ({ag: "model_text" for ag in w_obj.agents} if w_obj is not None else {})
+            )
             rendering_0_dict: dict[str, Any] | None = {
                 "rendering_index": r0.rendering_index,
                 "focal_agent": r0.focal_agent,
@@ -4912,6 +5311,8 @@ class WriterCheckpointManager:
                 "temperature": r0.temperature,
                 "min_p": r0.min_p,
                 "seed": r0.seed,
+                "goal_mode": r0.goal_mode,
+                "goal_source": r0_goal_source,
                 "sampling": {
                     "attempt": r0.attempt,
                     "temperature": r0.temperature,
@@ -4927,6 +5328,8 @@ class WriterCheckpointManager:
                 "temperature": r1.temperature,
                 "min_p": r1.min_p,
                 "seed": r1.seed,
+                "goal_mode": r1.goal_mode,
+                "goal_source": r1_goal_source,
                 "sampling": {
                     "attempt": r1.attempt,
                     "temperature": r1.temperature,
@@ -4941,6 +5344,8 @@ class WriterCheckpointManager:
                     "temperature": r0.temperature,
                     "min_p": r0.min_p,
                     "seed": r0.seed,
+                    "goal_mode": r0.goal_mode,
+                    "goal_source": r0_goal_source,
                 },
                 {
                     "rendering_index": r1.rendering_index,
@@ -4948,6 +5353,8 @@ class WriterCheckpointManager:
                     "temperature": r1.temperature,
                     "min_p": r1.min_p,
                     "seed": r1.seed,
+                    "goal_mode": r1.goal_mode,
+                    "goal_source": r1_goal_source,
                 },
             ]
             kept = True
@@ -4967,6 +5374,7 @@ class WriterCheckpointManager:
             "scenario_index": scenario_index,
             "scenario_id": scen_id,
             "kept": kept,
+            "goal_mode": self.goal_mode,
             "rendering_0": rendering_0_dict,
             "rendering_1": rendering_1_dict,
             "call_records": [rec.to_dict() for rec in call_records],
@@ -4977,6 +5385,7 @@ class WriterCheckpointManager:
         pub_payload: dict[str, Any] = {
             "scenario_index": scenario_index,
             "kept": kept,
+            "goal_mode": self.goal_mode,
             "focal_agents": focal_agents,
             "prose_sha256": prose_sha256,
             "kept_renderings": kept_renderings_pub,
@@ -4989,6 +5398,7 @@ class WriterCheckpointManager:
                     "temperature": rec.temperature,
                     "min_p": rec.min_p,
                     "seed": rec.seed,
+                    "goal_mode": rec.goal_mode,
                     "retry_form": rec.retry_form,
                     "checks_passed": rec.checks_passed,
                     "eval_count": rec.eval_count,
@@ -5051,9 +5461,11 @@ class WriterCheckpointManager:
             or sealed_header.get("writer_kind") != self.writer_kind
             or pub_header.get("writer_manifest_digest") != self.writer_pin.manifest_digest
             or sealed_header.get("writer_manifest_digest") != self.writer_pin.manifest_digest
+            or pub_header.get("goal_mode", DEFAULT_GOAL_MODE) != self.goal_mode
+            or sealed_header.get("goal_mode", DEFAULT_GOAL_MODE) != self.goal_mode
         ):
             raise ValueError(
-                "Cannot --resume: checkpoint header (count, seed, writer_kind, or writer_manifest_digest) mismatches requested run."
+                "Cannot --resume: checkpoint header (count, seed, writer_kind, goal_mode, or writer_manifest_digest) mismatches requested run."
             )
 
         restored_private_seed = str(sealed_header.get("private_seed_hex") or "")
@@ -5119,15 +5531,17 @@ class WriterCheckpointManager:
                 prose_1 = str(r1_dict["prose"])
                 focal_0 = str(r0_dict["focal_agent"])
                 focal_1 = str(r1_dict["focal_agent"])
+                r0_goal_mode = str(r0_dict.get("goal_mode", self.goal_mode))
+                r1_goal_mode = str(r1_dict.get("goal_mode", self.goal_mode))
                 prompt_0 = (
                     str(r0_dict["writer_prompt"])
                     if "writer_prompt" in r0_dict
-                    else format_writer_prompt(world, focal_0)
+                    else format_writer_prompt(world, focal_0, goal_mode=r0_goal_mode)
                 )
                 prompt_1 = (
                     str(r1_dict["writer_prompt"])
                     if "writer_prompt" in r1_dict
-                    else format_writer_prompt(world, focal_1)
+                    else format_writer_prompt(world, focal_1, goal_mode=r1_goal_mode)
                 )
 
                 try:
@@ -5156,6 +5570,11 @@ class WriterCheckpointManager:
                     if "seed" in r0_dict
                     else derive_call_seed(int(world.seed), 0, r0_attempt)
                 )
+                r0_g_source = (
+                    {str(k): str(v) for k, v in r0_dict["goal_source"].items()}
+                    if isinstance(r0_dict.get("goal_source"), Mapping)
+                    else {ag: "model_text" for ag in world.agents}
+                )
 
                 r1_attempt = int(r1_dict.get("attempt", 0))
                 r1_temp = float(
@@ -5173,6 +5592,11 @@ class WriterCheckpointManager:
                     if "seed" in r1_dict
                     else derive_call_seed(int(world.seed), 1, r1_attempt)
                 )
+                r1_g_source = (
+                    {str(k): str(v) for k, v in r1_dict["goal_source"].items()}
+                    if isinstance(r1_dict.get("goal_source"), Mapping)
+                    else {ag: "model_text" for ag in world.agents}
+                )
 
                 restored_pairs.append(
                     (
@@ -5188,6 +5612,8 @@ class WriterCheckpointManager:
                             temperature=r0_temp,
                             min_p=r0_min_p,
                             seed=r0_seed,
+                            goal_mode=r0_goal_mode,
+                            goal_source=r0_g_source,
                         ),
                         RenderedScenario(
                             scenario_id=world.scenario_id,
@@ -5201,6 +5627,8 @@ class WriterCheckpointManager:
                             temperature=r1_temp,
                             min_p=r1_min_p,
                             seed=r1_seed,
+                            goal_mode=r1_goal_mode,
+                            goal_source=r1_g_source,
                         ),
                     )
                 )
@@ -5293,6 +5721,7 @@ class WriterCheckpointManager:
                         fault_check_ids=tuple(
                             str(x) for x in (c_dict.get("fault_check_ids") or ())
                         ),
+                        goal_mode=str(c_dict.get("goal_mode", self.goal_mode)),
                     )
                 )
 
@@ -5342,6 +5771,7 @@ class OllamaWriter:
         retry_form: str = DEFAULT_RETRY_FORM,
         multi_turn_retries: bool = False,
         short_circuit_dead_scenarios: bool = False,
+        goal_mode: str = DEFAULT_GOAL_MODE,
         start_owned_server: bool | None = None,
         popen_factory: Callable[..., Any] | None = None,
         server_port: int | None = None,
@@ -5355,8 +5785,14 @@ class OllamaWriter:
             raise ValueError(
                 f"retry_form must be one of {sorted(VALID_RETRY_FORMS)}, got {resolved_retry_form!r}"
             )
+        if goal_mode not in VALID_GOAL_MODES:
+            raise ValueError(
+                f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}"
+            )
         self._retry_form: str = resolved_retry_form
         self._short_circuit_dead_scenarios: bool = bool(short_circuit_dead_scenarios)
+        self._goal_mode: str = str(goal_mode)
+        self._last_goal_source: dict[str, str] = {}
         # Card ul: the exact counter (llama-tokenize on CPU against the pinned blob). When None (CPU tests with
         # fake transports) the bytes/3 estimate stands in for the decision.
         self._prompt_token_counter: PromptTokenCounter | None = prompt_token_counter
@@ -5384,7 +5820,7 @@ class OllamaWriter:
         self._num_predict = resolved_num_predict
         self._max_num_ctx = int(max_num_ctx)
         self._think = resolved_think
-        self._prompt_template = load_writer_prompt_template()
+        self._prompt_template = load_writer_prompt_template(goal_mode=self._goal_mode)
 
         is_real_transport = http_transport is None or http_transport is default_ollama_http_transport
         resolved_grant = (grant_id or os.environ.get("UDLAB_GPU_GRANT_ID") or "").strip()
@@ -5520,6 +5956,10 @@ class OllamaWriter:
         return self._short_circuit_dead_scenarios
 
     @property
+    def goal_mode(self) -> str:
+        return self._goal_mode
+
+    @property
     def prompt_token_counter(self) -> PromptTokenCounter | None:
         return self._prompt_token_counter
 
@@ -5600,6 +6040,7 @@ class OllamaWriter:
                 failing_sentence_offset=rec.failing_sentence_offset,
                 failing_sentence_length=rec.failing_sentence_length,
                 refusal_reasons=self._pending_sealed_refusal_reasons,
+                goal_mode=rec.goal_mode,
             )
             self._pending_sealed_failing_sentence = None
             self._pending_sealed_refusal_reasons = ()
@@ -5700,6 +6141,7 @@ class OllamaWriter:
                 attempt=0,
                 seed=derive_call_seed(base_seed, rendering_index, 0),
                 fault_check_ids=(CTX_OVER_CAP_CHECK_ID,),
+                goal_mode=self._goal_mode,
             )
             self._append_generation_record(rec)
             self._refusals.append(
@@ -5978,6 +6420,7 @@ class OllamaWriter:
                     retry_unchanged_sentences=retry_unchanged,
                     retry_attempt0_sentences=retry_attempt0_total,
                     fault_check_ids=("length_stop",),
+                    goal_mode=self._goal_mode,
                 )
                 self._pending_sealed_failing_sentence = None
                 self._pending_sealed_refusal_reasons = (f"length_stop: {reason_msg}",)
@@ -5998,15 +6441,30 @@ class OllamaWriter:
                 raise LengthStopRefusalError(reason_msg)
 
             try:
-                check_rendered_prose(content, world, focal_agent=focal_agent)
+                check_rendered_prose(
+                    content,
+                    world,
+                    focal_agent=focal_agent,
+                    goal_mode=self._goal_mode,
+                )
             except RenderCheckError as exc:
                 last_exc = exc
-                faults = collect_prose_faults(content, world, focal_agent=focal_agent)
+                faults = collect_prose_faults(
+                    content,
+                    world,
+                    focal_agent=focal_agent,
+                    goal_mode=self._goal_mode,
+                )
                 fault_ids = tuple(dict.fromkeys(f.check_id for f in faults)) or (
                     (exc.check_id,) if exc.check_id in VALID_FAULT_CHECK_IDS else ()
                 )
+                raw_fail_sent = _resolve_failing_sentence_in_raw_response(
+                    content,
+                    exc.failing_sentence,
+                    world=world,
+                )
                 fail_sha, fail_off, fail_len = locate_failing_sentence_in_response(
-                    content, exc.failing_sentence
+                    content, raw_fail_sent
                 )
                 non_sealed_reason = format_non_sealed_refusal_reason(
                     check_id=exc.check_id,
@@ -6065,8 +6523,9 @@ class OllamaWriter:
                     retry_unchanged_sentences=retry_unchanged,
                     retry_attempt0_sentences=retry_attempt0_total,
                     fault_check_ids=fault_ids,
+                    goal_mode=self._goal_mode,
                 )
-                self._pending_sealed_failing_sentence = exc.failing_sentence
+                self._pending_sealed_failing_sentence = raw_fail_sent
                 self._pending_sealed_refusal_reasons = (full_sealed_reason,)
                 self._append_generation_record(
                     rec,
@@ -6080,7 +6539,7 @@ class OllamaWriter:
                         focal_agent=focal_agent,
                         check_id=exc.check_id,
                         reason=str(exc),
-                        failing_sentence=exc.failing_sentence,
+                        failing_sentence=raw_fail_sent,
                         event_index=exc.event_index,
                         event_kind=exc.event_kind,
                         failing_sentence_sha256=fail_sha,
@@ -6092,7 +6551,15 @@ class OllamaWriter:
                     continue
                 if allow_refusal:
                     return None
-                raise sanitize_render_check_error_for_stderr(exc, content) from None
+                raise sanitize_render_check_error_for_stderr(exc, content, world=world) from None
+
+            if self._goal_mode == "splice":
+                splice_res = splice_goal_tokens(content, world)
+                stored_prose = splice_res.expanded_prose
+                self._last_goal_source = dict(splice_res.goal_source)
+            else:
+                stored_prose = content
+                self._last_goal_source = {ag: "model_text" for ag in world.agents}
 
             rec = GenerationCallRecord(
                 call_id=call_id,
@@ -6135,9 +6602,10 @@ class OllamaWriter:
                 retry_fallback_reason=retry_fallback_reason,
                 retry_unchanged_sentences=retry_unchanged,
                 retry_attempt0_sentences=retry_attempt0_total,
+                goal_mode=self._goal_mode,
             )
             self._append_generation_record(rec, response_text=content, thinking_text=thinking_text)
-            return content
+            return stored_prose
 
         if allow_refusal:
             return None
@@ -6160,8 +6628,8 @@ class OllamaWriter:
         focal_0 = world.agents[0]
         focal_1 = world.agents[1]
 
-        prompt_0 = format_writer_prompt(world, focal_0, self._prompt_template)
-        prompt_1 = format_writer_prompt(world, focal_1, self._prompt_template)
+        prompt_0 = format_writer_prompt(world, focal_0, self._prompt_template, goal_mode=self._goal_mode)
+        prompt_1 = format_writer_prompt(world, focal_1, self._prompt_template, goal_mode=self._goal_mode)
 
         prose_0 = self._chat_render(
             world=world,
@@ -6171,6 +6639,7 @@ class OllamaWriter:
             prompt_text=prompt_0,
             allow_refusal=allow_refusal,
         )
+        goal_source_0 = dict(self._last_goal_source) if prose_0 is not None else {}
         rec_0 = self._call_records[-1] if prose_0 is not None and self._call_records else None
         if prose_0 is None and should_short_circuit:
             return None
@@ -6183,6 +6652,7 @@ class OllamaWriter:
             prompt_text=prompt_1,
             allow_refusal=allow_refusal,
         )
+        goal_source_1 = dict(self._last_goal_source) if prose_1 is not None else {}
         rec_1 = self._call_records[-1] if prose_1 is not None and self._call_records else None
         if prose_0 is None or prose_1 is None:
             return None
@@ -6205,6 +6675,8 @@ class OllamaWriter:
                 temperature=rec_0.temperature if rec_0 is not None else ATTEMPT_0_TEMPERATURE,
                 min_p=rec_0.min_p if rec_0 is not None else None,
                 seed=rec_0.seed if rec_0 is not None else derive_call_seed(int(world.seed), 0, 0),
+                goal_mode=self._goal_mode,
+                goal_source=goal_source_0,
             ),
             RenderedScenario(
                 scenario_id=world.scenario_id,
@@ -6218,6 +6690,8 @@ class OllamaWriter:
                 temperature=rec_1.temperature if rec_1 is not None else ATTEMPT_0_TEMPERATURE,
                 min_p=rec_1.min_p if rec_1 is not None else None,
                 seed=rec_1.seed if rec_1 is not None else derive_call_seed(int(world.seed), 1, 0),
+                goal_mode=self._goal_mode,
+                goal_source=goal_source_1,
             ),
         )
 
@@ -6255,3 +6729,429 @@ class OllamaWriter:
         finally:
             if self._owned_server is not None:
                 self._owned_server.stop()
+
+
+def world_from_scenario_seed(scenario_seed: int, index: int = 0) -> World:
+    """Deterministically construct a `World` whose `world.seed == int(scenario_seed)` at `index`."""
+    from udlab_generator.world import generate_world, make_balanced_configs
+
+    if isinstance(scenario_seed, bool) or not isinstance(scenario_seed, int):
+        raise ValueError(f"scenario_seed must be an int, got {scenario_seed!r}")
+    base_cfg = make_balanced_configs(1, base_seed=int(scenario_seed))[0]
+    cfg = replace(
+        base_cfg,
+        scenario_id=f"scen_{int(index):04d}",
+        seed=int(scenario_seed),
+    )
+    return generate_world(cfg)
+
+
+def _resolve_git_commit_sha() -> str:
+    """Return the current git commit SHA if available, or 'unknown'."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(Path(__file__).resolve().parent),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def mcnemar_exact_p_value(b: int, c: int) -> float:
+    """Compute the two-sided exact binomial McNemar p-value for discordant counts `(b, c)`.
+
+    Under H0, discordant pairs follow `Binomial(n = b + c, p = 0.5)`.
+    The two-sided exact p-value is `min(1.0, 2 * sum_{i=0..min(b, c)} C(n, i) * 0.5^n)`.
+    When `b + c == 0`, returns `1.0`.
+    """
+    if b < 0 or c < 0:
+        raise ValueError(f"Discordant counts must be non-negative, got b={b}, c={c}")
+    n = int(b) + int(c)
+    if n == 0:
+        return 1.0
+    k = min(int(b), int(c))
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / (2**n)
+    return min(1.0, float(2.0 * tail))
+
+
+def _load_seed_bank_seeds(seed_bank: Path | Sequence[int]) -> list[int]:
+    """Load a list of integer scenario seeds from a JSON file path or sequence."""
+    if isinstance(seed_bank, Path):
+        raw = json.loads(seed_bank.read_text(encoding="utf-8"))
+    else:
+        raw = list(seed_bank)
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("seed_bank must be a non-empty JSON list of integer scenario seeds.")
+    seeds: list[int] = []
+    for idx, item in enumerate(raw):
+        if isinstance(item, dict) and "scenario_seed" in item:
+            val = item["scenario_seed"]
+        elif isinstance(item, dict) and "seed" in item:
+            val = item["seed"]
+        else:
+            val = item
+        if isinstance(val, bool) or not isinstance(val, int):
+            raise ValueError(f"seed_bank[{idx}] must be an integer scenario seed, got {item!r}")
+        seeds.append(int(val))
+    return seeds
+
+
+def run_paired_seed_bank(
+    *,
+    seed_bank: Path | Sequence[int],
+    goal_mode: str = DEFAULT_GOAL_MODE,
+    output_path: Path | None = None,
+    sealed_responses_path: Path | None = None,
+    model_pin: PinnedWriterModelSpec = DEFAULT_WRITER_MODEL_PIN,
+    base_url: str = DEFAULT_OLLAMA_BASE_URL,
+    num_predict: int | None = None,
+    max_num_ctx: int = DEFAULT_WRITER_MAX_NUM_CTX,
+    think: bool | None = None,
+    vram_halt_mib: int = DEFAULT_VRAM_HALT_MIB,
+    grant_id: str | None = None,
+    http_transport: OllamaHttpTransport | None = None,
+    vram_probe: Callable[[], int] | None = None,
+    prompt_token_counter: PromptTokenCounter | None = None,
+    commit_sha: str | None = None,
+) -> dict[str, object]:
+    """Run attempt 0 only (`max_retries=0`) on a fixed seed bank in `goal_mode` (`copy` or `splice`).
+
+    Writes per-rendering collect-all fault vectors plus mode, commit, model digest, and per-call seed.
+    Raw model drafts are never written to `output_path`; if `sealed_responses_path` is provided, raw
+    drafts are written there using the standard sealed response format.
+    """
+    if goal_mode not in VALID_GOAL_MODES:
+        raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
+    seeds = _load_seed_bank_seeds(seed_bank)
+    resolved_commit = commit_sha if commit_sha is not None else _resolve_git_commit_sha()
+
+    writer = OllamaWriter(
+        model_pin=model_pin,
+        base_url=base_url,
+        num_predict=num_predict,
+        max_num_ctx=max_num_ctx,
+        think=think,
+        vram_halt_mib=vram_halt_mib,
+        grant_id=grant_id,
+        http_transport=http_transport,
+        vram_probe=vram_probe,
+        sealed_responses_path=sealed_responses_path,
+        max_retries=0,
+        short_circuit_dead_scenarios=False,
+        goal_mode=goal_mode,
+        start_owned_server=False if http_transport is not None else None,
+        prompt_token_counter=prompt_token_counter,
+    )
+    renderings_out: list[dict[str, object]] = []
+    try:
+        for idx, scen_seed in enumerate(seeds):
+            world = world_from_scenario_seed(scen_seed, index=idx)
+            for r_idx in (0, 1):
+                focal_agent = world.agents[r_idx]
+                prompt_text = format_writer_prompt(
+                    world,
+                    focal_agent,
+                    writer._prompt_template,
+                    goal_mode=goal_mode,
+                )
+                prev_len = len(writer.call_records)
+                prose_out = writer._chat_render(
+                    world=world,
+                    scenario_id=world.scenario_id,
+                    rendering_index=r_idx,
+                    focal_agent=focal_agent,
+                    prompt_text=prompt_text,
+                    allow_refusal=True,
+                )
+                rec = writer.call_records[-1] if len(writer.call_records) > prev_len else None
+                call_seed = (
+                    rec.seed
+                    if rec is not None
+                    else derive_call_seed(int(world.seed), r_idx, 0)
+                )
+                checks_passed = bool(prose_out is not None and (rec is None or rec.checks_passed))
+                fault_check_ids = list(rec.fault_check_ids) if rec is not None else []
+                goal_source = (
+                    dict(writer._last_goal_source)
+                    if prose_out is not None
+                    else {}
+                )
+                renderings_out.append(
+                    {
+                        "scenario_index": idx,
+                        "scenario_id": world.scenario_id,
+                        "scenario_seed": int(world.seed),
+                        "rendering_index": r_idx,
+                        "focal_agent": focal_agent,
+                        "goal_mode": goal_mode,
+                        "commit": resolved_commit,
+                        "model": writer.ollama_tag,
+                        "manifest_digest": writer.manifest_digest,
+                        "model_layer_digest": writer.model_pin.model_layer_digest,
+                        "attempt": 0,
+                        "call_seed": int(call_seed),
+                        "checks_passed": checks_passed,
+                        "primary_check_id": rec.check_id if rec is not None else None,
+                        "fault_check_ids": fault_check_ids,
+                        "goal_source": goal_source,
+                        "prompt_sha256": rec.prompt_sha256 if rec is not None else "",
+                        "response_sha256": rec.response_sha256 if rec is not None else "",
+                    }
+                )
+    finally:
+        writer.close()
+
+    total_renderings = len(renderings_out)
+    passed_renderings = sum(1 for r in renderings_out if r["checks_passed"])
+    scenario_pass_map: dict[int, list[bool]] = {}
+    for r in renderings_out:
+        s_seed = int(r["scenario_seed"])  # type: ignore[arg-type]
+        scenario_pass_map.setdefault(s_seed, []).append(bool(r["checks_passed"]))
+    total_scenarios = len(scenario_pass_map)
+    passed_scenarios = sum(1 for flags in scenario_pass_map.values() if len(flags) == 2 and all(flags))
+
+    fault_counts: Counter[str] = Counter()
+    for r in renderings_out:
+        for cid in r["fault_check_ids"]:  # type: ignore[union-attr]
+            fault_counts[str(cid)] += 1
+
+    report: dict[str, object] = {
+        "schema_version": "paired_seed_bank_run_v1",
+        "goal_mode": goal_mode,
+        "commit": resolved_commit,
+        "model": writer.ollama_tag,
+        "manifest_digest": writer.manifest_digest,
+        "model_layer_digest": writer.model_pin.model_layer_digest,
+        "max_retries": 0,
+        "num_scenarios": total_scenarios,
+        "num_renderings": total_renderings,
+        "passed_renderings": passed_renderings,
+        "rendering_pass_rate": round(passed_renderings / total_renderings, 6) if total_renderings > 0 else 0.0,
+        "passed_scenarios": passed_scenarios,
+        "scenario_pass_rate": round(passed_scenarios / total_scenarios, 6) if total_scenarios > 0 else 0.0,
+        "fault_counts": dict(sorted(fault_counts.items())),
+        "renderings": renderings_out,
+    }
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(
+            output_path,
+            (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+        )
+    return report
+
+
+def compare_paired_runs(
+    run_a: Path | Mapping[str, Any],
+    run_b: Path | Mapping[str, Any],
+    *,
+    output_path: Path | None = None,
+) -> dict[str, object]:
+    """Pair two `run_paired_seed_bank` outputs by `(scenario_seed, rendering_index)` and compute McNemar stats.
+
+    Verifies that every paired `(scenario_seed, rendering_index)` has identical `call_seed` across both runs.
+    Reports per-fault counts by mode, rendering pass rate and scenario pass rate by mode, and a table of
+    discordant pairs (pass in one mode, fail in the other) with McNemar's exact two-sided test.
+    """
+    data_a: Mapping[str, Any] = (
+        json.loads(run_a.read_text(encoding="utf-8")) if isinstance(run_a, Path) else run_a
+    )
+    data_b: Mapping[str, Any] = (
+        json.loads(run_b.read_text(encoding="utf-8")) if isinstance(run_b, Path) else run_b
+    )
+    mode_a = str(data_a.get("goal_mode") or "mode_a")
+    mode_b = str(data_b.get("goal_mode") or "mode_b")
+    if mode_a == mode_b:
+        label_a = f"{mode_a}_a"
+        label_b = f"{mode_b}_b"
+    else:
+        label_a = mode_a
+        label_b = mode_b
+
+    rows_a = data_a.get("renderings")
+    rows_b = data_b.get("renderings")
+    if not isinstance(rows_a, list) or not isinstance(rows_b, list):
+        raise ValueError("Both paired run inputs must contain a 'renderings' list.")
+
+    map_a: dict[tuple[int, int], Mapping[str, Any]] = {}
+    for row in rows_a:
+        if not isinstance(row, Mapping):
+            continue
+        key = (int(row["scenario_seed"]), int(row["rendering_index"]))
+        if key in map_a:
+            raise ValueError(f"Duplicate (scenario_seed, rendering_index) in first run: {key}")
+        map_a[key] = row
+
+    map_b: dict[tuple[int, int], Mapping[str, Any]] = {}
+    for row in rows_b:
+        if not isinstance(row, Mapping):
+            continue
+        key = (int(row["scenario_seed"]), int(row["rendering_index"]))
+        if key in map_b:
+            raise ValueError(f"Duplicate (scenario_seed, rendering_index) in second run: {key}")
+        map_b[key] = row
+
+    if set(map_a.keys()) != set(map_b.keys()):
+        missing_in_b = sorted(set(map_a.keys()) - set(map_b.keys()))
+        missing_in_a = sorted(set(map_b.keys()) - set(map_a.keys()))
+        raise ValueError(
+            f"Paired runs do not have identical (scenario_seed, rendering_index) keys: "
+            f"missing_in_b={missing_in_b}, missing_in_a={missing_in_a}"
+        )
+
+    ordered_keys = sorted(map_a.keys())
+    fault_counts_a: Counter[str] = Counter()
+    fault_counts_b: Counter[str] = Counter()
+    pass_a_count = 0
+    pass_b_count = 0
+    both_pass = 0
+    both_fail = 0
+    a_pass_b_fail = 0
+    a_fail_b_pass = 0
+    discordant_pairs: list[dict[str, object]] = []
+
+    scen_pass_a: dict[int, list[bool]] = {}
+    scen_pass_b: dict[int, list[bool]] = {}
+
+    for key in ordered_keys:
+        ra = map_a[key]
+        rb = map_b[key]
+        seed_a = int(ra["call_seed"])
+        seed_b = int(rb["call_seed"])
+        if seed_a != seed_b:
+            raise ValueError(
+                f"Per-call seed mismatch for {key}: {label_a} call_seed={seed_a} != {label_b} call_seed={seed_b}"
+            )
+        pa = bool(ra["checks_passed"])
+        pb = bool(rb["checks_passed"])
+        faults_a = [str(x) for x in (ra.get("fault_check_ids") or [])]
+        faults_b = [str(x) for x in (rb.get("fault_check_ids") or [])]
+        for cid in faults_a:
+            fault_counts_a[cid] += 1
+        for cid in faults_b:
+            fault_counts_b[cid] += 1
+
+        if pa:
+            pass_a_count += 1
+        if pb:
+            pass_b_count += 1
+
+        scen_seed, rend_idx = key
+        scen_pass_a.setdefault(scen_seed, []).append(pa)
+        scen_pass_b.setdefault(scen_seed, []).append(pb)
+
+        if pa and pb:
+            both_pass += 1
+        elif not pa and not pb:
+            both_fail += 1
+        elif pa and not pb:
+            a_pass_b_fail += 1
+            discordant_pairs.append(
+                {
+                    "scenario_seed": scen_seed,
+                    "rendering_index": rend_idx,
+                    "scenario_id": str(ra.get("scenario_id") or rb.get("scenario_id") or ""),
+                    "focal_agent": str(ra.get("focal_agent") or rb.get("focal_agent") or ""),
+                    "call_seed": seed_a,
+                    "direction": f"{label_a}_only",
+                    f"{label_a}_passed": True,
+                    f"{label_b}_passed": False,
+                    f"{label_a}_faults": faults_a,
+                    f"{label_b}_faults": faults_b,
+                }
+            )
+        else:
+            a_fail_b_pass += 1
+            discordant_pairs.append(
+                {
+                    "scenario_seed": scen_seed,
+                    "rendering_index": rend_idx,
+                    "scenario_id": str(ra.get("scenario_id") or rb.get("scenario_id") or ""),
+                    "focal_agent": str(ra.get("focal_agent") or rb.get("focal_agent") or ""),
+                    "call_seed": seed_a,
+                    "direction": f"{label_b}_only",
+                    f"{label_a}_passed": False,
+                    f"{label_b}_passed": True,
+                    f"{label_a}_faults": faults_a,
+                    f"{label_b}_faults": faults_b,
+                }
+            )
+
+    total_renderings = len(ordered_keys)
+    total_scenarios = len(scen_pass_a)
+    scen_passed_a = sum(1 for flags in scen_pass_a.values() if len(flags) == 2 and all(flags))
+    scen_passed_b = sum(1 for flags in scen_pass_b.values() if len(flags) == 2 and all(flags))
+    p_value = mcnemar_exact_p_value(a_pass_b_fail, a_fail_b_pass)
+
+    comparison: dict[str, object] = {
+        "schema_version": "paired_seed_bank_comparison_v1",
+        "modes": {
+            "a": label_a,
+            "b": label_b,
+        },
+        "commits": {
+            label_a: str(data_a.get("commit") or "unknown"),
+            label_b: str(data_b.get("commit") or "unknown"),
+        },
+        "manifest_digests": {
+            label_a: str(data_a.get("manifest_digest") or ""),
+            label_b: str(data_b.get("manifest_digest") or ""),
+        },
+        "num_scenarios": total_scenarios,
+        "num_renderings": total_renderings,
+        "per_fault_counts_by_mode": {
+            label_a: dict(sorted(fault_counts_a.items())),
+            label_b: dict(sorted(fault_counts_b.items())),
+        },
+        "rendering_pass_rate_by_mode": {
+            label_a: {
+                "passed": pass_a_count,
+                "total": total_renderings,
+                "rate": round(pass_a_count / total_renderings, 6) if total_renderings > 0 else 0.0,
+            },
+            label_b: {
+                "passed": pass_b_count,
+                "total": total_renderings,
+                "rate": round(pass_b_count / total_renderings, 6) if total_renderings > 0 else 0.0,
+            },
+        },
+        "scenario_pass_rate_by_mode": {
+            label_a: {
+                "passed": scen_passed_a,
+                "total": total_scenarios,
+                "rate": round(scen_passed_a / total_scenarios, 6) if total_scenarios > 0 else 0.0,
+            },
+            label_b: {
+                "passed": scen_passed_b,
+                "total": total_scenarios,
+                "rate": round(scen_passed_b / total_scenarios, 6) if total_scenarios > 0 else 0.0,
+            },
+        },
+        "contingency": {
+            "both_pass": both_pass,
+            f"{label_a}_pass_{label_b}_fail": a_pass_b_fail,
+            f"{label_a}_fail_{label_b}_pass": a_fail_b_pass,
+            "both_fail": both_fail,
+        },
+        "mcnemar_exact": {
+            "b": a_pass_b_fail,
+            "c": a_fail_b_pass,
+            "n_discordant": a_pass_b_fail + a_fail_b_pass,
+            "p_value_two_sided": round(p_value, 12),
+        },
+        "discordant_pairs": discordant_pairs,
+    }
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(
+            output_path,
+            (json.dumps(comparison, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+        )
+    return comparison
