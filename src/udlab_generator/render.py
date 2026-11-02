@@ -21,6 +21,7 @@ import json
 import math
 import os
 from pathlib import Path
+import random
 import re
 import signal
 import socket
@@ -95,7 +96,7 @@ TAG_ECHO_TOKENS: tuple[str, ...] = (
 )
 
 _TAG_ECHO_RE = re.compile(
-    r"(?:\b(?:SAY|MOVE|SEE)_[0-9]\b|(?<!\w)\[(?:Actor|Room|Object|Occluder)\](?!\w))",
+    r"(?:\b(?:SAY|MOVE|SEE|ENTER|LEAVE|MESSAGE)_[0-9]\b|(?<!\w)\[(?:Actor|Room|Object|Occluder)\](?!\w)|Shape key for the tag on each event row)",
     re.IGNORECASE,
 )
 
@@ -153,6 +154,53 @@ ACCEPTED_FORMS_LINE_LINES: tuple[str, str, str, str] = (
     "You may add one short descriptive phrase about the actor, between commas, right after the actor's name; it must not name anyone, any place or any object.",
 )
 ACCEPTED_FORMS_LINE_TEXT: str = "\n".join(ACCEPTED_FORMS_LINE_LINES)
+ShapePlanMode = Literal["off", "assigned", "wildcard"]
+DEFAULT_SHAPE_PLAN: ShapePlanMode = "off"
+VALID_SHAPE_PLANS: frozenset[str] = frozenset({"off", "assigned", "wildcard"})
+STAGE4_LEGEND_V1_PATH: Path = Path(__file__).resolve().parent / "data" / "stage4_legend_v1.txt"
+STAGE4_LEGEND_V1_SHA256: str = "fb073147abacfd536a2ba7931cb4e178903a7fb33c3b0427b3d983985895564d"
+STAGE4_LEGEND_V1_RAW_TEXT: str = STAGE4_LEGEND_V1_PATH.read_bytes().decode("utf-8")
+if hashlib.sha256(STAGE4_LEGEND_V1_RAW_TEXT.encode("utf-8")).hexdigest() != STAGE4_LEGEND_V1_SHA256:
+    raise RuntimeError(
+        f"Stage 4 legend file {STAGE4_LEGEND_V1_PATH} SHA-256 mismatch against {STAGE4_LEGEND_V1_SHA256}."
+    )
+STAGE4_LEGEND_V1_LINES: tuple[str, ...] = tuple(STAGE4_LEGEND_V1_RAW_TEXT.splitlines())
+STAGE4_LEGEND_V1_TEXT: str = "\n".join(STAGE4_LEGEND_V1_LINES)
+SHAPE_PLAN_VARIANT_FORMS: dict[str, tuple[str, ...]] = {
+    "move_normal": ("MOVE_1", "MOVE_2", "MOVE_3", "MOVE_4"),
+    "move_occluded": ("MOVE_1", "MOVE_2", "MOVE_3", "MOVE_4"),
+    "see_unoccluded": ("SEE_1", "SEE_2"),
+    "see_occluded": ("SEE_3", "SEE_4", "SEE_5"),
+    "say": ("SAY_1", "SAY_2", "SAY_3", "SAY_4", "SAY_5"),
+}
+SHAPE_PLAN_WILDCARD_BY_KIND: dict[str, str] = {
+    "enter": "ENTER_0",
+    "leave": "LEAVE_0",
+    "move": "MOVE_0",
+    "station_change": "MOVE_0",
+    "see": "SEE_0",
+    "say": "SAY_0",
+    "message": "MESSAGE_0",
+}
+SHAPE_PLAN_TAG_PAIRS: tuple[tuple[str, str], ...] = (
+    *(("MOVE_" + str(i), "MOVE_0") for i in range(1, 5)),
+    *(("SAY_" + str(i), "SAY_0") for i in range(1, 6)),
+    *(("SEE_" + str(i), "SEE_0") for i in range(1, 6)),
+)
+SHAPE_PLAN_BLOCK_SIZE: int = 20
+SHAPE_PLAN_DESIGN_CHOICES: dict[str, dict[str, object]] = {
+    "block_balance_max_spread": {
+        "value": 1,
+        "design_choice": True,
+        "meaning": "within each variant, form counts in a 20-scenario block differ by at most 1",
+    },
+    "two_form_switch_rate_band": {
+        "low": 0.62,
+        "high": 0.71,
+        "expected": 0.6667,
+        "design_choice": True,
+    },
+}
 VALID_GOAL_SOURCES: frozenset[str] = frozenset({"model_text", "token"})
 GOAL_TOKEN_PREFIX: str = "[[GOAL:"
 GOAL_TOKEN_SUFFIX: str = "]]"
@@ -1379,16 +1427,23 @@ def get_event_order_table_rows() -> dict[str, str]:
 def format_event_order_table_rule_text(
     *,
     accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+    shape_plan: str = DEFAULT_SHAPE_PLAN,
 ) -> str:
     """Render the full `c_fidelity_event_order` `rule_text` for `constraint_layout='table'`."""
     if accepted_forms_line not in VALID_ACCEPTED_FORMS_LINES:
         raise ValueError(
             f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
         )
+    if shape_plan not in VALID_SHAPE_PLANS:
+        raise ValueError(
+            f"shape_plan must be one of {sorted(VALID_SHAPE_PLANS)}, got {shape_plan!r}"
+        )
     rows = get_event_order_table_rows()
     lines = [format_event_order_table_header()]
     for kind in EVENT_ORDER_TABLE_ROW_KINDS:
         lines.append(f"  {rows[kind]}")
+    if shape_plan in ("assigned", "wildcard"):
+        lines.extend(STAGE4_LEGEND_V1_LINES)
     if accepted_forms_line == "on":
         lines.extend(ACCEPTED_FORMS_LINE_LINES)
     return "\n".join(lines)
@@ -1464,9 +1519,10 @@ def get_writer_prose_requirements(
     *,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+    shape_plan: str = DEFAULT_SHAPE_PLAN,
     agents: Sequence[str] | None = None,
 ) -> tuple[ProseRequirementSpec, ...]:
-    """Return the writer prose requirement specs for `goal_mode` (`'copy'` or `'splice'`), `constraint_layout` (`'line'` or `'table'`), and `accepted_forms_line` (`'off'` or `'on'`)."""
+    """Return the writer prose requirement specs for `goal_mode` (`'copy'` or `'splice'`), `constraint_layout` (`'line'` or `'table'`), `accepted_forms_line` (`'off'` or `'on'`), and `shape_plan` (`'off'`, `'assigned'`, or `'wildcard'`)."""
     if goal_mode not in VALID_GOAL_MODES:
         raise ValueError(
             f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}"
@@ -1479,7 +1535,16 @@ def get_writer_prose_requirements(
         raise ValueError(
             f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
         )
-    if goal_mode == "copy" and constraint_layout == "line" and accepted_forms_line == "off":
+    if shape_plan not in VALID_SHAPE_PLANS:
+        raise ValueError(
+            f"shape_plan must be one of {sorted(VALID_SHAPE_PLANS)}, got {shape_plan!r}"
+        )
+    if (
+        goal_mode == "copy"
+        and constraint_layout == "line"
+        and accepted_forms_line == "off"
+        and shape_plan == "off"
+    ):
         return WRITER_PROSE_REQUIREMENTS
     out: list[ProseRequirementSpec] = []
     for req in WRITER_PROSE_REQUIREMENTS:
@@ -1503,15 +1568,25 @@ def get_writer_prose_requirements(
             out.append(
                 ProseRequirementSpec(
                     req.check_id,
-                    format_event_order_table_rule_text(accepted_forms_line=accepted_forms_line),
+                    format_event_order_table_rule_text(
+                        accepted_forms_line=accepted_forms_line,
+                        shape_plan=shape_plan,
+                    ),
                     required_in_setup=req.required_in_setup,
                 )
             )
-        elif req.check_id == "c_fidelity_event_order" and accepted_forms_line == "on":
+        elif req.check_id == "c_fidelity_event_order" and (
+            accepted_forms_line == "on" or shape_plan in ("assigned", "wildcard")
+        ):
+            extra_parts: list[str] = [req.rule_text]
+            if shape_plan in ("assigned", "wildcard"):
+                extra_parts.append(STAGE4_LEGEND_V1_TEXT)
+            if accepted_forms_line == "on":
+                extra_parts.append(ACCEPTED_FORMS_LINE_TEXT)
             out.append(
                 ProseRequirementSpec(
                     req.check_id,
-                    f"{req.rule_text}\n{ACCEPTED_FORMS_LINE_TEXT}",
+                    "\n".join(extra_parts),
                     required_in_setup=req.required_in_setup,
                 )
             )
@@ -1526,6 +1601,7 @@ def render_writer_prompt_constraints(
     goal_mode: str = DEFAULT_GOAL_MODE,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+    shape_plan: str = DEFAULT_SHAPE_PLAN,
     agents: Sequence[str] | None = None,
 ) -> str:
     """Render the `HARD CONSTRAINTS (MANDATORY):` bullet lines from `WRITER_PROSE_REQUIREMENTS`."""
@@ -1536,6 +1612,7 @@ def render_writer_prompt_constraints(
             goal_mode,
             constraint_layout=constraint_layout,
             accepted_forms_line=accepted_forms_line,
+            shape_plan=shape_plan,
             agents=agents,
         )
     )
@@ -1547,13 +1624,15 @@ def compute_hard_constraints_sha256(
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     *,
     accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+    shape_plan: str = DEFAULT_SHAPE_PLAN,
     agents: Sequence[str] | None = None,
 ) -> str:
-    """Return the SHA-256 hex digest of the UTF-8 rendered `HARD CONSTRAINTS` block for `(goal_mode, constraint_layout, accepted_forms_line)`."""
+    """Return the SHA-256 hex digest of the UTF-8 rendered `HARD CONSTRAINTS` block for `(goal_mode, constraint_layout, accepted_forms_line, shape_plan)`."""
     block = render_writer_prompt_constraints(
         goal_mode=goal_mode,
         constraint_layout=constraint_layout,
         accepted_forms_line=accepted_forms_line,
+        shape_plan=shape_plan,
         agents=agents,
     )
     return _sha256_bytes(block.encode("utf-8"))
@@ -1565,6 +1644,7 @@ def parse_writer_prompt_requirements(
     goal_mode: str = DEFAULT_GOAL_MODE,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+    shape_plan: str = DEFAULT_SHAPE_PLAN,
     agents: Sequence[str] | None = None,
 ) -> tuple[ProseRequirementSpec, ...]:
     """Parse the mandatory requirement list from `prompt_text` (expanding `{hard_constraints_block}` if unformatted) and reject any untracked requirement lines."""
@@ -1576,6 +1656,10 @@ def parse_writer_prompt_requirements(
         raise ValueError(
             f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
         )
+    if shape_plan not in VALID_SHAPE_PLANS:
+        raise ValueError(
+            f"shape_plan must be one of {sorted(VALID_SHAPE_PLANS)}, got {shape_plan!r}"
+        )
     expanded_text = (
         prompt_text.replace(
             HARD_CONSTRAINTS_PLACEHOLDER,
@@ -1583,6 +1667,7 @@ def parse_writer_prompt_requirements(
                 goal_mode=goal_mode,
                 constraint_layout=constraint_layout,
                 accepted_forms_line=accepted_forms_line,
+                shape_plan=shape_plan,
                 agents=agents,
             ),
         )
@@ -1597,11 +1682,18 @@ def parse_writer_prompt_requirements(
         raise ValueError("Writer prompt is missing HARD CONSTRAINTS (MANDATORY) or INPUT SPECIFICATION section.")
     section = expanded_text[start_idx + len(start_marker) : end_idx]
     expected_table_rows = tuple(get_event_order_table_rows()[k] for k in EVENT_ORDER_TABLE_ROW_KINDS)
+    has_shape_legend_in_section = (
+        shape_plan in ("assigned", "wildcard")
+        or (HARD_CONSTRAINTS_PLACEHOLDER not in prompt_text and STAGE4_LEGEND_V1_LINES[0] in section)
+    )
     has_accepted_forms_in_section = (
         accepted_forms_line == "on"
         or (HARD_CONSTRAINTS_PLACEHOLDER not in prompt_text and ACCEPTED_FORMS_LINE_LINES[0] in section)
     )
-    expected_extra_lines = ACCEPTED_FORMS_LINE_LINES if has_accepted_forms_in_section else ()
+    expected_extra_lines: tuple[str, ...] = (
+        *(STAGE4_LEGEND_V1_LINES if has_shape_legend_in_section else ()),
+        *(ACCEPTED_FORMS_LINE_LINES if has_accepted_forms_in_section else ()),
+    )
     expected_total_cont = len(expected_table_rows) + len(expected_extra_lines)
     expected_table_header = format_event_order_table_header()
     table_row_idx: int | None = None
@@ -1655,7 +1747,7 @@ def parse_writer_prompt_requirements(
         rule_body = m.group(2)
         if cid == "c_fidelity_event_order" and rule_body == expected_table_header:
             table_row_idx = 0
-        elif cid == "c_fidelity_event_order" and has_accepted_forms_in_section:
+        elif cid == "c_fidelity_event_order" and (has_accepted_forms_in_section or has_shape_legend_in_section):
             table_row_idx = len(expected_table_rows)
         req_in_setup = (
             WRITER_PROSE_REQUIREMENTS_BY_ID[cid].required_in_setup
@@ -1720,6 +1812,7 @@ def verify_prompt_and_checker_requirements_aligned(
     goal_mode: str = DEFAULT_GOAL_MODE,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+    shape_plan: str = DEFAULT_SHAPE_PLAN,
     agents: Sequence[str] | None = None,
 ) -> tuple[ProseRequirementSpec, ...]:
     """Verify that the writer prompt's parsed requirements, `WRITER_PROSE_REQUIREMENTS`, and the checker's enforced `check_id`s are identical."""
@@ -1727,6 +1820,7 @@ def verify_prompt_and_checker_requirements_aligned(
         goal_mode,
         constraint_layout=constraint_layout,
         accepted_forms_line=accepted_forms_line,
+        shape_plan=shape_plan,
         agents=agents,
     )
     if prompt_text is None:
@@ -1746,6 +1840,7 @@ def verify_prompt_and_checker_requirements_aligned(
                 goal_mode=goal_mode,
                 constraint_layout=constraint_layout,
                 accepted_forms_line=accepted_forms_line,
+                shape_plan=shape_plan,
                 agents=agents,
             ),
         )
@@ -1757,6 +1852,7 @@ def verify_prompt_and_checker_requirements_aligned(
                     goal_mode=goal_mode,
                     constraint_layout=constraint_layout,
                     accepted_forms_line=accepted_forms_line,
+                    shape_plan=shape_plan,
                     agents=agents,
                 ),
             )
@@ -1768,13 +1864,14 @@ def verify_prompt_and_checker_requirements_aligned(
         goal_mode=goal_mode,
         constraint_layout=constraint_layout,
         accepted_forms_line=accepted_forms_line,
+        shape_plan=shape_plan,
         agents=agents,
     )
     if parsed_prompt_reqs != expected_reqs:
         prompt_ids = [r.check_id for r in parsed_prompt_reqs]
         shared_ids = [r.check_id for r in expected_reqs]
         raise ValueError(
-            f"Writer prompt requirements diverge from WRITER_PROSE_REQUIREMENTS ({goal_mode}, {constraint_layout}, {accepted_forms_line}): prompt_ids={prompt_ids}, shared_ids={shared_ids}"
+            f"Writer prompt requirements diverge from WRITER_PROSE_REQUIREMENTS ({goal_mode}, {constraint_layout}, {accepted_forms_line}, {shape_plan}): prompt_ids={prompt_ids}, shared_ids={shared_ids}"
         )
     enforced_ids = set(get_checker_enforced_check_ids())
     shared_id_set = {r.check_id for r in expected_reqs}
@@ -2217,6 +2314,7 @@ def load_writer_prompt_template(
     goal_mode: str = DEFAULT_GOAL_MODE,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+    shape_plan: str = DEFAULT_SHAPE_PLAN,
     agents: Sequence[str] | None = None,
 ) -> str:
     """Load the `qwen3.6:35b` writer prompt text file, expand `{hard_constraints_block}` from `WRITER_PROSE_REQUIREMENTS`, and verify alignment."""
@@ -2229,6 +2327,10 @@ def load_writer_prompt_template(
     if accepted_forms_line not in VALID_ACCEPTED_FORMS_LINES:
         raise ValueError(
             f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
+        )
+    if shape_plan not in VALID_SHAPE_PLANS:
+        raise ValueError(
+            f"shape_plan must be one of {sorted(VALID_SHAPE_PLANS)}, got {shape_plan!r}"
         )
     target = path or WRITER_PROMPT_PATH
     raw_disk_text = target.read_text(encoding="utf-8")
@@ -2249,6 +2351,7 @@ def load_writer_prompt_template(
                 goal_mode=goal_mode,
                 constraint_layout=constraint_layout,
                 accepted_forms_line=accepted_forms_line,
+                shape_plan=shape_plan,
                 agents=agents,
             ),
         )
@@ -2271,9 +2374,289 @@ def load_writer_prompt_template(
             goal_mode=goal_mode,
             constraint_layout=constraint_layout,
             accepted_forms_line=accepted_forms_line,
+            shape_plan=shape_plan,
             agents=agents,
         )
     return text
+
+
+def event_shape_plan_variant(ev: Event, world: World | None = None) -> str:
+    """Return the Stage 4 shape-plan variant name for `ev` without reading `ev.step` or event position."""
+    if ev.kind == "move":
+        if is_station_transition_event(ev, world):
+            return "move_station_change"
+        return "move_occluded" if ev.occluded else "move_normal"
+    if ev.kind == "see":
+        return "see_occluded" if (ev.occluded and ev.occluder) else "see_unoccluded"
+    return ev.kind
+
+
+def wildcard_form_id_for_event(ev: Event, world: World | None = None) -> str:
+    """Return the wildcard `<KIND>_0` form ID for `ev` (`MOVE_0` for moves and station changes)."""
+    _ = world
+    return SHAPE_PLAN_WILDCARD_BY_KIND.get(ev.kind, f"{ev.kind.upper()}_0")
+
+
+def format_shape_tag_cell(form_id: str) -> str:
+    """Format a per-row shape tag in its markdown table cell `| <form_id> |`."""
+    return f"| {form_id} |"
+
+
+def generate_shape_plan(
+    worlds: Sequence[World],
+    *,
+    seed: int,
+    block_size: int = SHAPE_PLAN_BLOCK_SIZE,
+) -> dict[str, object]:
+    """Generate a deterministic Stage 4 shape plan across `worlds` in bank order.
+
+    Properties:
+    - One plan per scenario, shared by both renderings.
+    - Uniform draw from valid forms for each event's variant (`SHAPE_PLAN_VARIANT_FORMS`).
+    - Rejects any draw that would make three consecutive same-kind events in a scene share a form.
+    - Balances per block of `block_size` (20) scenarios so each form's count within a variant differs
+      by at most 1 across the block after the rejection rule.
+    - Never reads event position (`ev.step` or `event_index`) when drawing forms; uses per-variant
+      RNG streams so permuting event positions leaves the drawn forms for each variant invariant.
+    """
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise TypeError(f"seed must be an int, got {seed!r}")
+    if block_size <= 0:
+        raise ValueError(f"block_size must be >= 1, got {block_size}")
+
+    # Streams group variants that share a kind and form alphabet (`move_normal` and `move_occluded` both draw
+    # from `MOVE_1..4` and share the `move` 3-in-a-row constraint, while `see_unoccluded` (`SEE_1..2`),
+    # `see_occluded` (`SEE_3..5`), and `say` (`SAY_1..5`) have disjoint form sets).
+    stream_Defs: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("move_normal", ("move_normal",)),
+        ("move_occluded", ("move_occluded",)),
+        ("see_unoccluded", ("see_unoccluded",)),
+        ("see_occluded", ("see_occluded",)),
+        ("say", ("say",)),
+    )
+
+    plan_by_scenario_id: dict[str, list[dict[str, object]]] = {}
+    all_records: list[dict[str, object]] = []
+
+    for block_idx, b_start in enumerate(range(0, len(worlds), block_size)):
+        block_worlds = worlds[b_start : b_start + block_size]
+        # Pre-draw each variant stream for the 20-scenario block with quota balance (spread <= 1) and no 3-in-a-row.
+        # If both `move_normal` and `move_occluded` occur in the block, coordinate their `move` 3-in-a-row check.
+        has_both_move_variants = (
+            any(event_shape_plan_variant(ev, w) == "move_normal" for w in block_worlds for ev in w.events)
+            and any(event_shape_plan_variant(ev, w) == "move_occluded" for w in block_worlds for ev in w.events)
+        )
+        effective_streams: tuple[tuple[str, tuple[str, ...]], ...] = (
+            (
+                ("move", ("move_normal", "move_occluded")),
+                ("see_unoccluded", ("see_unoccluded",)),
+                ("see_occluded", ("see_occluded",)),
+                ("say", ("say",)),
+            )
+            if has_both_move_variants
+            else stream_Defs
+        )
+
+        # Map (scenario_offset_in_block, variant, occurrence_idx_in_scenario_variant) -> drawn form_id
+        drawn_by_scene_variant: dict[tuple[int, str], list[str]] = {}
+
+        for stream_name, stream_variants in effective_streams:
+            stream_seed_bytes = hashlib.blake2b(
+                f"udlab.stage4.shape_plan.v1:{seed}:block_{block_idx}:{stream_name}".encode("utf-8"),
+                digest_size=8,
+            ).digest()
+            stream_rng = random.Random(int.from_bytes(stream_seed_bytes, "big"))
+            v_counts: Counter[str] = Counter()
+            for w in block_worlds:
+                for ev in w.events:
+                    v = event_shape_plan_variant(ev, w)
+                    if v in stream_variants:
+                        v_counts[v] += 1
+            if sum(v_counts.values()) == 0:
+                continue
+
+            max_attempts = 10_000
+            succeeded = False
+            for _attempt in range(max_attempts):
+                quotas: dict[str, dict[str, int]] = {}
+                for v in stream_variants:
+                    forms = SHAPE_PLAN_VARIANT_FORMS[v]
+                    m = v_counts[v]
+                    k = len(forms)
+                    base_q = m // k
+                    rem = m % k
+                    extra = set(stream_rng.sample(forms, rem)) if rem else set()
+                    quotas[v] = {f: base_q + (1 if f in extra else 0) for f in forms}
+
+                ok = True
+                candidate_draws: dict[tuple[int, str], list[str]] = {}
+                for s_off, w in enumerate(block_worlds):
+                    last_kind_forms: list[str] = []
+                    for ev in w.events:
+                        v = event_shape_plan_variant(ev, w)
+                        if v == "move_station_change" and "move_normal" in stream_variants:
+                            last_kind_forms.append("MOVE_0")
+                            continue
+                        if v not in stream_variants:
+                            continue
+                        forms = SHAPE_PLAN_VARIANT_FORMS[v]
+                        forbidden = (
+                            last_kind_forms[-1]
+                            if (len(last_kind_forms) >= 2 and last_kind_forms[-1] == last_kind_forms[-2])
+                            else None
+                        )
+                        avail = [f for f in forms if quotas[v][f] > 0 and f != forbidden]
+                        if not avail:
+                            ok = False
+                            break
+                        while True:
+                            cand = stream_rng.choice(forms)
+                            if cand in avail:
+                                break
+                        quotas[v][cand] -= 1
+                        last_kind_forms.append(cand)
+                        candidate_draws.setdefault((s_off, v), []).append(cand)
+                    if not ok:
+                        break
+                if ok:
+                    drawn_by_scene_variant.update(candidate_draws)
+                    succeeded = True
+                    break
+            if not succeeded:
+                raise RuntimeError(
+                    f"STOPPED: shape plan block-of-{block_size} balance infeasible after 3-in-a-row rejection "
+                    f"(block={block_idx}, stream={stream_name})."
+                )
+
+        for s_off, w in enumerate(block_worlds):
+            variant_cursors: Counter[str] = Counter()
+            scen_records: list[dict[str, object]] = []
+            for ev_idx, ev in enumerate(w.events, start=1):
+                v = event_shape_plan_variant(ev, w)
+                if v in SHAPE_PLAN_VARIANT_FORMS:
+                    cur = variant_cursors[v]
+                    variant_cursors[v] += 1
+                    form_id = drawn_by_scene_variant[(s_off, v)][cur]
+                else:
+                    form_id = wildcard_form_id_for_event(ev, w)
+                rec: dict[str, object] = {
+                    "scenario_id": w.scenario_id,
+                    "event_index": ev_idx,
+                    "kind": ev.kind,
+                    "variant": v,
+                    "form_id": form_id,
+                }
+                scen_records.append(rec)
+                all_records.append(rec)
+            plan_by_scenario_id[w.scenario_id] = scen_records
+
+    persistence_stats = compute_shape_plan_lag1_persistence(all_records)
+    return {
+        "seed": seed,
+        "block_size": block_size,
+        "design_choices": dict(SHAPE_PLAN_DESIGN_CHOICES),
+        "block_balance_max_spread": dict(SHAPE_PLAN_DESIGN_CHOICES["block_balance_max_spread"]),
+        "two_form_switch_rate_band": dict(SHAPE_PLAN_DESIGN_CHOICES["two_form_switch_rate_band"]),
+        "plan_records": all_records,
+        "plan_by_scenario_id": plan_by_scenario_id,
+        **persistence_stats,
+    }
+
+
+def compute_shape_plan_lag1_persistence(
+    plan_records: Sequence[Mapping[str, Any]],
+) -> dict[str, object]:
+    """Compute realized lag-1 persistence and switch rate per kind and per variant across `plan_records`."""
+    by_scen: dict[str, list[Mapping[str, Any]]] = {}
+    for rec in plan_records:
+        sid = str(rec["scenario_id"])
+        by_scen.setdefault(sid, []).append(rec)
+
+    kind_same: Counter[str] = Counter()
+    kind_total: Counter[str] = Counter()
+    var_same: Counter[str] = Counter()
+    var_total: Counter[str] = Counter()
+    stream_var_prev: dict[str, str] = {}
+    stream_var_same: Counter[str] = Counter()
+    stream_var_total: Counter[str] = Counter()
+
+    for sid, recs in by_scen.items():
+        _ = sid
+        prev_by_kind: dict[str, str] = {}
+        prev_by_var: dict[str, str] = {}
+        for rec in recs:
+            v = str(rec["variant"])
+            k = str(rec["kind"])
+            fid = str(rec["form_id"])
+            if v not in SHAPE_PLAN_VARIANT_FORMS:
+                continue
+            if k in prev_by_kind:
+                kind_total[k] += 1
+                if prev_by_kind[k] == fid:
+                    kind_same[k] += 1
+            prev_by_kind[k] = fid
+
+            if v in prev_by_var:
+                var_total[v] += 1
+                if prev_by_var[v] == fid:
+                    var_same[v] += 1
+            prev_by_var[v] = fid
+
+            if v in stream_var_prev:
+                stream_var_total[v] += 1
+                if stream_var_prev[v] == fid:
+                    stream_var_same[v] += 1
+            stream_var_prev[v] = fid
+
+    lag1_by_kind: dict[str, float] = {}
+    switch_by_kind: dict[str, float] = {}
+    for k in ("move", "see", "say"):
+        tot = kind_total[k]
+        p = round(kind_same[k] / tot, 6) if tot > 0 else 0.0
+        lag1_by_kind[k] = p
+        switch_by_kind[k] = round(1.0 - p, 6) if tot > 0 else 0.0
+
+    lag1_by_variant: dict[str, float] = {}
+    switch_by_variant: dict[str, float] = {}
+    for v in SHAPE_PLAN_VARIANT_FORMS:
+        tot = var_total[v]
+        p = round(var_same[v] / tot, 6) if tot > 0 else 0.0
+        lag1_by_variant[v] = p
+        switch_by_variant[v] = round(1.0 - p, 6) if tot > 0 else 0.0
+
+    return {
+        "lag1_persistence_by_kind": lag1_by_kind,
+        "switch_rate_by_kind": switch_by_kind,
+        "lag1_persistence_by_variant": lag1_by_variant,
+        "switch_rate_by_variant": switch_by_variant,
+        "two_form_switch_rate": switch_by_variant.get("see_unoccluded", 0.0),
+    }
+
+
+def verify_shape_plan_tag_pairs_token_parity(
+    counter: PromptTokenCounter,
+    tag_pairs: Sequence[tuple[str, str]] = SHAPE_PLAN_TAG_PAIRS,
+) -> list[dict[str, object]]:
+    """Check that every `(assigned, wildcard)` tag pair has identical token count in a table cell (`| <TAG> |`)."""
+    results: list[dict[str, object]] = []
+    for assigned_tag, wildcard_tag in tag_pairs:
+        a_tokens = int(counter(format_shape_tag_cell(assigned_tag)))
+        w_tokens = int(counter(format_shape_tag_cell(wildcard_tag)))
+        if a_tokens != w_tokens:
+            raise ValueError(
+                f"STOPPED: tag pair ({assigned_tag!r}, {wildcard_tag!r}) differs in token count: "
+                f"{a_tokens} vs {w_tokens}."
+            )
+        results.append(
+            {
+                "assigned": assigned_tag,
+                "wildcard": wildcard_tag,
+                "assigned_tokens": a_tokens,
+                "wildcard_tokens": w_tokens,
+                "equal": True,
+            }
+        )
+    return results
 
 
 def project_event_for_writer(
@@ -2281,6 +2664,7 @@ def project_event_for_writer(
     *,
     order_index: int | None = None,
     world: World | None = None,
+    shape_tag: str | None = None,
 ) -> dict[str, object]:
     """Project a single stored `Event` into its writer-facing event dictionary.
 
@@ -2288,10 +2672,11 @@ def project_event_for_writer(
     (`STATION_CHANGE_EVENT_KIND`, `'station_change'`) with `actor`, `room`, `origin_station`,
     `destination_station`, and `occluder` (the room's stationary obstacle passed),
     with no `target_object`/`move` shape. Every other event passes through unchanged.
+    When `shape_tag` is provided (for `shape_plan` in `{'assigned', 'wildcard'}`), includes `"shape_tag"`.
     """
     idx = order_index if order_index is not None else ev.step
     if is_station_transition_event(ev, world):
-        return {
+        station_entry: dict[str, object] = {
             "order_index": idx,
             "kind": STATION_CHANGE_EVENT_KIND,
             "actor": ev.actor,
@@ -2300,6 +2685,9 @@ def project_event_for_writer(
             "destination_station": ev.to_location,
             "occluder": ev.target_object,
         }
+        if shape_tag is not None:
+            station_entry["shape_tag"] = shape_tag
+        return station_entry
     ev_entry: dict[str, object] = {
         "order_index": idx,
         "kind": ev.kind,
@@ -2326,18 +2714,70 @@ def project_event_for_writer(
         ev_entry["is_bluff"] = True
     if ev.stated_reason is not None:
         ev_entry["stated_reason"] = ev.stated_reason
+    if shape_tag is not None:
+        ev_entry["shape_tag"] = shape_tag
     return ev_entry
 
 
 def project_events_for_writer(
     events: Sequence[Event],
     world: World | None = None,
+    *,
+    shape_tags: Sequence[str] | None = None,
 ) -> list[dict[str, object]]:
     """Project a sequence of stored `Event` records into the writer-facing JSON event log list."""
+    if shape_tags is not None and len(shape_tags) != len(events):
+        raise ValueError(
+            f"shape_tags length ({len(shape_tags)}) must match events length ({len(events)})."
+        )
     return [
-        project_event_for_writer(ev, order_index=idx, world=world)
+        project_event_for_writer(
+            ev,
+            order_index=idx,
+            world=world,
+            shape_tag=shape_tags[idx - 1] if shape_tags is not None else None,
+        )
         for idx, ev in enumerate(events, start=1)
     ]
+
+
+def _resolve_event_shape_tags_for_world(
+    world: World,
+    *,
+    shape_plan: str = DEFAULT_SHAPE_PLAN,
+    scenario_shape_plan: Sequence[Mapping[str, Any] | str] | None = None,
+    shape_plan_seed: int | None = None,
+) -> list[str] | None:
+    """Resolve the per-event `shape_tag` list for `world` under `shape_plan`."""
+    if shape_plan not in VALID_SHAPE_PLANS:
+        raise ValueError(
+            f"shape_plan must be one of {sorted(VALID_SHAPE_PLANS)}, got {shape_plan!r}"
+        )
+    if shape_plan == "off":
+        return None
+    if shape_plan == "wildcard":
+        return [wildcard_form_id_for_event(ev, world) for ev in world.events]
+    # shape_plan == "assigned"
+    if scenario_shape_plan is not None:
+        if len(scenario_shape_plan) != len(world.events):
+            raise ValueError(
+                f"scenario_shape_plan length ({len(scenario_shape_plan)}) must match world.events length ({len(world.events)})."
+            )
+        tags: list[str] = []
+        for idx, item in enumerate(scenario_shape_plan):
+            ev = world.events[idx]
+            v = event_shape_plan_variant(ev, world)
+            if v not in SHAPE_PLAN_VARIANT_FORMS:
+                tags.append(wildcard_form_id_for_event(ev, world))
+            elif isinstance(item, Mapping):
+                tags.append(str(item["form_id"]))
+            else:
+                tags.append(str(item))
+        return tags
+    resolved_seed = int(shape_plan_seed) if shape_plan_seed is not None else int(world.seed)
+    generated = generate_shape_plan([world], seed=resolved_seed, block_size=1)
+    scen_recs = generated["plan_by_scenario_id"][world.scenario_id]  # type: ignore[index]
+    return [str(r["form_id"]) for r in scen_recs]
 
 
 def format_writer_prompt(
@@ -2348,6 +2788,9 @@ def format_writer_prompt(
     goal_mode: str = DEFAULT_GOAL_MODE,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+    shape_plan: str = DEFAULT_SHAPE_PLAN,
+    scenario_shape_plan: Sequence[Mapping[str, Any] | str] | None = None,
+    shape_plan_seed: int | None = None,
 ) -> str:
     """Format the `qwen3.6:35b` writer prompt for `world` and `focal_agent`.
 
@@ -2365,6 +2808,10 @@ def format_writer_prompt(
         raise ValueError(
             f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
         )
+    if shape_plan not in VALID_SHAPE_PLANS:
+        raise ValueError(
+            f"shape_plan must be one of {sorted(VALID_SHAPE_PLANS)}, got {shape_plan!r}"
+        )
     raw_template = (
         template
         if template is not None
@@ -2372,6 +2819,7 @@ def format_writer_prompt(
             goal_mode=goal_mode,
             constraint_layout=constraint_layout,
             accepted_forms_line=accepted_forms_line,
+            shape_plan=shape_plan,
             agents=world.agents,
         )
     )
@@ -2398,32 +2846,22 @@ def format_writer_prompt(
             for ag, g in world.goals.items()
         },
     }
-    event_log = project_events_for_writer(world.events, world=world)
+    shape_tags = _resolve_event_shape_tags_for_world(
+        world,
+        shape_plan=shape_plan,
+        scenario_shape_plan=scenario_shape_plan,
+        shape_plan_seed=shape_plan_seed,
+    )
+    event_log = project_events_for_writer(world.events, world=world, shape_tags=shape_tags)
 
-    line_event_order_bullet_off = (
-        f"- (c_fidelity_event_order) {WRITER_PROSE_REQUIREMENTS_BY_ID['c_fidelity_event_order'].rule_text}"
-    )
-    line_event_order_bullet_on = f"{line_event_order_bullet_off}\n{ACCEPTED_FORMS_LINE_TEXT}"
-    line_event_order_bullet = (
-        line_event_order_bullet_on if accepted_forms_line == "on" else line_event_order_bullet_off
-    )
-    table_event_order_bullet_off = (
-        f"- (c_fidelity_event_order) {format_event_order_table_rule_text(accepted_forms_line='off')}"
-    )
-    table_event_order_bullet_on = (
-        f"- (c_fidelity_event_order) {format_event_order_table_rule_text(accepted_forms_line='on')}"
-    )
-    table_event_order_bullet = (
-        table_event_order_bullet_on if accepted_forms_line == "on" else table_event_order_bullet_off
-    )
     target_event_order_bullet = (
-        table_event_order_bullet if constraint_layout == "table" else line_event_order_bullet
+        f"- (c_fidelity_event_order) {get_writer_prose_requirements(goal_mode, constraint_layout=constraint_layout, accepted_forms_line=accepted_forms_line, shape_plan=shape_plan, agents=world.agents)[15].rule_text}"
     )
-    candidate_event_order_bullets = (
-        table_event_order_bullet_on,
-        table_event_order_bullet_off,
-        line_event_order_bullet_on,
-        line_event_order_bullet_off,
+    candidate_event_order_bullets = tuple(
+        f"- (c_fidelity_event_order) {get_writer_prose_requirements('copy', constraint_layout=cl_cand, accepted_forms_line=afl_cand, shape_plan=sp_cand)[15].rule_text}"
+        for cl_cand in ("table", "line")
+        for afl_cand in ("on", "off")
+        for sp_cand in ("assigned", "off")
     )
 
     if HARD_CONSTRAINTS_PLACEHOLDER in raw_template:
@@ -2433,6 +2871,7 @@ def format_writer_prompt(
                 goal_mode=goal_mode,
                 constraint_layout=constraint_layout,
                 accepted_forms_line=accepted_forms_line,
+                shape_plan=shape_plan,
                 agents=world.agents,
             ),
         )
@@ -2508,6 +2947,68 @@ def format_writer_prompt(
             check_id="prompt_belief_rule_count",
         )
     return formatted
+
+
+def verify_shape_plan_prompt_token_parity(
+    world: World,
+    focal_agent: str,
+    counter: PromptTokenCounter,
+    *,
+    goal_mode: str = "splice",
+    constraint_layout: str = "table",
+    accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+    scenario_shape_plan: Sequence[Mapping[str, Any] | str] | None = None,
+    shape_plan_seed: int | None = None,
+    think: bool = DEFAULT_WRITER_THINK,
+) -> dict[str, object]:
+    """Verify that the formatted writer prompt for `(world, focal_agent)` has identical token count under `assigned` and `wildcard` (tolerance 0)."""
+    prompt_assigned = format_writer_prompt(
+        world,
+        focal_agent,
+        goal_mode=goal_mode,
+        constraint_layout=constraint_layout,
+        accepted_forms_line=accepted_forms_line,
+        shape_plan="assigned",
+        scenario_shape_plan=scenario_shape_plan,
+        shape_plan_seed=shape_plan_seed,
+    )
+    prompt_wildcard = format_writer_prompt(
+        world,
+        focal_agent,
+        goal_mode=goal_mode,
+        constraint_layout=constraint_layout,
+        accepted_forms_line=accepted_forms_line,
+        shape_plan="wildcard",
+        scenario_shape_plan=scenario_shape_plan,
+        shape_plan_seed=shape_plan_seed,
+    )
+    assigned_raw_tokens = int(counter(prompt_assigned))
+    wildcard_raw_tokens = int(counter(prompt_wildcard))
+    assigned_chat_tokens = count_prompt_tokens_exact(
+        [{"role": "user", "content": prompt_assigned}],
+        think=think,
+        counter=counter,
+    )
+    wildcard_chat_tokens = count_prompt_tokens_exact(
+        [{"role": "user", "content": prompt_wildcard}],
+        think=think,
+        counter=counter,
+    )
+    if assigned_raw_tokens != wildcard_raw_tokens or assigned_chat_tokens != wildcard_chat_tokens:
+        raise ValueError(
+            f"STOPPED: prompt token parity mismatch for ({world.scenario_id}, {focal_agent}): "
+            f"raw={assigned_raw_tokens} vs {wildcard_raw_tokens}, "
+            f"chat={assigned_chat_tokens} vs {wildcard_chat_tokens}."
+        )
+    return {
+        "scenario_id": world.scenario_id,
+        "focal_agent": focal_agent,
+        "assigned_raw_tokens": assigned_raw_tokens,
+        "wildcard_raw_tokens": wildcard_raw_tokens,
+        "assigned_chat_tokens": assigned_chat_tokens,
+        "wildcard_chat_tokens": wildcard_chat_tokens,
+        "equal": True,
+    }
 
 
 _WORD_TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
@@ -3916,7 +4417,7 @@ def _all_containers_set(world: World | None) -> set[str]:
     )
 
 
-def _sentence_matches_event(
+def matched_event_form_id(
     sentence: str,
     ev: Event,
     noise_threshold: int,
@@ -3927,14 +4428,14 @@ def _sentence_matches_event(
     next_sentence: str | None = None,
     next_event: Event | None = None,
     checker_profile: str = DEFAULT_CHECKER_PROFILE,
-) -> bool:
-    """Return True if `sentence` states `ev` with role-bound actor, action, object, ordered from/to, and room."""
+) -> str | None:
+    """Return the accepted Stage 4 `form_id` matched by the checker's frame code paths, or `None` if refused."""
     if checker_profile not in VALID_CHECKER_PROFILES:
         raise ValueError(
             f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
         )
     if _has_tag_echo(sentence):
-        return False
+        return None
     s_low = sentence.lower()
     s_unquoted_low = _strip_quoted_spans(s_low)
     frame_low = s_unquoted_low
@@ -4007,7 +4508,7 @@ def _sentence_matches_event(
         action_verbs=action_verbs,
         checker_profile=checker_profile,
     ):
-        return False
+        return None
     # Card ue: the possessive occluded-see form has the actor in possessive position, not as the subject of a
     # sighting verb (`the <occluder> blocked <actor>'s sight of the <container> from the far-side alcove`).
     possessive_occluded_see = _sentence_states_occluder_blocked_actor_sight(
@@ -4042,29 +4543,29 @@ def _sentence_matches_event(
             checker_profile=checker_profile,
         )
     ):
-        return False
+        return None
 
     if ev.target_object:
         target_esc = re.escape(ev.target_object.lower())
         if re.search(rf"\bno\s+(?:[a-z]+\s+of\s+)?{_ARTICLE_OPT_RE}{target_esc}\b", frame_low):
-            return False
+            return None
 
     for loc_piece in (ev.from_location, ev.to_location):
         if loc_piece:
             loc_esc = re.escape(loc_piece.lower())
             if re.search(rf"\bno\s+(?:[a-z]+\s+of\s+)?{_ARTICLE_OPT_RE}{loc_esc}\b", frame_low):
-                return False
+                return None
 
     if ev.room.lower() not in frame_low:
         if ev.kind != "message":
-            return False
+            return None
     else:
         # Reject if another room from world.rooms is asserted as the room of an intra-room action
         if world is not None and ev.kind not in ("enter", "leave"):
             other_rooms = [r for r in world.rooms if r.lower() != ev.room.lower()]
             for o_room in other_rooms:
                 if o_room.lower() in frame_low:
-                    return False
+                    return None
             room_esc = re.escape(ev.room.lower())
             # Strip any "not far from [the] <room>" before checking that the event's room is stated as the location
             frame_for_room = re.sub(
@@ -4076,27 +4577,27 @@ def _sentence_matches_event(
                 rf"\b(?:in|from|inside|at|of)\s+{_ARTICLE_OPT_RE}{room_esc}(?!\s+(?:doorway|threshold)\b)\b",
                 frame_for_room,
             ):
-                return False
+                return None
 
     if ev.kind == "message" and ev.room.lower() not in frame_low and world is not None:
         other_rooms = [r for r in world.rooms if r.lower() != ev.room.lower()]
         for o_room in other_rooms:
             if o_room.lower() in frame_low:
-                return False
+                return None
 
     if ev.kind == "enter":
         if not (ev.from_location and ev.to_location):
-            return False
+            return None
         # An enter sentence states an arrival. A sentence whose action is a move, a see, a say or a
         # message (by this actor or another) is some other event's sentence, even when its verb
         # ("moved", "stepped", ...) is also a movement verb and it names the arrival room.
         if _sentence_states_non_arrival_action(frame_low, world, all_parties):
-            return False
+            return None
         if world is not None:
             allowed_rooms = {ev.room.lower(), ev.from_location.lower(), ev.to_location.lower()}
             for o_room in world.rooms:
                 if o_room.lower() not in allowed_rooms and o_room.lower() in frame_low:
-                    return False
+                    return None
         if _ordered_from_to_positions(
             frame_low,
             ev.from_location,
@@ -4118,13 +4619,17 @@ def _sentence_matches_event(
                     checker_profile=checker_profile,
                 )
             ):
-                return _sentence_is_arrival_half_of_leave_enter(
-                    frame_low,
-                    ev,
-                    all_parties,
-                    prev_sentence=prev_sentence,
+                return (
+                    "ENTER_0"
+                    if _sentence_is_arrival_half_of_leave_enter(
+                        frame_low,
+                        ev,
+                        all_parties,
+                        prev_sentence=prev_sentence,
+                    )
+                    else None
                 )
-            return True
+            return "ENTER_0"
         to_esc = re.escape(ev.to_location.lower())
         has_to_dest = bool(
             re.search(
@@ -4148,44 +4653,52 @@ def _sentence_matches_event(
                 checker_profile=checker_profile,
             )
         ):
-            return True
-        return False
+            return "ENTER_0"
+        return None
 
     if ev.kind == "leave":
         if not (ev.from_location and ev.to_location):
-            return False
+            return None
         if world is not None:
             allowed_rooms = {ev.room.lower(), ev.from_location.lower(), ev.to_location.lower()}
             for o_room in world.rooms:
                 if o_room.lower() not in allowed_rooms and o_room.lower() in frame_low:
-                    return False
-        return _ordered_from_to_positions(
-            frame_low,
-            ev.from_location,
-            ev.to_location,
-            require_from_prep=False,
-            allow_dest_before_source=is_folded_movement,
+                    return None
+        return (
+            "LEAVE_0"
+            if _ordered_from_to_positions(
+                frame_low,
+                ev.from_location,
+                ev.to_location,
+                require_from_prep=False,
+                allow_dest_before_source=is_folded_movement,
+            )
+            else None
         )
 
     if ev.kind == "move":
         if is_station_move:
             # Card ue: the actor stepped behind/around the occluder to the other station; the occluder did not move.
-            return _sentence_matches_station_move(
-                s_low,
-                ev,
-                all_parties,
-                checker_profile=checker_profile,
+            return (
+                "MOVE_0"
+                if _sentence_matches_station_move(
+                    s_low,
+                    ev,
+                    all_parties,
+                    checker_profile=checker_profile,
+                )
+                else None
             )
         if not (ev.target_object and ev.from_location and ev.to_location):
-            return False
+            return None
         if _has_bundled_or_reordered_clause(frame_low, ev.actor):
-            return False
+            return None
         allowed_move_containers = {ev.from_location.lower(), ev.to_location.lower()}
         for other_c in all_containers:
             if other_c not in allowed_move_containers and other_c in frame_low:
-                return False
+                return None
         if passive_move_by_agent:
-            return True
+            return "MOVE_3"
         target_esc = re.escape(ev.target_object.lower())
         subj_matches = _find_actor_subject_verb_matches(
             frame_low,
@@ -4196,7 +4709,6 @@ def _sentence_matches_event(
             world=world,
             checker_profile=checker_profile,
         )
-        matched_vp = False
         for m_act, m_verb in subj_matches:
             after_verb = frame_low[m_act.end() + m_verb.end() :]
             m_obj = re.match(
@@ -4235,19 +4747,22 @@ def _sentence_matches_event(
                     continue
             else:
                 if any(bp in frame_low for bp in BLOCKING_PHRASES):
-                    return False
-            matched_vp = True
-            break
-        return matched_vp
+                    return None
+            between_actor_verb = frame_low[m_act.end() : m_act.end() + m_verb.start()]
+            used_p1 = _ACTOR_TO_VERB_ALLOWED_BETWEEN_RE.match(between_actor_verb) is None
+            if m2_path_ok and not post_path_ok:
+                return "MOVE_2"
+            return "MOVE_4" if used_p1 else "MOVE_1"
+        return None
 
     if ev.kind == "see":
         if not ev.target_object:
-            return False
+            return None
         if _has_bundled_or_reordered_clause(frame_low, ev.actor):
-            return False
+            return None
         if ev.occluded and ev.occluder and _sentence_asserts_sighting_of_target(frame_low, ev, all_parties):
             # Card ue: the actor looked and could NOT see the container; `saw`/`observed` it is a false sighting.
-            return False
+            return None
         target_esc = re.escape(ev.target_object.lower())
         if ev.occluded and ev.occluder:
             allowed_occ_containers = {
@@ -4257,15 +4772,15 @@ def _sentence_matches_event(
             }
             for other_c in all_containers:
                 if other_c not in allowed_occ_containers and other_c in frame_low:
-                    return False
+                    return None
             if FAR_SIDE_ALCOVE_STATION.lower() not in frame_low:
-                return False
+                return None
             if v2_occluded_see_hid:
-                return True
+                return "SEE_5"
             if not _occluder_governs_blocked(frame_low, ev.occluder):
-                return False
+                return None
             if possessive_occluded_see:
-                return True
+                return "SEE_3"
             subj_matches = _find_actor_subject_verb_matches(
                 frame_low,
                 ev.actor,
@@ -4292,21 +4807,21 @@ def _sentence_matches_event(
                         is None
                     ):
                         continue
-                return True
-            return False
+                return "SEE_4"
+            return None
 
         if any(bp in frame_low for bp in BLOCKING_PHRASES):
-            return False
+            return None
         if ev.to_location and ev.to_location.lower() in all_containers:
             if ev.to_location.lower() not in frame_low:
-                return False
+                return None
             for other_c in all_containers:
                 if other_c != ev.to_location.lower() and other_c in frame_low:
-                    return False
+                    return None
         else:
             for other_c in all_containers:
                 if other_c != ev.target_object.lower() and other_c in frame_low:
-                    return False
+                    return None
         subj_matches = _find_actor_subject_verb_matches(
             frame_low,
             ev.actor,
@@ -4332,24 +4847,26 @@ def _sentence_matches_event(
             if ev.to_location and ev.to_location.lower() in all_containers:
                 if re.search(rf"\b{re.escape(ev.to_location.lower())}\b", after_verb) is None:
                     continue
-            return True
-        return False
+            between_actor_verb = frame_low[m_act.end() : m_act.end() + m_verb.start()]
+            used_p1 = _ACTOR_TO_VERB_ALLOWED_BETWEEN_RE.match(between_actor_verb) is None
+            return "SEE_2" if used_p1 else "SEE_1"
+        return None
 
     if ev.kind == "say":
         if _has_bundled_or_reordered_clause(frame_low, ev.actor):
-            return False
+            return None
         frame_no_thresh = re.sub(r"\([^)]*threshold[^)]*\)", "", frame_low)
         db_str = f"{ev.noise_level} db"
         if db_str not in frame_no_thresh:
-            return False
+            return None
         for m_db in re.finditer(r"\b(\d+)\s*db\b", frame_no_thresh):
             if int(m_db.group(1)) != int(ev.noise_level):
-                return False
+                return None
         quoted_spans = _extract_quoted_spans(s_low)
         if not quoted_spans:
-            return False
+            return None
         if ev.utterance and not _quote_matches_utterance_exactly(quoted_spans, ev.utterance):
-            return False
+            return None
         subj_matches = _find_actor_subject_verb_matches(
             frame_no_thresh,
             ev.actor,
@@ -4390,24 +4907,35 @@ def _sentence_matches_event(
                 is not None
             )
             if pre_quote_ok or post_quote_ok:
-                return True
-        return False
+                between_actor_verb = frame_no_thresh[m_act.end() : m_act.end() + m_verb.start()]
+                used_p1 = _ACTOR_TO_VERB_ALLOWED_BETWEEN_RE.match(between_actor_verb) is None
+                if used_p1:
+                    return "SAY_5"
+                if post_quote_ok and not pre_quote_ok:
+                    return "SAY_2"
+                if db_str in before_actor:
+                    return "SAY_3"
+                q_pos = after_verb.find('""')
+                if q_pos >= 0 and ev.room.lower() in after_verb[q_pos + 2 :]:
+                    return "SAY_4"
+                return "SAY_1"
+        return None
 
     if ev.kind == "message":
         if not ev.recipient:
-            return False
+            return None
         if _has_bundled_or_reordered_clause(frame_low, ev.actor):
-            return False
+            return None
         recip_esc = re.escape(ev.recipient.lower())
         if not re.search(rf"\b(?:to|for|messaged|texted|notified)\s+{recip_esc}\b", frame_low):
-            return False
+            return None
         quoted_spans = _extract_quoted_spans(s_low)
         if len(quoted_spans) > 1:
-            return False
+            return None
         if ev.utterance:
             if quoted_spans:
                 if not _quote_matches_utterance_exactly(quoted_spans, ev.utterance):
-                    return False
+                    return None
                 subj_matches = _find_actor_subject_verb_matches(
                     frame_low,
                     ev.actor,
@@ -4430,14 +4958,43 @@ def _sentence_matches_event(
                         msg_quote_bound = True
                         break
                 if not msg_quote_bound:
-                    return False
+                    return None
             else:
                 utt_core = ev.utterance.rstrip(".!?").lower()
                 if utt_core not in s_low:
-                    return False
-        return True
+                    return None
+        return "MESSAGE_0"
 
-    return False
+    return None
+
+
+def _sentence_matches_event(
+    sentence: str,
+    ev: Event,
+    noise_threshold: int,
+    world: World | None = None,
+    *,
+    prev_sentence: str | None = None,
+    prev_event: Event | None = None,
+    next_sentence: str | None = None,
+    next_event: Event | None = None,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
+) -> bool:
+    """Return True if `sentence` states `ev` with role-bound actor, action, object, ordered from/to, and room."""
+    return (
+        matched_event_form_id(
+            sentence,
+            ev,
+            noise_threshold,
+            world=world,
+            prev_sentence=prev_sentence,
+            prev_event=prev_event,
+            next_sentence=next_sentence,
+            next_event=next_event,
+            checker_profile=checker_profile,
+        )
+        is not None
+    )
 
 
 def _event_content_present(
@@ -6128,6 +6685,613 @@ def check_rendered_prose(
     return ()
 
 
+SHAPE_PLAN_ASSIGNED_KINDS: tuple[str, ...] = ("move", "see", "say")
+SHAPE_PLAN_FORMS_BY_KIND: dict[str, tuple[str, ...]] = {
+    "move": ("MOVE_1", "MOVE_2", "MOVE_3", "MOVE_4"),
+    "see": ("SEE_1", "SEE_2", "SEE_3", "SEE_4", "SEE_5"),
+    "say": ("SAY_1", "SAY_2", "SAY_3", "SAY_4", "SAY_5"),
+}
+SHAPE_PLAN_ALL_ASSIGNED_FORMS: tuple[str, ...] = (
+    "MOVE_1",
+    "MOVE_2",
+    "MOVE_3",
+    "MOVE_4",
+    "SEE_1",
+    "SEE_2",
+    "SEE_3",
+    "SEE_4",
+    "SEE_5",
+    "SAY_1",
+    "SAY_2",
+    "SAY_3",
+    "SAY_4",
+    "SAY_5",
+)
+
+
+def match_rendering_event_forms(
+    prose: str,
+    world: World,
+    *,
+    focal_agent: str | None = None,
+    goal_mode: str = DEFAULT_GOAL_MODE,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
+) -> list[dict[str, object]]:
+    """Run the sequential event-order matching pass over `prose` for `world` and return per-event realized form outcomes (no text)."""
+    _ = focal_agent
+    if goal_mode not in VALID_GOAL_MODES:
+        raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
+    if checker_profile not in VALID_CHECKER_PROFILES:
+        raise ValueError(
+            f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
+        )
+    checked_prose = prose
+    if goal_mode == "splice":
+        try:
+            checked_prose = splice_goal_tokens(prose, world).expanded_prose
+        except RenderCheckError:
+            checked_prose = _GOAL_TOKEN_WITH_OPTIONAL_PUNCT_RE.sub("", prose)
+    norm_prose = normalize_prose_line_endings(checked_prose)
+    paragraphs = [p.strip() for p in norm_prose.split("\n\n") if p.strip()]
+    event_sentences: list[str] = []
+    if len(paragraphs) >= 2:
+        for ev_para in paragraphs[1:]:
+            event_sentences.extend(_split_prose_sentences(ev_para))
+
+    n_events = len(world.events)
+    if n_events == 0:
+        return []
+
+    matched_sentence_indices: list[int] = []
+    search_start = 0
+    results: list[dict[str, object]] = []
+
+    for ev_idx, ev in enumerate(world.events):
+        prev_ev = world.events[ev_idx - 1] if ev_idx > 0 else None
+        next_ev = world.events[ev_idx + 1] if ev_idx + 1 < n_events else None
+        tercile_idx = min(2, (ev_idx * 3) // max(1, n_events))
+        tercile_label = f"T{tercile_idx + 1}"
+        variant = event_shape_plan_variant(ev, world)
+
+        found_idx: int | None = None
+        realized_form_id: str | None = None
+
+        if (
+            ev.kind == "enter"
+            and prev_ev is not None
+            and matched_sentence_indices
+            and search_start == matched_sentence_indices[-1] + 1
+        ):
+            s_prev = matched_sentence_indices[-1]
+            if search_start < len(event_sentences):
+                cand_fid = matched_event_form_id(
+                    event_sentences[search_start],
+                    ev,
+                    world.noise_threshold,
+                    world=world,
+                    prev_sentence=event_sentences[s_prev],
+                    prev_event=prev_ev,
+                    checker_profile=checker_profile,
+                )
+                if cand_fid is not None:
+                    found_idx = search_start
+                    realized_form_id = cand_fid
+            if found_idx is None and _sentence_matches_folded_leave_enter(
+                event_sentences[s_prev],
+                prev_ev,
+                ev,
+                world.noise_threshold,
+                world=world,
+                checker_profile=checker_profile,
+            ):
+                found_idx = s_prev
+                realized_form_id = "ENTER_0"
+
+        if found_idx is None:
+            for s_idx in range(search_start, len(event_sentences)):
+                prev_sent = (
+                    event_sentences[s_idx - 1]
+                    if (
+                        ev_idx > 0
+                        and s_idx > 0
+                        and matched_sentence_indices
+                        and matched_sentence_indices[-1] == s_idx - 1
+                    )
+                    else None
+                )
+                next_sent = (
+                    event_sentences[s_idx + 1]
+                    if s_idx + 1 < len(event_sentences)
+                    else None
+                )
+                cand_fid = matched_event_form_id(
+                    event_sentences[s_idx],
+                    ev,
+                    world.noise_threshold,
+                    world=world,
+                    prev_sentence=prev_sent,
+                    prev_event=prev_ev,
+                    next_sentence=next_sent,
+                    next_event=next_ev,
+                    checker_profile=checker_profile,
+                )
+                if cand_fid is not None and not (
+                    ev.kind == "leave"
+                    and ev_idx + 1 < n_events
+                    and world.events[ev_idx + 1].kind == "enter"
+                    and world.events[ev_idx + 1].actor == ev.actor
+                    and (
+                        (
+                            s_idx > search_start
+                            and s_idx - 1 not in matched_sentence_indices
+                            and ev.actor.lower() in event_sentences[s_idx - 1].lower()
+                            and _sentence_matches_folded_leave_enter(
+                                event_sentences[s_idx],
+                                ev,
+                                world.events[ev_idx + 1],
+                                world.noise_threshold,
+                                world=world,
+                                checker_profile=checker_profile,
+                            )
+                        )
+                        or (
+                            any(
+                                i not in matched_sentence_indices
+                                and _sentence_matches_event(
+                                    event_sentences[i],
+                                    ev,
+                                    world.noise_threshold,
+                                    world=world,
+                                    checker_profile=checker_profile,
+                                )
+                                and not _sentence_matches_folded_leave_enter(
+                                    event_sentences[i],
+                                    ev,
+                                    world.events[ev_idx + 1],
+                                    world.noise_threshold,
+                                    world=world,
+                                    checker_profile=checker_profile,
+                                )
+                                for i in range(0, search_start)
+                            )
+                            and _sentence_matches_folded_leave_enter(
+                                event_sentences[s_idx],
+                                ev,
+                                world.events[ev_idx + 1],
+                                world.noise_threshold,
+                                world=world,
+                                checker_profile=checker_profile,
+                            )
+                        )
+                    )
+                ):
+                    found_idx = s_idx
+                    realized_form_id = cand_fid
+                    break
+
+        if found_idx is None:
+            earlier_idx = next(
+                (
+                    i
+                    for i in range(0, search_start)
+                    if i not in matched_sentence_indices
+                    and _sentence_matches_event(
+                        event_sentences[i],
+                        ev,
+                        world.noise_threshold,
+                        world=world,
+                        checker_profile=checker_profile,
+                    )
+                ),
+                None,
+            )
+            if earlier_idx is not None:
+                matched_sentence_indices.append(earlier_idx)
+                results.append(
+                    {
+                        "scenario_id": world.scenario_id,
+                        "event_index": ev_idx + 1,
+                        "kind": ev.kind,
+                        "variant": variant,
+                        "position_tercile": tercile_label,
+                        "position_tercile_index": tercile_idx,
+                        "realized_form_id": None,
+                        "outcome": "other_fault",
+                        "rule_id": "c_fidelity_event_order",
+                    }
+                )
+                continue
+
+            cand_sent = (
+                event_sentences[search_start]
+                if search_start < len(event_sentences)
+                else "no candidate sentence"
+            )
+            next_ev_matches_search_start = (
+                search_start < len(event_sentences)
+                and ev_idx + 1 < n_events
+                and (
+                    _sentence_matches_event(
+                        event_sentences[search_start],
+                        world.events[ev_idx + 1],
+                        world.noise_threshold,
+                        world=world,
+                        checker_profile=checker_profile,
+                    )
+                    or (
+                        not _event_content_present(
+                            event_sentences[search_start],
+                            ev,
+                            world,
+                            checker_profile,
+                        )
+                        and _event_content_present(
+                            event_sentences[search_start],
+                            world.events[ev_idx + 1],
+                            world,
+                            checker_profile,
+                        )
+                    )
+                )
+            )
+            missing_ev_kind = (
+                "absent"
+                if cand_sent == "no candidate sentence" or next_ev_matches_search_start
+                else "altered"
+            )
+            if missing_ev_kind == "absent":
+                if cand_sent == "no candidate sentence" and _has_tag_echo(prose):
+                    ev_rule_id = "tag_echo"
+                else:
+                    ev_rule_id = "c_fidelity_missing_event"
+            else:
+                ev_rule_id = _sentence_rejection_rule_id(
+                    cand_sent,
+                    ev,
+                    world.noise_threshold,
+                    world=world,
+                    checker_profile=checker_profile,
+                )
+            if missing_ev_kind == "altered" and search_start < len(event_sentences):
+                matched_sentence_indices.append(search_start)
+                search_start += 1
+
+            if ev_rule_id == "tag_echo":
+                outcome_bucket = "tag_echo"
+            elif ev_rule_id == "form_not_accepted":
+                outcome_bucket = "form_not_accepted"
+            else:
+                outcome_bucket = "other_fault"
+            results.append(
+                {
+                    "scenario_id": world.scenario_id,
+                    "event_index": ev_idx + 1,
+                    "kind": ev.kind,
+                    "variant": variant,
+                    "position_tercile": tercile_label,
+                    "position_tercile_index": tercile_idx,
+                    "realized_form_id": None,
+                    "outcome": outcome_bucket,
+                    "rule_id": ev_rule_id,
+                }
+            )
+            continue
+
+        matched_sentence_indices.append(found_idx)
+        search_start = found_idx + 1
+        assert realized_form_id is not None
+        results.append(
+            {
+                "scenario_id": world.scenario_id,
+                "event_index": ev_idx + 1,
+                "kind": ev.kind,
+                "variant": variant,
+                "position_tercile": tercile_label,
+                "position_tercile_index": tercile_idx,
+                "realized_form_id": realized_form_id,
+                "outcome": realized_form_id,
+                "rule_id": None,
+            }
+        )
+
+    return results
+
+
+def compute_shape_plan_run_telemetry(
+    worlds: Sequence[World],
+    *,
+    shape_plan: str = DEFAULT_SHAPE_PLAN,
+    shape_plan_seed: int | None = None,
+    plan_bundle: Mapping[str, Any] | None = None,
+    attempt0_prose_by_rendering: Mapping[tuple[str, int], str] | None = None,
+    final_prose_by_rendering: Mapping[tuple[str, int], str] | None = None,
+    attempt0_passed_by_rendering: Mapping[tuple[str, int], bool] | None = None,
+    final_passed_by_rendering: Mapping[tuple[str, int], bool] | None = None,
+    goal_mode: str = DEFAULT_GOAL_MODE,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
+) -> dict[str, object]:
+    """Compute Stage 4 shape-plan run telemetry (counts, ids, and rates only; zero prose text)."""
+    if shape_plan not in VALID_SHAPE_PLANS:
+        raise ValueError(
+            f"shape_plan must be one of {sorted(VALID_SHAPE_PLANS)}, got {shape_plan!r}"
+        )
+    resolved_seed = (
+        int(shape_plan_seed)
+        if shape_plan_seed is not None
+        else (int(worlds[0].seed) if worlds else 20261103)
+    )
+    if plan_bundle is None:
+        effective_block_size = (
+            SHAPE_PLAN_BLOCK_SIZE
+            if len(worlds) >= SHAPE_PLAN_BLOCK_SIZE and len(worlds) % SHAPE_PLAN_BLOCK_SIZE == 0
+            else max(1, len(worlds))
+        )
+        plan_bundle = generate_shape_plan(worlds, seed=resolved_seed, block_size=effective_block_size)
+
+    plan_records: list[dict[str, object]] = [
+        {
+            "scenario_id": str(r["scenario_id"]),
+            "event_index": int(r["event_index"]),
+            "kind": str(r["kind"]),
+            "variant": str(r["variant"]),
+            "form_id": str(r["form_id"]),
+        }
+        for r in plan_bundle["plan_records"]  # type: ignore[index]
+    ]
+    plan_by_sid: Mapping[str, Sequence[Mapping[str, Any]]] = plan_bundle["plan_by_scenario_id"]  # type: ignore[assignment]
+
+    a0_prose_map = dict(attempt0_prose_by_rendering or {})
+    fin_prose_map = dict(final_prose_by_rendering if final_prose_by_rendering is not None else a0_prose_map)
+    a0_pass_map = dict(attempt0_passed_by_rendering or {})
+    fin_pass_map = dict(final_passed_by_rendering if final_passed_by_rendering is not None else a0_pass_map)
+
+    # Compliance per kind and per position tercile at attempt 0
+    comp_by_kind_counts: dict[str, Counter[str]] = {
+        k: Counter() for k in SHAPE_PLAN_ASSIGNED_KINDS
+    }
+    comp_by_tercile_counts: dict[str, Counter[str]] = {
+        t: Counter() for t in ("T1", "T2", "T3")
+    }
+    comp_by_kind_and_tercile_counts: dict[str, dict[str, Counter[str]]] = {
+        k: {t: Counter() for t in ("T1", "T2", "T3")}
+        for k in SHAPE_PLAN_ASSIGNED_KINDS
+    }
+    overall_comp_counts: Counter[str] = Counter()
+
+    # Confusion matrix per kind at attempt 0: assigned × {realized form, form_not_accepted, other_fault, tag_echo}
+    confusion_by_kind: dict[str, dict[str, dict[str, int]]] = {}
+    for k, k_forms in SHAPE_PLAN_FORMS_BY_KIND.items():
+        cols = (*k_forms, "form_not_accepted", "other_fault", "tag_echo")
+        confusion_by_kind[k] = {
+            af: {col: 0 for col in cols}
+            for af in k_forms
+        }
+
+    def _empty_form_outcome_counts() -> dict[str, int]:
+        return {
+            "assigned": 0,
+            "compliant": 0,
+            "accepted_other_form": 0,
+            "accepted_any_form": 0,
+            "form_not_accepted": 0,
+            "other_fault": 0,
+            "tag_echo": 0,
+            "rendering_passed": 0,
+            "rendering_failed": 0,
+        }
+
+    first_attempt_by_form: dict[str, dict[str, int]] = {
+        fid: _empty_form_outcome_counts() for fid in SHAPE_PLAN_ALL_ASSIGNED_FORMS
+    }
+    final_by_form: dict[str, dict[str, int]] = {
+        fid: _empty_form_outcome_counts() for fid in SHAPE_PLAN_ALL_ASSIGNED_FORMS
+    }
+
+    for w in worlds:
+        sid = w.scenario_id
+        scen_plan = plan_by_sid.get(sid, ())
+        for r_idx in (0, 1):
+            key = (sid, r_idx)
+            if key not in a0_prose_map and key not in fin_prose_map:
+                continue
+            focal_ag = w.agents[r_idx] if r_idx < len(w.agents) else w.agents[0]
+
+            # Attempt 0 evaluation
+            if key in a0_prose_map:
+                a0_text = a0_prose_map[key]
+                a0_ev_outcomes = match_rendering_event_forms(
+                    a0_text,
+                    w,
+                    focal_agent=focal_ag,
+                    goal_mode=goal_mode,
+                    checker_profile=checker_profile,
+                )
+                if key in a0_pass_map:
+                    a0_rend_passed = bool(a0_pass_map[key])
+                else:
+                    try:
+                        check_rendered_prose(
+                            a0_text,
+                            w,
+                            focal_agent=focal_ag,
+                            goal_mode=goal_mode,
+                            checker_profile=checker_profile,
+                        )
+                        a0_rend_passed = True
+                    except RenderCheckError:
+                        a0_rend_passed = False
+
+                for p_rec, ev_out in zip(scen_plan, a0_ev_outcomes, strict=True):
+                    v = str(p_rec["variant"])
+                    if v not in SHAPE_PLAN_VARIANT_FORMS:
+                        continue
+                    k = str(p_rec["kind"])
+                    assigned_fid = str(p_rec["form_id"])
+                    terc = str(ev_out["position_tercile"])
+                    realized_fid = ev_out["realized_form_id"]
+                    outcome_col = str(ev_out["outcome"])
+
+                    is_compliant = realized_fid == assigned_fid
+                    is_accepted = realized_fid is not None
+
+                    comp_by_kind_counts[k]["assigned"] += 1
+                    comp_by_tercile_counts[terc]["assigned"] += 1
+                    comp_by_kind_and_tercile_counts[k][terc]["assigned"] += 1
+                    overall_comp_counts["assigned"] += 1
+                    if is_compliant:
+                        comp_by_kind_counts[k]["compliant"] += 1
+                        comp_by_tercile_counts[terc]["compliant"] += 1
+                        comp_by_kind_and_tercile_counts[k][terc]["compliant"] += 1
+                        overall_comp_counts["compliant"] += 1
+                    if is_accepted:
+                        comp_by_kind_counts[k]["accepted_any_form"] += 1
+                        comp_by_tercile_counts[terc]["accepted_any_form"] += 1
+                        comp_by_kind_and_tercile_counts[k][terc]["accepted_any_form"] += 1
+                        overall_comp_counts["accepted_any_form"] += 1
+
+                    row_dict = confusion_by_kind[k][assigned_fid]
+                    if outcome_col in row_dict:
+                        row_dict[outcome_col] += 1
+                    else:
+                        row_dict["other_fault"] += 1
+
+                    fa_entry = first_attempt_by_form[assigned_fid]
+                    fa_entry["assigned"] += 1
+                    if is_compliant:
+                        fa_entry["compliant"] += 1
+                        fa_entry["accepted_any_form"] += 1
+                    elif is_accepted:
+                        fa_entry["accepted_other_form"] += 1
+                        fa_entry["accepted_any_form"] += 1
+                    elif outcome_col == "form_not_accepted":
+                        fa_entry["form_not_accepted"] += 1
+                    elif outcome_col == "tag_echo":
+                        fa_entry["tag_echo"] += 1
+                    else:
+                        fa_entry["other_fault"] += 1
+                    if a0_rend_passed:
+                        fa_entry["rendering_passed"] += 1
+                    else:
+                        fa_entry["rendering_failed"] += 1
+
+            # Final attempt evaluation
+            if key in fin_prose_map:
+                fin_text = fin_prose_map[key]
+                fin_ev_outcomes = match_rendering_event_forms(
+                    fin_text,
+                    w,
+                    focal_agent=focal_ag,
+                    goal_mode=goal_mode,
+                    checker_profile=checker_profile,
+                )
+                if key in fin_pass_map:
+                    fin_rend_passed = bool(fin_pass_map[key])
+                else:
+                    try:
+                        check_rendered_prose(
+                            fin_text,
+                            w,
+                            focal_agent=focal_ag,
+                            goal_mode=goal_mode,
+                            checker_profile=checker_profile,
+                        )
+                        fin_rend_passed = True
+                    except RenderCheckError:
+                        fin_rend_passed = False
+
+                for p_rec, ev_out in zip(scen_plan, fin_ev_outcomes, strict=True):
+                    v = str(p_rec["variant"])
+                    if v not in SHAPE_PLAN_VARIANT_FORMS:
+                        continue
+                    assigned_fid = str(p_rec["form_id"])
+                    realized_fid = ev_out["realized_form_id"]
+                    outcome_col = str(ev_out["outcome"])
+                    is_compliant = realized_fid == assigned_fid
+                    is_accepted = realized_fid is not None
+
+                    fn_entry = final_by_form[assigned_fid]
+                    fn_entry["assigned"] += 1
+                    if is_compliant:
+                        fn_entry["compliant"] += 1
+                        fn_entry["accepted_any_form"] += 1
+                    elif is_accepted:
+                        fn_entry["accepted_other_form"] += 1
+                        fn_entry["accepted_any_form"] += 1
+                    elif outcome_col == "form_not_accepted":
+                        fn_entry["form_not_accepted"] += 1
+                    elif outcome_col == "tag_echo":
+                        fn_entry["tag_echo"] += 1
+                    else:
+                        fn_entry["other_fault"] += 1
+                    if fin_rend_passed:
+                        fn_entry["rendering_passed"] += 1
+                    else:
+                        fn_entry["rendering_failed"] += 1
+
+    def _format_comp_entry(cnt: Counter[str]) -> dict[str, int | float]:
+        tot = int(cnt.get("assigned", 0))
+        comp = int(cnt.get("compliant", 0))
+        acc = int(cnt.get("accepted_any_form", 0))
+        return {
+            "assigned": tot,
+            "compliant": comp,
+            "accepted_any_form": acc,
+            "compliance_rate": round(comp / tot, 6) if tot > 0 else 0.0,
+        }
+
+    compliance_by_kind: dict[str, dict[str, int | float]] = {
+        k: _format_comp_entry(comp_by_kind_counts[k])
+        for k in SHAPE_PLAN_ASSIGNED_KINDS
+    }
+    compliance_by_kind["overall"] = _format_comp_entry(overall_comp_counts)
+
+    compliance_by_tercile: dict[str, dict[str, int | float]] = {}
+    for idx_t, t_key in enumerate(("T1", "T2", "T3"), start=1):
+        entry_t = _format_comp_entry(comp_by_tercile_counts[t_key])
+        compliance_by_tercile[t_key] = entry_t
+        compliance_by_tercile[f"tercile_{idx_t}"] = dict(entry_t)
+
+    compliance_by_kind_and_tercile: dict[str, dict[str, dict[str, int | float]]] = {
+        k: {
+            t_key: _format_comp_entry(comp_by_kind_and_tercile_counts[k][t_key])
+            for t_key in ("T1", "T2", "T3")
+        }
+        for k in SHAPE_PLAN_ASSIGNED_KINDS
+    }
+
+    outcomes_by_assigned_form: dict[str, Any] = {
+        "first_attempt": first_attempt_by_form,
+        "final": final_by_form,
+    }
+    for fid in SHAPE_PLAN_ALL_ASSIGNED_FORMS:
+        outcomes_by_assigned_form[fid] = {
+            "first_attempt": dict(first_attempt_by_form[fid]),
+            "final": dict(final_by_form[fid]),
+        }
+
+    return {
+        "shape_plan": shape_plan,
+        "shape_plan_seed": resolved_seed,
+        "block_size": int(plan_bundle.get("block_size", SHAPE_PLAN_BLOCK_SIZE)),
+        "design_choices": dict(SHAPE_PLAN_DESIGN_CHOICES),
+        "block_balance_max_spread": dict(SHAPE_PLAN_DESIGN_CHOICES["block_balance_max_spread"]),
+        "two_form_switch_rate_band": dict(SHAPE_PLAN_DESIGN_CHOICES["two_form_switch_rate_band"]),
+        "plan_records": plan_records,
+        "lag1_persistence_by_kind": dict(plan_bundle["lag1_persistence_by_kind"]),  # type: ignore[arg-type]
+        "switch_rate_by_kind": dict(plan_bundle["switch_rate_by_kind"]),  # type: ignore[arg-type]
+        "lag1_persistence_by_variant": dict(plan_bundle["lag1_persistence_by_variant"]),  # type: ignore[arg-type]
+        "switch_rate_by_variant": dict(plan_bundle["switch_rate_by_variant"]),  # type: ignore[arg-type]
+        "two_form_switch_rate": float(plan_bundle["two_form_switch_rate"]),  # type: ignore[arg-type]
+        "attempt0_compliance_by_kind": compliance_by_kind,
+        "compliance_by_kind": compliance_by_kind,
+        "attempt0_compliance_by_position_tercile": compliance_by_tercile,
+        "compliance_by_position_tercile": compliance_by_tercile,
+        "attempt0_compliance_by_kind_and_tercile": compliance_by_kind_and_tercile,
+        "confusion_matrix_by_kind": confusion_by_kind,
+        "outcomes_by_assigned_form": outcomes_by_assigned_form,
+    }
+
+
 def _render_event_sentence(event: Event, focal_agent: str, noise_threshold: int) -> str:
     """Render a single `Event` in third-person prose focalized on `focal_agent` without step numbers or markers."""
     prefix = (
@@ -6408,6 +7572,8 @@ class MockWriter:
         constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
         checker_profile: str = DEFAULT_CHECKER_PROFILE,
         accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+        shape_plan: str = DEFAULT_SHAPE_PLAN,
+        shape_plan_seed: int | None = None,
     ) -> None:
         if goal_mode not in VALID_GOAL_MODES:
             raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
@@ -6423,15 +7589,22 @@ class MockWriter:
             raise ValueError(
                 f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
             )
+        if shape_plan not in VALID_SHAPE_PLANS:
+            raise ValueError(
+                f"shape_plan must be one of {sorted(VALID_SHAPE_PLANS)}, got {shape_plan!r}"
+            )
         self._custom_renderer = custom_renderer
         self._goal_mode = str(goal_mode)
         self._constraint_layout = str(constraint_layout)
         self._checker_profile = str(checker_profile)
         self._accepted_forms_line = str(accepted_forms_line)
+        self._shape_plan = str(shape_plan)
+        self._shape_plan_seed = int(shape_plan_seed) if shape_plan_seed is not None else None
         self._prompt_template = load_writer_prompt_template(
             goal_mode=self._goal_mode,
             constraint_layout=self._constraint_layout,
             accepted_forms_line=self._accepted_forms_line,
+            shape_plan=self._shape_plan,
         )
         self._refusals: list[ProseRefusalRecord] = []
 
@@ -6450,6 +7623,14 @@ class MockWriter:
     @property
     def accepted_forms_line(self) -> str:
         return self._accepted_forms_line
+
+    @property
+    def shape_plan(self) -> str:
+        return self._shape_plan
+
+    @property
+    def shape_plan_seed(self) -> int | None:
+        return self._shape_plan_seed
 
     @property
     def refusals(self) -> tuple[ProseRefusalRecord, ...]:
@@ -6471,7 +7652,12 @@ class MockWriter:
         render_fn = self._custom_renderer or default_fn
         return render_fn(world, focal_agent)
 
-    def render_scenario_pair(self, world: World) -> tuple[RenderedScenario, RenderedScenario]:
+    def render_scenario_pair(
+        self,
+        world: World,
+        *,
+        scenario_shape_plan: Sequence[Mapping[str, Any] | str] | None = None,
+    ) -> tuple[RenderedScenario, RenderedScenario]:
         """Render `world` twice, focalized on two distinct agents, over the complete log."""
         focal_0 = world.agents[0]
         focal_1 = world.agents[1]
@@ -6483,6 +7669,9 @@ class MockWriter:
             goal_mode=self._goal_mode,
             constraint_layout=self._constraint_layout,
             accepted_forms_line=self._accepted_forms_line,
+            shape_plan=self._shape_plan,
+            scenario_shape_plan=scenario_shape_plan,
+            shape_plan_seed=self._shape_plan_seed,
         )
         prompt_1 = format_writer_prompt(
             world,
@@ -6491,6 +7680,9 @@ class MockWriter:
             goal_mode=self._goal_mode,
             constraint_layout=self._constraint_layout,
             accepted_forms_line=self._accepted_forms_line,
+            shape_plan=self._shape_plan,
+            scenario_shape_plan=scenario_shape_plan,
+            shape_plan_seed=self._shape_plan_seed,
         )
 
         rendered_texts: list[str] = []
@@ -6730,8 +7922,16 @@ class LlamaTokenizeCounter:
     def count(self, text: str) -> int:
         env = dict(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = "-1"
+        gguf_arg = str(self.gguf_path)
+        if (
+            self.tokenize_exe.suffix.lower() == ".exe"
+            and gguf_arg.startswith("/mnt/")
+            and len(gguf_arg) > 6
+            and gguf_arg[6] == "/"
+        ):
+            gguf_arg = f"{gguf_arg[5].upper()}:{gguf_arg[6:]}"
         proc = subprocess.run(
-            [str(self.tokenize_exe), "-m", str(self.gguf_path), *LLAMA_TOKENIZE_ARGS],
+            [str(self.tokenize_exe), "-m", gguf_arg, *LLAMA_TOKENIZE_ARGS],
             input=text.encode("utf-8"),
             capture_output=True,
             env=env,
@@ -7819,6 +9019,8 @@ class WriterCheckpointManager:
         constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
         checker_profile: str = DEFAULT_CHECKER_PROFILE,
         accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+        shape_plan: str = DEFAULT_SHAPE_PLAN,
+        shape_plan_seed: int | None = None,
         presence_penalty: float | None = None,
         modelfile_parameters: Mapping[str, object] | None = None,
     ) -> None:
@@ -7836,6 +9038,10 @@ class WriterCheckpointManager:
             raise ValueError(
                 f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
             )
+        if shape_plan not in VALID_SHAPE_PLANS:
+            raise ValueError(
+                f"shape_plan must be one of {sorted(VALID_SHAPE_PLANS)}, got {shape_plan!r}"
+            )
         self.output_dir = output_dir
         self.public_path = output_dir / CHECKPOINT_FILENAME
         self.sealed_path = output_dir / "sealed_store" / SEALED_CHECKPOINT_FILENAME
@@ -7850,10 +9056,13 @@ class WriterCheckpointManager:
         self.constraint_layout = str(constraint_layout)
         self.checker_profile = str(checker_profile)
         self.accepted_forms_line = str(accepted_forms_line)
+        self.shape_plan = str(shape_plan)
+        self.shape_plan_seed = int(shape_plan_seed) if shape_plan_seed is not None else None
         self.hard_constraints_sha256 = compute_hard_constraints_sha256(
             goal_mode=self.goal_mode,
             constraint_layout=self.constraint_layout,
             accepted_forms_line=self.accepted_forms_line,
+            shape_plan=self.shape_plan,
         )
         self.presence_penalty = float(presence_penalty) if presence_penalty is not None else None
         self.modelfile_parameters: dict[str, object] = (
@@ -7893,6 +9102,8 @@ class WriterCheckpointManager:
             "goal_mode": self.goal_mode,
             "constraint_layout": self.constraint_layout,
             "accepted_forms_line": self.accepted_forms_line,
+            "shape_plan": self.shape_plan,
+            "shape_plan_seed": self.shape_plan_seed,
             "checker_profile": self.checker_profile,
             "hard_constraints_sha256": self.hard_constraints_sha256,
             "presence_penalty": self.presence_penalty,
@@ -8152,6 +9363,10 @@ class WriterCheckpointManager:
             or sealed_header.get("constraint_layout", DEFAULT_CONSTRAINT_LAYOUT) != self.constraint_layout
             or pub_header.get("accepted_forms_line", DEFAULT_ACCEPTED_FORMS_LINE) != self.accepted_forms_line
             or sealed_header.get("accepted_forms_line", DEFAULT_ACCEPTED_FORMS_LINE) != self.accepted_forms_line
+            or pub_header.get("shape_plan", DEFAULT_SHAPE_PLAN) != self.shape_plan
+            or sealed_header.get("shape_plan", DEFAULT_SHAPE_PLAN) != self.shape_plan
+            or pub_header.get("shape_plan_seed") != self.shape_plan_seed
+            or sealed_header.get("shape_plan_seed") != self.shape_plan_seed
             or pub_header.get("checker_profile", DEFAULT_CHECKER_PROFILE) != self.checker_profile
             or sealed_header.get("checker_profile", DEFAULT_CHECKER_PROFILE) != self.checker_profile
             or pub_header.get("hard_constraints_sha256", self.hard_constraints_sha256) != self.hard_constraints_sha256
@@ -8160,7 +9375,7 @@ class WriterCheckpointManager:
             or sealed_header.get("presence_penalty") != self.presence_penalty
         ):
             raise ValueError(
-                "Cannot --resume: checkpoint header (count, seed, writer_kind, goal_mode, constraint_layout, accepted_forms_line, checker_profile, hard_constraints_sha256, presence_penalty, or writer_manifest_digest) mismatches requested run."
+                "Cannot --resume: checkpoint header (count, seed, writer_kind, goal_mode, constraint_layout, accepted_forms_line, shape_plan, shape_plan_seed, checker_profile, hard_constraints_sha256, presence_penalty, or writer_manifest_digest) mismatches requested run."
             )
 
         restored_private_seed = str(sealed_header.get("private_seed_hex") or "")
@@ -8239,6 +9454,8 @@ class WriterCheckpointManager:
                         goal_mode=r0_goal_mode,
                         constraint_layout=r0_constraint_layout,
                         accepted_forms_line=self.accepted_forms_line,
+                        shape_plan=self.shape_plan,
+                        shape_plan_seed=self.shape_plan_seed,
                     )
                 )
                 prompt_1 = (
@@ -8250,6 +9467,8 @@ class WriterCheckpointManager:
                         goal_mode=r1_goal_mode,
                         constraint_layout=r1_constraint_layout,
                         accepted_forms_line=self.accepted_forms_line,
+                        shape_plan=self.shape_plan,
+                        shape_plan_seed=self.shape_plan_seed,
                     )
                 )
 
@@ -8512,6 +9731,8 @@ class OllamaWriter:
         constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
         checker_profile: str = DEFAULT_CHECKER_PROFILE,
         accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+        shape_plan: str = DEFAULT_SHAPE_PLAN,
+        shape_plan_seed: int | None = None,
         start_owned_server: bool | None = None,
         popen_factory: Callable[..., Any] | None = None,
         server_port: int | None = None,
@@ -8546,12 +9767,20 @@ class OllamaWriter:
             raise ValueError(
                 f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
             )
+        if shape_plan not in VALID_SHAPE_PLANS:
+            raise ValueError(
+                f"shape_plan must be one of {sorted(VALID_SHAPE_PLANS)}, got {shape_plan!r}"
+            )
         self._retry_form: str = resolved_retry_form
         self._short_circuit_dead_scenarios: bool = bool(short_circuit_dead_scenarios)
         self._goal_mode: str = str(goal_mode)
         self._constraint_layout: str = str(constraint_layout)
         self._checker_profile: str = str(checker_profile)
         self._accepted_forms_line: str = str(accepted_forms_line)
+        self._shape_plan: str = str(shape_plan)
+        self._shape_plan_seed: int | None = (
+            int(shape_plan_seed) if shape_plan_seed is not None else None
+        )
         self._presence_penalty: float | None = (
             float(presence_penalty) if presence_penalty is not None else None
         )
@@ -8588,6 +9817,7 @@ class OllamaWriter:
             goal_mode=self._goal_mode,
             constraint_layout=self._constraint_layout,
             accepted_forms_line=self._accepted_forms_line,
+            shape_plan=self._shape_plan,
         )
 
         is_real_transport = http_transport is None or http_transport is default_ollama_http_transport
@@ -8738,6 +9968,14 @@ class OllamaWriter:
     @property
     def accepted_forms_line(self) -> str:
         return self._accepted_forms_line
+
+    @property
+    def shape_plan(self) -> str:
+        return self._shape_plan
+
+    @property
+    def shape_plan_seed(self) -> int | None:
+        return self._shape_plan_seed
 
     @property
     def presence_penalty(self) -> float | None:
@@ -9425,6 +10663,7 @@ class OllamaWriter:
         *,
         allow_refusal: bool = False,
         short_circuit_dead_scenarios: bool | None = None,
+        scenario_shape_plan: Sequence[Mapping[str, Any] | str] | None = None,
     ) -> tuple[RenderedScenario, RenderedScenario] | None:
         """Render `world` twice via `qwen3.6:35b`, run all prose checks (a)-(d), and verify key invariance."""
         should_short_circuit = (
@@ -9442,6 +10681,9 @@ class OllamaWriter:
             goal_mode=self._goal_mode,
             constraint_layout=self._constraint_layout,
             accepted_forms_line=self._accepted_forms_line,
+            shape_plan=self._shape_plan,
+            scenario_shape_plan=scenario_shape_plan,
+            shape_plan_seed=self._shape_plan_seed,
         )
         prompt_1 = format_writer_prompt(
             world,
@@ -9450,6 +10692,9 @@ class OllamaWriter:
             goal_mode=self._goal_mode,
             constraint_layout=self._constraint_layout,
             accepted_forms_line=self._accepted_forms_line,
+            shape_plan=self._shape_plan,
+            scenario_shape_plan=scenario_shape_plan,
+            shape_plan_seed=self._shape_plan_seed,
         )
 
         prose_0 = self._chat_render(
@@ -10730,6 +11975,8 @@ def run_paired_seed_bank(
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     checker_profile: str = DEFAULT_CHECKER_PROFILE,
     accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+    shape_plan: str = DEFAULT_SHAPE_PLAN,
+    shape_plan_seed: int | None = None,
     output_path: Path | None = None,
     sealed_responses_path: Path | None = None,
     sealed_diagnostics_path: Path | None = None,
@@ -10767,8 +12014,29 @@ def run_paired_seed_bank(
         raise ValueError(
             f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
         )
+    if shape_plan not in VALID_SHAPE_PLANS:
+        raise ValueError(
+            f"shape_plan must be one of {sorted(VALID_SHAPE_PLANS)}, got {shape_plan!r}"
+        )
     seeds = _load_seed_bank_seeds(seed_bank)
     resolved_commit = commit_sha if commit_sha is not None else _resolve_git_commit_sha()
+    worlds = [world_from_scenario_seed(scen_seed, index=idx) for idx, scen_seed in enumerate(seeds)]
+    resolved_plan_seed = (
+        int(shape_plan_seed)
+        if shape_plan_seed is not None
+        else (int(seeds[0]) if seeds else 20261103)
+    )
+    effective_block_size = (
+        SHAPE_PLAN_BLOCK_SIZE
+        if len(worlds) >= SHAPE_PLAN_BLOCK_SIZE and len(worlds) % SHAPE_PLAN_BLOCK_SIZE == 0
+        else max(1, len(worlds))
+    )
+    plan_bundle = generate_shape_plan(
+        worlds,
+        seed=resolved_plan_seed,
+        block_size=effective_block_size,
+    )
+    plan_by_sid: Mapping[str, Sequence[Mapping[str, Any]]] = plan_bundle["plan_by_scenario_id"]  # type: ignore[assignment]
 
     resolved_sealed_responses_path = (
         sealed_responses_path
@@ -10809,6 +12077,8 @@ def run_paired_seed_bank(
         constraint_layout=constraint_layout,
         checker_profile=checker_profile,
         accepted_forms_line=accepted_forms_line,
+        shape_plan=shape_plan,
+        shape_plan_seed=resolved_plan_seed,
         start_owned_server=False if (http_transport is not None and popen_factory is None) else True if popen_factory is not None else None,
         popen_factory=popen_factory,
         server_port=server_port,
@@ -10818,9 +12088,11 @@ def run_paired_seed_bank(
     renderings_out: list[dict[str, object]] = []
     all_diag_records: list[EventDiagnosticRecord] = []
     diagnostics_error: str | None = None
+    attempt0_prose_by_rendering: dict[tuple[str, int], str] = {}
+    attempt0_passed_by_rendering: dict[tuple[str, int], bool] = {}
     try:
-        for idx, scen_seed in enumerate(seeds):
-            world = world_from_scenario_seed(scen_seed, index=idx)
+        for idx, world in enumerate(worlds):
+            scen_plan = plan_by_sid.get(world.scenario_id)
             for r_idx in (0, 1):
                 focal_agent = world.agents[r_idx]
                 prompt_text = format_writer_prompt(
@@ -10830,6 +12102,9 @@ def run_paired_seed_bank(
                     goal_mode=goal_mode,
                     constraint_layout=constraint_layout,
                     accepted_forms_line=accepted_forms_line,
+                    shape_plan=shape_plan,
+                    scenario_shape_plan=scen_plan,
+                    shape_plan_seed=resolved_plan_seed,
                 )
                 prev_len = len(writer.call_records)
                 prev_sealed_len = len(writer.sealed_responses)
@@ -10852,6 +12127,7 @@ def run_paired_seed_bank(
                     if sealed_rec is not None
                     else (prose_out or "")
                 )
+                attempt0_prose_by_rendering[(world.scenario_id, r_idx)] = raw_draft
                 if diagnostics_error is None:
                     try:
                         all_diag_records.extend(
@@ -10871,6 +12147,7 @@ def run_paired_seed_bank(
                     else derive_call_seed(int(world.seed), r_idx, 0)
                 )
                 checks_passed = bool(prose_out is not None and (rec is None or rec.checks_passed))
+                attempt0_passed_by_rendering[(world.scenario_id, r_idx)] = checks_passed
                 fault_check_ids = list(rec.fault_check_ids) if rec is not None else []
                 goal_source = (
                     dict(writer._last_goal_source)
@@ -10886,6 +12163,7 @@ def run_paired_seed_bank(
                         "focal_agent": focal_agent,
                         "goal_mode": goal_mode,
                         "constraint_layout": constraint_layout,
+                        "shape_plan": shape_plan,
                         "commit": resolved_commit,
                         "model": writer.ollama_tag,
                         "manifest_digest": writer.manifest_digest,
@@ -10940,12 +12218,29 @@ def run_paired_seed_bank(
         goal_mode=goal_mode,
         constraint_layout=constraint_layout,
         accepted_forms_line=accepted_forms_line,
+        shape_plan=shape_plan,
+    )
+    shape_plan_telemetry = compute_shape_plan_run_telemetry(
+        worlds,
+        shape_plan=shape_plan,
+        shape_plan_seed=resolved_plan_seed,
+        plan_bundle=plan_bundle,
+        attempt0_prose_by_rendering=attempt0_prose_by_rendering,
+        final_prose_by_rendering=attempt0_prose_by_rendering,
+        attempt0_passed_by_rendering=attempt0_passed_by_rendering,
+        final_passed_by_rendering=attempt0_passed_by_rendering,
+        goal_mode=goal_mode,
+        checker_profile=checker_profile,
     )
 
     report: dict[str, object] = {
         "schema_version": PAIRED_SEED_BANK_SCHEMA_VERSION,
         "goal_mode": goal_mode,
         "constraint_layout": constraint_layout,
+        "accepted_forms_line": accepted_forms_line,
+        "shape_plan": shape_plan,
+        "shape_plan_seed": resolved_plan_seed,
+        "shape_plan_telemetry": shape_plan_telemetry,
         "hard_constraints_sha256": hard_constraints_sha256,
         "commit": resolved_commit,
         "model": writer.ollama_tag,

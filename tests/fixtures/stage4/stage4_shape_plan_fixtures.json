@@ -1,0 +1,395 @@
+{
+ "schema_version": 1,
+ "stage": "udlab stage 4 gate 0: card 2 (shape tags and plan)",
+ "author": "R&D, hand-written, invented names; no model text",
+ "legend_file": "LEGEND-v1.txt",
+ "legend_sha256": "fb073147abacfd536a2ba7931cb4e178903a7fb33c3b0427b3d983985895564d",
+ "legend_text": "Shape key for the tag on each event row. The tag names the sentence shape for that event; a tag ending in _0 means any accepted shape for that kind. A shape never changes who, what, where, the loudness, the visibility or the order. Never write a tag or this key in the story.\nMOVE_0: any accepted move shape (station changes always use MOVE_0 and the table's station-change shape).\nMOVE_1: In the <room>, <actor> <verb> the <target_object> from the <from_location> to the <to_location>.\nMOVE_2: From the <from_location> to the <to_location>, <actor> <verb> the <target_object> in the <room>.\nMOVE_3: In the <room>, the <target_object> was <verb> from the <from_location> to the <to_location> by <actor>.\nMOVE_4: In the <room>, <actor>, <short phrase>, <verb> the <target_object> from the <from_location> to the <to_location>.\nOn an occluded move, every move shape still ends with \", the <occluder> blocking sight.\"\nSEE_0: any accepted see shape.\nSEE_1: In the <room>, <actor> <verb> the <target_object> in the <to_location>.\nSEE_2: <actor>, <short phrase>, <verb> the <target_object> in the <to_location> in the <room>.\nSEE_3: In the <room>, the <occluder> blocked <actor>'s sight of the <target_object> from the far-side alcove.\nSEE_4: In the <room>, <actor> could not see the <target_object> from the far-side alcove, blocked by the <occluder>.\nSEE_5: In the <room>, the <occluder> hid the <target_object> from <actor> at the far-side alcove.\nSAY_0: any accepted say shape.\nSAY_1: <actor> <verb> at <noise_level> dB in the <room>, \"<utterance>.\"\nSAY_2: \"<utterance>,\" <actor> <verb> at <noise_level> dB in the <room>.\nSAY_3: At <noise_level> dB in the <room>, <actor> <verb>, \"<utterance>.\"\nSAY_4: <actor> <verb> at <noise_level> dB, \"<utterance>,\" in the <room>.\nSAY_5: In the <room>, <actor>, <short phrase>, <verb> at <noise_level> dB: \"<utterance>.\"\n<short phrase> is at most six words about the actor and names no one, no place and no object.\nENTER_0, LEAVE_0, MESSAGE_0: the shape in the table.\n",
+ "world": {
+  "scenario_id": "scen_fixture_0001",
+  "seed": 900001,
+  "domain_name": "synthetic_fixture_domain",
+  "rooms": [
+   "amber room",
+   "birch room",
+   "cobalt room"
+  ],
+  "doorways": [
+   [
+    "amber room",
+    "birch room"
+   ],
+   [
+    "birch room",
+    "cobalt room"
+   ]
+  ],
+  "agents": [
+   "Mira",
+   "Nolan",
+   "Pia"
+  ],
+  "absent_parties": [
+   "Quin"
+  ],
+  "objects": [
+   "copper token",
+   "glass prism",
+   "key to the archive",
+   "note from the desk"
+  ],
+  "containers_by_room": {
+   "amber room": [
+    "pine crate",
+    "tin locker"
+   ],
+   "birch room": [
+    "slate box",
+    "reed basket"
+   ],
+   "cobalt room": [
+    "cedar trunk",
+    "iron bin"
+   ]
+  },
+  "occluders_by_room": {
+   "amber room": "felt curtain",
+   "birch room": "timber screen",
+   "cobalt room": "canvas partition"
+  },
+  "fixtures_by_room": {
+   "amber room": "wall sundial",
+   "birch room": null,
+   "cobalt room": null
+  },
+  "noise_threshold": 40
+ },
+ "events": {
+  "say": {
+   "step": 1,
+   "kind": "say",
+   "actor": "Mira",
+   "room": "amber room",
+   "target_object": null,
+   "from_location": null,
+   "to_location": null,
+   "utterance": "The copper token is stored in the tin locker.",
+   "noise_level": 55,
+   "occluded": false,
+   "occluder": null,
+   "recipient": null,
+   "stated_reason": null
+  },
+  "move": {
+   "step": 1,
+   "kind": "move",
+   "actor": "Mira",
+   "room": "amber room",
+   "target_object": "copper token",
+   "from_location": "pine crate",
+   "to_location": "tin locker",
+   "utterance": null,
+   "noise_level": null,
+   "occluded": false,
+   "occluder": null,
+   "recipient": null,
+   "stated_reason": null
+  },
+  "see_occ": {
+   "step": 1,
+   "kind": "see",
+   "actor": "Mira",
+   "room": "amber room",
+   "target_object": "pine crate",
+   "from_location": null,
+   "to_location": null,
+   "utterance": null,
+   "noise_level": null,
+   "occluded": true,
+   "occluder": "felt curtain",
+   "recipient": null,
+   "stated_reason": null
+  },
+  "see_clear": {
+   "step": 1,
+   "kind": "see",
+   "actor": "Mira",
+   "room": "amber room",
+   "target_object": "copper token",
+   "from_location": null,
+   "to_location": "pine crate",
+   "utterance": null,
+   "noise_level": null,
+   "occluded": false,
+   "occluder": null,
+   "recipient": null,
+   "stated_reason": null
+  },
+  "move_occ": {
+   "step": 1,
+   "kind": "move",
+   "actor": "Mira",
+   "room": "amber room",
+   "target_object": "copper token",
+   "from_location": "pine crate",
+   "to_location": "tin locker",
+   "utterance": null,
+   "noise_level": null,
+   "occluded": true,
+   "occluder": "felt curtain",
+   "recipient": null,
+   "stated_reason": null
+  }
+ },
+ "variant_forms": {
+  "move_normal": [
+   "MOVE_1",
+   "MOVE_2",
+   "MOVE_3",
+   "MOVE_4"
+  ],
+  "move_occluded": [
+   "MOVE_1",
+   "MOVE_2",
+   "MOVE_3",
+   "MOVE_4"
+  ],
+  "see_unoccluded": [
+   "SEE_1",
+   "SEE_2"
+  ],
+  "see_occluded": [
+   "SEE_3",
+   "SEE_4",
+   "SEE_5"
+  ],
+  "say": [
+   "SAY_1",
+   "SAY_2",
+   "SAY_3",
+   "SAY_4",
+   "SAY_5"
+  ]
+ },
+ "wildcard_only": [
+  "MOVE_0 (station change)",
+  "ENTER_0",
+  "LEAVE_0",
+  "MESSAGE_0"
+ ],
+ "legend_rows": [
+  {
+   "form_id": "MOVE_1",
+   "event": "move",
+   "expect": "accepted_profile_d",
+   "sentence": "In the amber room, Mira moved the copper token from the pine crate to the tin locker."
+  },
+  {
+   "form_id": "MOVE_2",
+   "event": "move",
+   "expect": "accepted_profile_d",
+   "sentence": "From the pine crate to the tin locker, Mira moved the copper token in the amber room."
+  },
+  {
+   "form_id": "MOVE_3",
+   "event": "move",
+   "expect": "accepted_profile_d",
+   "sentence": "In the amber room, the copper token was moved from the pine crate to the tin locker by Mira."
+  },
+  {
+   "form_id": "MOVE_4",
+   "event": "move",
+   "expect": "accepted_profile_d",
+   "sentence": "In the amber room, Mira, working quickly, moved the copper token from the pine crate to the tin locker."
+  },
+  {
+   "form_id": "MOVE_1",
+   "event": "move_occ",
+   "expect": "accepted_profile_d",
+   "sentence": "In the amber room, Mira moved the copper token from the pine crate to the tin locker, the felt curtain blocking sight."
+  },
+  {
+   "form_id": "MOVE_2",
+   "event": "move_occ",
+   "expect": "accepted_profile_d",
+   "sentence": "From the pine crate to the tin locker, Mira moved the copper token in the amber room, the felt curtain blocking sight."
+  },
+  {
+   "form_id": "MOVE_3",
+   "event": "move_occ",
+   "expect": "accepted_profile_d",
+   "sentence": "In the amber room, the copper token was moved from the pine crate to the tin locker by Mira, the felt curtain blocking sight."
+  },
+  {
+   "form_id": "MOVE_4",
+   "event": "move_occ",
+   "expect": "accepted_profile_d",
+   "sentence": "In the amber room, Mira, working quickly, moved the copper token from the pine crate to the tin locker, the felt curtain blocking sight."
+  },
+  {
+   "form_id": "SEE_1",
+   "event": "see_clear",
+   "expect": "accepted_profile_d",
+   "sentence": "In the amber room, Mira saw the copper token in the pine crate."
+  },
+  {
+   "form_id": "SEE_2",
+   "event": "see_clear",
+   "expect": "accepted_profile_d",
+   "sentence": "Mira, standing quietly, saw the copper token in the pine crate in the amber room."
+  },
+  {
+   "form_id": "SEE_3",
+   "event": "see_occ",
+   "expect": "accepted_profile_d",
+   "sentence": "In the amber room, the felt curtain blocked Mira's sight of the pine crate from the far-side alcove."
+  },
+  {
+   "form_id": "SEE_4",
+   "event": "see_occ",
+   "expect": "accepted_profile_d",
+   "sentence": "In the amber room, Mira could not see the pine crate from the far-side alcove, blocked by the felt curtain."
+  },
+  {
+   "form_id": "SEE_5",
+   "event": "see_occ",
+   "expect": "accepted_profile_d",
+   "sentence": "In the amber room, the felt curtain hid the pine crate from Mira at the far-side alcove."
+  },
+  {
+   "form_id": "SAY_1",
+   "event": "say",
+   "expect": "accepted_profile_d",
+   "sentence": "Mira said at 55 dB in the amber room, \"The copper token is stored in the tin locker.\""
+  },
+  {
+   "form_id": "SAY_2",
+   "event": "say",
+   "expect": "accepted_profile_d",
+   "sentence": "\"The copper token is stored in the tin locker,\" Mira said at 55 dB in the amber room."
+  },
+  {
+   "form_id": "SAY_3",
+   "event": "say",
+   "expect": "accepted_profile_d",
+   "sentence": "At 55 dB in the amber room, Mira said, \"The copper token is stored in the tin locker.\""
+  },
+  {
+   "form_id": "SAY_4",
+   "event": "say",
+   "expect": "accepted_profile_d",
+   "sentence": "Mira said at 55 dB, \"The copper token is stored in the tin locker,\" in the amber room."
+  },
+  {
+   "form_id": "SAY_5",
+   "event": "say",
+   "expect": "accepted_profile_d",
+   "sentence": "In the amber room, Mira, leaning forward, said at 55 dB: \"The copper token is stored in the tin locker.\""
+  }
+ ],
+ "tag_pairs": [
+  {
+   "assigned": "MOVE_1",
+   "wildcard": "MOVE_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  },
+  {
+   "assigned": "MOVE_2",
+   "wildcard": "MOVE_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  },
+  {
+   "assigned": "MOVE_3",
+   "wildcard": "MOVE_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  },
+  {
+   "assigned": "MOVE_4",
+   "wildcard": "MOVE_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  },
+  {
+   "assigned": "SAY_1",
+   "wildcard": "SAY_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  },
+  {
+   "assigned": "SAY_2",
+   "wildcard": "SAY_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  },
+  {
+   "assigned": "SAY_3",
+   "wildcard": "SAY_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  },
+  {
+   "assigned": "SAY_4",
+   "wildcard": "SAY_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  },
+  {
+   "assigned": "SAY_5",
+   "wildcard": "SAY_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  },
+  {
+   "assigned": "SEE_1",
+   "wildcard": "SEE_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  },
+  {
+   "assigned": "SEE_2",
+   "wildcard": "SEE_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  },
+  {
+   "assigned": "SEE_3",
+   "wildcard": "SEE_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  },
+  {
+   "assigned": "SEE_4",
+   "wildcard": "SEE_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  },
+  {
+   "assigned": "SEE_5",
+   "wildcard": "SEE_0",
+   "require": "equal token count in a table cell, writer GGUF"
+  }
+ ],
+ "prompt_parity": {
+  "require": "full-prompt token count assigned == wildcard for every prompt",
+  "tolerance": 0
+ },
+ "plan_properties": {
+  "synthetic_bank": {
+   "scenarios": 200,
+   "source": "world_from_scenario_seed(seed, index=i) for i in 0..199, seed 20261103",
+   "note": "synthetic test bank, not a dev or sealed bank"
+  },
+  "one_plan_per_scenario": true,
+  "no_three_in_a_row_same_kind_same_form": true,
+  "block_size": 20,
+  "block_balance_max_spread": {
+   "value": 1,
+   "design_choice": true,
+   "meaning": "within each variant, form counts in a 20-scenario block differ by at most 1"
+  },
+  "two_form_switch_rate_band": {
+   "low": 0.62,
+   "high": 0.71,
+   "expected": 0.6667,
+   "design_choice": true
+  },
+  "position_independence": "form draw must not change when event indices are permuted (same seed, same plan)",
+  "plan_record_fields": [
+   "scenario_id",
+   "event_index",
+   "kind",
+   "variant",
+   "form_id"
+  ]
+ }
+}
