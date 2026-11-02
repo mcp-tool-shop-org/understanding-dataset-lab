@@ -1,0 +1,364 @@
+{
+ "schema_version": 1,
+ "stage": "udlab stage 4 gate 0: form_not_accepted and tag_echo (checker profile d)",
+ "author": "R&D, hand-written, invented names; no model text",
+ "world": {
+  "scenario_id": "scen_fixture_0001",
+  "seed": 900001,
+  "domain_name": "synthetic_fixture_domain",
+  "rooms": [
+   "amber room",
+   "birch room",
+   "cobalt room"
+  ],
+  "doorways": [
+   [
+    "amber room",
+    "birch room"
+   ],
+   [
+    "birch room",
+    "cobalt room"
+   ]
+  ],
+  "agents": [
+   "Mira",
+   "Nolan",
+   "Pia"
+  ],
+  "absent_parties": [
+   "Quin"
+  ],
+  "objects": [
+   "copper token",
+   "glass prism",
+   "key to the archive",
+   "note from the desk"
+  ],
+  "containers_by_room": {
+   "amber room": [
+    "pine crate",
+    "tin locker"
+   ],
+   "birch room": [
+    "slate box",
+    "reed basket"
+   ],
+   "cobalt room": [
+    "cedar trunk",
+    "iron bin"
+   ]
+  },
+  "occluders_by_room": {
+   "amber room": "felt curtain",
+   "birch room": "timber screen",
+   "cobalt room": "canvas partition"
+  },
+  "fixtures_by_room": {
+   "amber room": "wall sundial",
+   "birch room": null,
+   "cobalt room": null
+  },
+  "noise_threshold": 40
+ },
+ "events": {
+  "say": {
+   "step": 1,
+   "kind": "say",
+   "actor": "Mira",
+   "room": "amber room",
+   "target_object": null,
+   "from_location": null,
+   "to_location": null,
+   "utterance": "The copper token is stored in the tin locker.",
+   "noise_level": 55,
+   "occluded": false,
+   "occluder": null,
+   "recipient": null,
+   "stated_reason": null
+  },
+  "move": {
+   "step": 1,
+   "kind": "move",
+   "actor": "Mira",
+   "room": "amber room",
+   "target_object": "copper token",
+   "from_location": "pine crate",
+   "to_location": "tin locker",
+   "utterance": null,
+   "noise_level": null,
+   "occluded": false,
+   "occluder": null,
+   "recipient": null,
+   "stated_reason": null
+  },
+  "see_occ": {
+   "step": 1,
+   "kind": "see",
+   "actor": "Mira",
+   "room": "amber room",
+   "target_object": "pine crate",
+   "from_location": null,
+   "to_location": null,
+   "utterance": null,
+   "noise_level": null,
+   "occluded": true,
+   "occluder": "felt curtain",
+   "recipient": null,
+   "stated_reason": null
+  },
+  "see_clear": {
+   "step": 1,
+   "kind": "see",
+   "actor": "Mira",
+   "room": "amber room",
+   "target_object": "copper token",
+   "from_location": null,
+   "to_location": "pine crate",
+   "utterance": null,
+   "noise_level": null,
+   "occluded": false,
+   "occluder": null,
+   "recipient": null,
+   "stated_reason": null
+  }
+ },
+ "source_world_fixture_sha256": "5927461e17a9105e7b21873f6a8b80b25398e8698c16cf10492a7be0d907bbd4",
+ "tag_tokens": [
+  "SAY_0",
+  "SAY_1",
+  "SAY_2",
+  "SAY_3",
+  "SAY_4",
+  "SAY_5",
+  "MOVE_0",
+  "MOVE_1",
+  "MOVE_2",
+  "MOVE_3",
+  "MOVE_4",
+  "SEE_0",
+  "SEE_1",
+  "SEE_2",
+  "SEE_3",
+  "SEE_4",
+  "SEE_5",
+  "SEE_6",
+  "SEE_7",
+  "[Actor]",
+  "[Room]",
+  "[Object]",
+  "[Occluder]"
+ ],
+ "fixtures": [
+  {
+   "id": "acc_say_std",
+   "event": "say",
+   "expect": "accepted",
+   "sentence": "Mira said at 55 dB in the amber room, \"The copper token is stored in the tin locker.\""
+  },
+  {
+   "id": "acc_say_s2",
+   "event": "say",
+   "expect": "accepted",
+   "sentence": "\"The copper token is stored in the tin locker,\" Mira said at 55 dB in the amber room."
+  },
+  {
+   "id": "acc_move_std",
+   "event": "move",
+   "expect": "accepted",
+   "sentence": "In the amber room, Mira moved the copper token from the pine crate to the tin locker."
+  },
+  {
+   "id": "acc_move_m3",
+   "event": "move",
+   "expect": "accepted",
+   "sentence": "In the amber room, the copper token was moved from the pine crate to the tin locker by Mira."
+  },
+  {
+   "id": "acc_see_v2",
+   "event": "see_occ",
+   "expect": "accepted",
+   "sentence": "In the amber room, the felt curtain hid the pine crate from Mira at the far-side alcove."
+  },
+  {
+   "id": "acc_see_p1",
+   "event": "see_clear",
+   "expect": "accepted",
+   "sentence": "Mira, standing quietly, saw the copper token in the pine crate in the amber room."
+  },
+  {
+   "id": "fna_say_split",
+   "event": "say",
+   "expect": "form_not_accepted",
+   "sentence": "\"The copper token,\" Mira said at 55 dB in the amber room, \"is stored in the tin locker.\""
+  },
+  {
+   "id": "fna_say_inverted",
+   "event": "say",
+   "expect": "form_not_accepted",
+   "sentence": "\"The copper token is stored in the tin locker,\" said Mira at 55 dB in the amber room."
+  },
+  {
+   "id": "fna_say_indirect",
+   "event": "say",
+   "expect": "form_not_accepted",
+   "sentence": "Mira said at 55 dB in the amber room that the copper token is stored in the tin locker."
+  },
+  {
+   "id": "fna_move_cleft",
+   "event": "move",
+   "expect": "form_not_accepted",
+   "sentence": "It was Mira who moved the copper token from the pine crate to the tin locker in the amber room."
+  },
+  {
+   "id": "fna_move_to_first",
+   "event": "move",
+   "expect": "form_not_accepted",
+   "sentence": "In the amber room, Mira moved the copper token to the tin locker from the pine crate."
+  },
+  {
+   "id": "fna_move_object_fronted",
+   "event": "move",
+   "expect": "form_not_accepted",
+   "sentence": "The copper token Mira moved from the pine crate to the tin locker in the amber room."
+  },
+  {
+   "id": "fna_see_passive",
+   "event": "see_clear",
+   "expect": "form_not_accepted",
+   "sentence": "In the amber room, the copper token in the pine crate was seen by Mira."
+  },
+  {
+   "id": "fna_see_cleft",
+   "event": "see_clear",
+   "expect": "form_not_accepted",
+   "sentence": "It was Mira who saw the copper token in the pine crate in the amber room."
+  },
+  {
+   "id": "fna_see_occ_passive",
+   "event": "see_occ",
+   "expect": "form_not_accepted",
+   "sentence": "In the amber room, the pine crate was hidden from Mira at the far-side alcove by the felt curtain."
+  },
+  {
+   "id": "mean_say_inverted_wrong_actor",
+   "event": "say",
+   "expect": "meaning",
+   "sentence": "\"The copper token is stored in the tin locker,\" said Nolan at 55 dB in the amber room."
+  },
+  {
+   "id": "mean_say_split_wrong_room",
+   "event": "say",
+   "expect": "meaning",
+   "sentence": "\"The copper token,\" Mira said at 55 dB in the birch room, \"is stored in the tin locker.\""
+  },
+  {
+   "id": "mean_say_indirect_wrong_db",
+   "event": "say",
+   "expect": "meaning",
+   "sentence": "Mira said at 30 dB in the amber room that the copper token is stored in the tin locker."
+  },
+  {
+   "id": "mean_say_indirect_altered_utt",
+   "event": "say",
+   "expect": "meaning",
+   "sentence": "Mira said at 55 dB in the amber room that the copper token is stored in the pine crate."
+  },
+  {
+   "id": "mean_move_cleft_wrong_actor",
+   "event": "move",
+   "expect": "meaning",
+   "sentence": "It was Nolan who moved the copper token from the pine crate to the tin locker in the amber room."
+  },
+  {
+   "id": "mean_move_to_first_reversed",
+   "event": "move",
+   "expect": "meaning",
+   "sentence": "In the amber room, Mira moved the copper token to the pine crate from the tin locker."
+  },
+  {
+   "id": "mean_move_cleft_wrong_object",
+   "event": "move",
+   "expect": "meaning",
+   "sentence": "It was Mira who moved the glass prism from the pine crate to the tin locker in the amber room."
+  },
+  {
+   "id": "mean_move_cleft_negated",
+   "event": "move",
+   "expect": "meaning",
+   "sentence": "It was not Mira who moved the copper token from the pine crate to the tin locker in the amber room."
+  },
+  {
+   "id": "mean_see_passive_wrong_room",
+   "event": "see_clear",
+   "expect": "meaning",
+   "sentence": "In the birch room, the copper token in the pine crate was seen by Mira."
+  },
+  {
+   "id": "mean_see_passive_wrong_actor",
+   "event": "see_clear",
+   "expect": "meaning",
+   "sentence": "In the amber room, the copper token in the pine crate was seen by Pia."
+  },
+  {
+   "id": "mean_see_occ_passive_clear",
+   "event": "see_occ",
+   "expect": "meaning",
+   "sentence": "In the amber room, the pine crate was seen by Mira at the far-side alcove."
+  },
+  {
+   "id": "mean_see_occ_passive_wrong_occluder",
+   "event": "see_occ",
+   "expect": "meaning",
+   "sentence": "In the amber room, the pine crate was hidden from Mira at the far-side alcove by the timber screen."
+  },
+  {
+   "id": "mean_see_cleft_hedged",
+   "event": "see_clear",
+   "expect": "meaning",
+   "sentence": "It was Mira who perhaps saw the copper token in the pine crate in the amber room."
+  },
+  {
+   "id": "mean_say_indirect_paraphrased",
+   "event": "say",
+   "expect": "meaning",
+   "sentence": "Mira said at 55 dB in the amber room that the copper token is kept in the tin locker."
+  },
+  {
+   "id": "mean_move_cleft_bystander",
+   "event": "move",
+   "expect": "meaning",
+   "sentence": "It was Mira who moved the copper token from the pine crate to the tin locker in the amber room, while Pia watched."
+  },
+  {
+   "id": "echo_move_tag",
+   "event": "move",
+   "expect": "tag_echo",
+   "sentence": "In the amber room, Mira moved the copper token from the pine crate to the tin locker (MOVE_2)."
+  },
+  {
+   "id": "echo_say_tag",
+   "event": "say",
+   "expect": "tag_echo",
+   "sentence": "SAY_3: Mira said at 55 dB in the amber room, \"The copper token is stored in the tin locker.\""
+  },
+  {
+   "id": "echo_see_wildcard",
+   "event": "see_occ",
+   "expect": "tag_echo",
+   "sentence": "SEE_0 In the amber room, the felt curtain hid the pine crate from Mira at the far-side alcove."
+  },
+  {
+   "id": "echo_move_role_label",
+   "event": "move",
+   "expect": "tag_echo",
+   "sentence": "In the amber room, Mira moved the copper token from the pine crate to the tin locker [Actor]."
+  },
+  {
+   "id": "echo_move_tag_lowercase",
+   "event": "move",
+   "expect": "tag_echo",
+   "sentence": "In the amber room, Mira moved the copper token from the pine crate to the tin locker move_2."
+  }
+ ]
+}

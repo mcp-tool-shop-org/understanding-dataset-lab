@@ -1,4 +1,11 @@
-"""Deterministic third-person perspective renderer, writer prompt, prose checks, and OllamaWriter."""
+"""Deterministic third-person perspective renderer, writer prompt, prose checks, and OllamaWriter.
+
+Note (2026-11-02): In `check_prose_render_fidelity`, sequential-checker fault attribution changed (`next_ev_matches_search_start`
+also checks `_event_content_present` for `ev_idx + 1` and not `ev`, preserving a misshapen sentence so `form_not_accepted` lands on
+`ev_idx + 1` instead of `altered` on omitted `ev`). This also alters the retry repair line (`format_repair_retry_line`) in re-attributed
+scenes: the first fault's `failure_kind` goes from `"altered"` to `"absent"`, so the line changes from `"ensure event k is written ..."` to
+`"add one sentence for event k ..."`. Attempt-0 verdicts are unchanged, except that a sentence containing a `SAY_n`, `MOVE_n` or `SEE_n` token is now rejected (`_sentence_matches_event`, render.py:3936), as intended by the card; bracket role labels were already rejected at the base, by `check_prose_no_markers`.
+"""
 
 from __future__ import annotations
 
@@ -76,6 +83,26 @@ _BRACKET_MARKER_RE = re.compile(r"\[[^\]]*\]")
 _FACT_ID_RE = re.compile(r"\bF[0-9][a-z]?\b")
 _STEP_NUMBER_RE = re.compile(r"\bstep\s+\d+\b", re.IGNORECASE)
 _SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])["\']?\s+')
+
+TAG_ECHO_TOKENS: tuple[str, ...] = (
+    *(f"SAY_{n}" for n in range(10)),
+    *(f"MOVE_{n}" for n in range(10)),
+    *(f"SEE_{n}" for n in range(10)),
+    "[Actor]",
+    "[Room]",
+    "[Object]",
+    "[Occluder]",
+)
+
+_TAG_ECHO_RE = re.compile(
+    r"(?:\b(?:SAY|MOVE|SEE)_[0-9]\b|(?<!\w)\[(?:Actor|Room|Object|Occluder)\](?!\w))",
+    re.IGNORECASE,
+)
+
+
+def _has_tag_echo(sentence: str) -> bool:
+    """Return True if `sentence` contains any prompt/table tag or role label from `TAG_ECHO_TOKENS`."""
+    return _TAG_ECHO_RE.search(sentence) is not None
 
 ALL_KNOWN_PARTY_NAMES: frozenset[str] = frozenset(
     name for pool in AGENT_NAME_POOLS for name in pool
@@ -1820,6 +1847,8 @@ EVENT_FIDELITY_SUBRULE_IDS: frozenset[str] = frozenset(
         "bundled_event",
         "negation_or_hedge",
         "occluder_clause",
+        "form_not_accepted",
+        "tag_echo",
         "other_event_fidelity",
     }
 )
@@ -3904,6 +3933,8 @@ def _sentence_matches_event(
         raise ValueError(
             f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
         )
+    if _has_tag_echo(sentence):
+        return False
     s_low = sentence.lower()
     s_unquoted_low = _strip_quoted_spans(s_low)
     frame_low = s_unquoted_low
@@ -4409,6 +4440,435 @@ def _sentence_matches_event(
     return False
 
 
+def _event_content_present(
+    sentence: str,
+    ev: Event,
+    world: World | None = None,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
+) -> bool:
+    """Return True when `sentence` has the content of `ev` without calling the form matchers."""
+    if checker_profile not in VALID_CHECKER_PROFILES:
+        raise ValueError(
+            f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
+        )
+    if not sentence or sentence == "no candidate sentence":
+        return False
+    if _has_tag_echo(sentence):
+        return False
+
+    s_low = sentence.lower()
+    quoted_spans = _extract_quoted_spans(s_low)
+    frame_low = _strip_quoted_spans(s_low)
+    if ev.kind == "say":
+        norm_utt = _normalize_utterance_or_quote(ev.utterance or "")
+        if not norm_utt:
+            return False
+        if quoted_spans:
+            norm_parts = [_normalize_utterance_or_quote(q) for q in quoted_spans]
+            if not all(norm_parts) or " ".join(norm_parts) != norm_utt:
+                return False
+        else:
+            m_that = re.search(r"\bthat\s+(.+)$", s_low)
+            if m_that is None or _normalize_utterance_or_quote(m_that.group(1)) != norm_utt:
+                return False
+            frame_low = s_low[: m_that.start(1)] + '""'
+    elif ev.kind == "message":
+        if not ev.recipient:
+            return False
+        if len(quoted_spans) > 1:
+            return False
+        if ev.utterance:
+            norm_utt = _normalize_utterance_or_quote(ev.utterance)
+            if quoted_spans:
+                if _normalize_utterance_or_quote(quoted_spans[0]) != norm_utt:
+                    return False
+            else:
+                m_that = re.search(r"\bthat\s+(.+)$", s_low)
+                if m_that is not None and _normalize_utterance_or_quote(m_that.group(1)) == norm_utt:
+                    frame_low = s_low[: m_that.start(1)] + '""'
+                else:
+                    utt_core = ev.utterance.rstrip(".!?").lower()
+                    if utt_core not in s_low:
+                        return False
+                    frame_low = s_low.replace(utt_core, '""', 1)
+
+    actor_low = ev.actor.lower()
+    actor_esc = re.escape(actor_low)
+    if ev.kind == "see" and ev.occluded:
+        if re.search(rf"\b{actor_esc}\b", frame_low) is None:
+            return False
+    else:
+        if re.search(rf"\b{actor_esc}(?!'s|’s)\b", frame_low) is None:
+            return False
+    if _DIAG_PRONOUN_RE.search(frame_low) is not None:
+        return False
+
+    all_parties: Sequence[str] = (
+        tuple(world.agents) + tuple(world.absent_parties)
+        if world is not None
+        else (ev.actor, *([ev.recipient] if ev.recipient else []))
+    )
+    allowed_parties = {actor_low}
+    if ev.kind == "message" and ev.recipient:
+        allowed_parties.add(ev.recipient.lower())
+    party_pool = {p.lower() for p in ALL_KNOWN_PARTY_NAMES} | {p.lower() for p in all_parties}
+    for p_low in party_pool:
+        if p_low not in allowed_parties and re.search(rf"\b{re.escape(p_low)}\b", frame_low) is not None:
+            return False
+
+    if world is not None:
+        if ev.kind in ("enter", "leave"):
+            allowed_rooms = {
+                r.lower() for r in (ev.room, ev.from_location, ev.to_location) if r
+            }
+        else:
+            allowed_rooms = {ev.room.lower()} if ev.room else set()
+        for o_room in world.rooms:
+            o_room_low = o_room.lower()
+            if o_room_low not in allowed_rooms and re.search(rf"\b{re.escape(o_room_low)}\b", frame_low) is not None:
+                return False
+
+    all_containers = _all_containers_set(world)
+    if ev.kind == "move":
+        allowed_containers = {
+            c.lower() for c in (ev.target_object, ev.from_location, ev.to_location) if c
+        } & all_containers
+    elif ev.kind == "see":
+        if ev.occluded:
+            allowed_containers = {
+                c.lower() for c in (ev.target_object, ev.from_location, ev.to_location) if c
+            } & all_containers
+        elif ev.to_location and ev.to_location.lower() in all_containers:
+            allowed_containers = {
+                c.lower() for c in (ev.target_object, ev.to_location) if c
+            } & all_containers
+        else:
+            allowed_containers = (
+                {ev.target_object.lower()} & all_containers if ev.target_object else set()
+            )
+    else:
+        allowed_containers = set()
+    for other_c in all_containers:
+        if other_c not in allowed_containers and re.search(rf"\b{re.escape(other_c)}\b", frame_low) is not None:
+            return False
+
+    all_objects = (
+        {o.lower() for o in world.objects}
+        if world is not None
+        else {o.lower() for dom in DOMAINS for o in dom.objects}
+    )
+    allowed_objects = (
+        {ev.target_object.lower()} if (ev.kind in ("move", "see") and ev.target_object) else set()
+    )
+    for other_obj in all_objects:
+        if other_obj not in allowed_objects and re.search(rf"\b{re.escape(other_obj)}\b", frame_low) is not None:
+            return False
+
+    is_station_move = is_station_transition_event(ev, world)
+    if world is not None:
+        all_fixtures = {f.lower() for f in world.fixtures_by_room.values() if f}
+        allowed_fixtures = {
+            c.lower() for c in (ev.target_object, ev.from_location, ev.to_location) if c
+        } & all_fixtures
+        for other_f in all_fixtures:
+            if other_f not in allowed_fixtures and re.search(rf"\b{re.escape(other_f)}\b", frame_low) is not None:
+                return False
+    all_occluders = (
+        {o.lower() for o in world.occluders_by_room.values() if o}
+        if world is not None
+        else {o.lower() for dom in DOMAINS for o in dom.occluders}
+    )
+    allowed_occluders: set[str] = set()
+    if ev.occluded and ev.occluder:
+        allowed_occluders.add(ev.occluder.lower())
+    if is_station_move and ev.target_object:
+        allowed_occluders.add(ev.target_object.lower())
+    for other_occ in all_occluders:
+        if other_occ not in allowed_occluders and re.search(rf"\b{re.escape(other_occ)}\b", frame_low) is not None:
+            return False
+
+    if _has_bundled_or_reordered_clause(frame_low, ev.actor):
+        return False
+    is_folded_movement = (
+        ev.kind in ("enter", "leave")
+        and bool(ev.from_location and ev.to_location)
+        and _sentence_has_folded_from_and_arrival(
+            frame_low,
+            ev.from_location or "",
+            ev.to_location or "",
+        )
+    )
+    action_verbs: Sequence[str] = (
+        _FOLDED_LEAVE_ENTER_VERBS
+        if is_folded_movement
+        else STATION_CHANGE_PERSON_VERBS
+        if is_station_move
+        else _ACTION_VERBS_BY_KIND.get(ev.kind, ())
+    )
+    if _has_forbidden_event_negation(
+        frame_low,
+        ev,
+        all_parties,
+        world=world,
+        action_verbs=action_verbs,
+        checker_profile=checker_profile,
+    ):
+        return False
+    cleaned_neg = (
+        _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", frame_low)
+        if ev.kind == "say"
+        else frame_low
+    )
+    cleaned_neg = _FRONTED_TIME_PLACE_NEG_RE.sub("", cleaned_neg)
+    cleaned_neg = _POST_ARG_BENIGN_NEG_RE.sub("", cleaned_neg)
+    if ev.kind == "see" and ev.occluded:
+        cleaned_neg = _COULD_NOT_SEE_RE.sub("", cleaned_neg)
+    if _NEGATION_PATTERN.search(cleaned_neg) is not None:
+        return False
+    frame_words = re.findall(r"[a-z]+", cleaned_neg)
+    if any(
+        w in _NON_FACTIVE_OR_HEDGE_WORDS or w in _P1_HEDGE_AND_MODAL_WORDS
+        for w in frame_words
+    ) or any(p in cleaned_neg for p in _P1_HEDGE_PHRASES):
+        return False
+
+    if ev.target_object:
+        target_esc = re.escape(ev.target_object.lower())
+        if re.search(rf"\bno\s+(?:[a-z]+\s+of\s+)?{_ARTICLE_OPT_RE}{target_esc}\b", frame_low):
+            return False
+    for loc_piece in (ev.from_location, ev.to_location):
+        if loc_piece:
+            loc_esc = re.escape(loc_piece.lower())
+            if re.search(rf"\bno\s+(?:[a-z]+\s+of\s+)?{_ARTICLE_OPT_RE}{loc_esc}\b", frame_low):
+                return False
+
+    if ev.kind not in ("message", "enter", "leave"):
+        if not ev.room or ev.room.lower() not in frame_low:
+            return False
+        room_esc = re.escape(ev.room.lower())
+        frame_for_room = re.sub(
+            rf"\bnot\s+far\s+from\s+{_ARTICLE_OPT_RE}{room_esc}(?:\s+(?:doorway|threshold))?\b",
+            "",
+            frame_low,
+        )
+        if not re.search(
+            rf"\b(?:in|from|inside|at|of)\s+{_ARTICLE_OPT_RE}{room_esc}(?!\s+(?:doorway|threshold)\b)\b",
+            frame_for_room,
+        ):
+            return False
+
+    if ev.kind == "say":
+        frame_no_thresh = re.sub(r"\([^)]*threshold[^)]*\)", "", frame_low)
+        db_str = f"{ev.noise_level} db"
+        if db_str not in frame_no_thresh:
+            return False
+        for m_db in re.finditer(r"\b(\d+)\s*db\b", frame_no_thresh):
+            if int(m_db.group(1)) != int(ev.noise_level):
+                return False
+        clause_around_speaker = re.split(
+            r"[;]|,\s*(?:and|but|yet|while|whereas|although|though)\b|\b(?:while|whereas|although|though)\b",
+            frame_no_thresh,
+        )[0]
+        if db_str not in clause_around_speaker:
+            return False
+        if not any(
+            re.search(rf"\b{re.escape(v)}\b", frame_no_thresh) is not None
+            for v in _ACTION_VERBS_BY_KIND["say"]
+        ):
+            return False
+        return True
+
+    if ev.kind == "message":
+        recip_esc = re.escape((ev.recipient or "").lower())
+        if not re.search(rf"\b(?:to|for|messaged|texted|notified)\s+{recip_esc}\b", frame_low):
+            return False
+        if not any(
+            re.search(rf"\b{re.escape(v)}\b", frame_low) is not None
+            for v in _ACTION_VERBS_BY_KIND["message"]
+        ):
+            return False
+        return True
+
+    if ev.kind == "move":
+        if is_station_move:
+            if not (ev.target_object and ev.from_location and ev.to_location):
+                return False
+            if _occluder_is_direct_object_of_move_verb(frame_low, ev.target_object):
+                return False
+            occ_esc = re.escape(ev.target_object.lower())
+            if re.search(rf"\b{occ_esc}\b", frame_low) is None:
+                return False
+            if not any(
+                re.search(rf"\b{re.escape(v)}\b", frame_low) is not None
+                for v in STATION_CHANGE_PERSON_VERBS
+            ):
+                return False
+            to_esc = re.escape(ev.to_location.lower())
+            from_esc = re.escape(ev.from_location.lower())
+            if re.search(rf"\b{to_esc}\b", frame_low) is None:
+                return False
+            if (
+                re.search(rf"\b(?:to|into|toward|towards|onto)\s+{_ARTICLE_OPT_RE}{from_esc}\b", frame_low)
+                is not None
+                or re.search(rf"\b(?:from|out of)\s+{_ARTICLE_OPT_RE}{to_esc}\b", frame_low)
+                is not None
+            ):
+                return False
+            return True
+        if not (ev.target_object and ev.from_location and ev.to_location):
+            return False
+        target_esc = re.escape(ev.target_object.lower())
+        if re.search(rf"\b{target_esc}\b", frame_low) is None:
+            return False
+        has_active_move_verb = any(
+            re.search(rf"\b{re.escape(v)}\b", frame_low) is not None
+            for v in _ACTION_VERBS_BY_KIND["move"]
+        )
+        has_passive_move_verb = (
+            checker_profile == "d"
+            and re.search(
+                rf"\bwas\s+(?:[a-z]+ly\s+)?(?:{'|'.join(re.escape(v) for v in _PASSIVE_MOVE_VERBS)})\b",
+                frame_low,
+            )
+            is not None
+        )
+        if not (has_active_move_verb or has_passive_move_verb):
+            return False
+        from_esc = re.escape(ev.from_location.lower())
+        to_esc = re.escape(ev.to_location.lower())
+        has_from_prep = (
+            re.search(rf"\b(?:from|out of)\s+{_ARTICLE_OPT_RE}{from_esc}\b", frame_low) is not None
+        )
+        has_to_prep = (
+            re.search(
+                rf"\b(?:to|into|toward|towards|at|in|onto)\s+{_ARTICLE_OPT_RE}{to_esc}\b",
+                frame_low,
+            )
+            is not None
+        )
+        wrong_from_prep = (
+            re.search(rf"\b(?:to|into|toward|towards|onto)\s+{_ARTICLE_OPT_RE}{from_esc}\b", frame_low)
+            is not None
+        )
+        wrong_to_prep = (
+            re.search(rf"\b(?:from|out of)\s+{_ARTICLE_OPT_RE}{to_esc}\b", frame_low) is not None
+        )
+        if not (has_from_prep and has_to_prep) or wrong_from_prep or wrong_to_prep:
+            return False
+        if checker_profile == "c" and not _ordered_from_to_positions(
+            frame_low,
+            ev.from_location,
+            ev.to_location,
+            require_from_prep=True,
+        ):
+            return False
+        if ev.occluded:
+            if (
+                not ev.occluder
+                or ev.occluder.lower() not in frame_low
+                or not _occluder_governs_blocked(frame_low, ev.occluder)
+            ):
+                return False
+        else:
+            if any(bp in frame_low for bp in BLOCKING_PHRASES):
+                return False
+        return True
+
+    if ev.kind == "see":
+        if not ev.target_object:
+            return False
+        target_esc = re.escape(ev.target_object.lower())
+        if re.search(rf"\b{target_esc}\b", frame_low) is None:
+            return False
+        if ev.occluded:
+            if not ev.occluder or re.search(rf"\b{re.escape(ev.occluder.lower())}\b", frame_low) is None:
+                return False
+            if FAR_SIDE_ALCOVE_STATION.lower() not in frame_low:
+                return False
+            if _sentence_asserts_sighting_of_target(frame_low, ev, all_parties):
+                return False
+            if (
+                re.search(
+                    r"\bwas\s+(?:[a-z]+ly\s+)?(?:seen|observed|spotted|noticed|viewed|inspected|examined|checked)\b",
+                    frame_low,
+                )
+                is not None
+            ):
+                return False
+            occ_blocked_ok = _occluder_governs_blocked(frame_low, ev.occluder)
+            occ_hid_ok = (
+                checker_profile == "d"
+                and re.search(
+                    r"\b(?:hid|was\s+(?:[a-z]+ly\s+)?hidden|was\s+(?:[a-z]+ly\s+)?blocked)\b",
+                    frame_low,
+                )
+                is not None
+            )
+            if not (occ_blocked_ok or occ_hid_ok):
+                return False
+            return True
+        if (
+            any(bp in frame_low for bp in BLOCKING_PHRASES)
+            or re.search(r"\b(?:hid|hidden)\b", frame_low) is not None
+        ):
+            return False
+        if ev.to_location and ev.to_location.lower() in all_containers:
+            if re.search(rf"\b{re.escape(ev.to_location.lower())}\b", frame_low) is None:
+                return False
+        has_active_see_verb = any(
+            re.search(rf"\b{re.escape(v)}(?!\s+for\b)\b", frame_low) is not None
+            for v in SIGHTING_VERBS
+        )
+        has_passive_see_verb = (
+            checker_profile == "d"
+            and re.search(
+                r"\bwas\s+(?:[a-z]+ly\s+)?(?:seen|observed|spotted|noticed|viewed|inspected|examined|checked)\b",
+                frame_low,
+            )
+            is not None
+        )
+        if not (has_active_see_verb or has_passive_see_verb):
+            return False
+        return True
+
+    if ev.kind in ("enter", "leave"):
+        if not (ev.from_location and ev.to_location):
+            return False
+        if ev.kind == "enter" and _sentence_states_non_arrival_action(frame_low, world, all_parties):
+            return False
+        if not any(re.search(rf"\b{re.escape(v)}\b", frame_low) is not None for v in action_verbs):
+            return False
+        from_esc = re.escape(ev.from_location.lower())
+        to_esc = re.escape(ev.to_location.lower())
+        has_from = (
+            re.search(
+                rf"\b(?:from|out of|exited|left|departed)\s+{_ARTICLE_OPT_RE}{from_esc}\b",
+                frame_low,
+            )
+            is not None
+        )
+        has_to = (
+            re.search(
+                rf"\b(?:to|into|toward|towards|for|onto|in|at|entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}(?!\s+(?:doorway|threshold)\b)\b",
+                frame_low,
+            )
+            is not None
+        )
+        if not (has_from and has_to):
+            return False
+        if checker_profile == "c" and not _ordered_from_to_positions(
+            frame_low,
+            ev.from_location,
+            ev.to_location,
+            require_from_prep=(ev.kind != "leave"),
+            allow_dest_before_source=is_folded_movement,
+        ):
+            return False
+        return True
+
+    return False
+
+
 def _sentence_rejection_rule_id(
     sentence: str,
     ev: Event,
@@ -4420,6 +4880,8 @@ def _sentence_rejection_rule_id(
     """Return the specific `rule_id` from `EVENT_FIDELITY_SUBRULE_IDS` explaining why `sentence` failed `ev`."""
     if not sentence or sentence == "no candidate sentence":
         return "other_event_fidelity"
+    if _has_tag_echo(sentence):
+        return "tag_echo"
     s_low = sentence.lower()
     frame_low = _strip_quoted_spans(s_low)
     all_parties: Sequence[str] = (
@@ -4486,6 +4948,15 @@ def _sentence_rejection_rule_id(
         if ev.kind == "move":
             return "m2_path"
 
+    if not _sentence_matches_event(
+        sentence,
+        ev,
+        noise_threshold,
+        world=world,
+        checker_profile=checker_profile,
+    ) and _event_content_present(sentence, ev, world, checker_profile):
+        return "form_not_accepted"
+
     if ev.kind == "say":
         if (
             "'" in s_low
@@ -4531,13 +5002,27 @@ def _sentence_rejection_rule_id(
     if _has_bundled_or_reordered_clause(frame_low, ev.actor):
         return "bundled_event"
 
-    if _has_forbidden_event_negation(
-        frame_low,
-        ev,
-        all_parties,
-        action_verbs=action_verbs,
-        checker_profile=checker_profile,
-    ) or any(w in _NON_FACTIVE_OR_HEDGE_WORDS for w in re.findall(r"[a-z]+", frame_low)):
+    cleaned_for_hedge = (
+        _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", frame_low)
+        if ev.kind == "say"
+        else frame_low
+    )
+    if ev.kind == "see" and ev.occluded:
+        cleaned_for_hedge = _COULD_NOT_SEE_RE.sub("", cleaned_for_hedge)
+    if (
+        _has_forbidden_event_negation(
+            frame_low,
+            ev,
+            all_parties,
+            action_verbs=action_verbs,
+            checker_profile=checker_profile,
+        )
+        or any(
+            w in _NON_FACTIVE_OR_HEDGE_WORDS or w in _P1_HEDGE_AND_MODAL_WORDS
+            for w in re.findall(r"[a-z]+", cleaned_for_hedge)
+        )
+        or any(p in cleaned_for_hedge for p in _P1_HEDGE_PHRASES)
+    ):
         return "negation_or_hedge"
 
     if world is not None:
@@ -4691,6 +5176,7 @@ def check_prose_no_markers(prose: str) -> None:
             "a_no_markers_bracket",
             f"Render check (a) failed: surviving bracket marker {bracket_match.group(0)!r} in prose (candidate sentence: {cand!r}).",
             failing_sentence=cand,
+            rule_id="tag_echo" if _has_tag_echo(bracket_match.group(0)) else None,
         )
     fact_match = _FACT_ID_RE.search(prose)
     if fact_match is not None:
@@ -5296,15 +5782,37 @@ def check_prose_render_fidelity(
                 if search_start < len(event_sentences)
                 else "no candidate sentence"
             )
+            # Deliberate attribution change (2026-11-02): fault attribution changed, verdicts did not.
+            # When `event_sentences[search_start]` does not match `ev`, check not only whether it matches
+            # `world.events[ev_idx + 1]` in accepted form (`_sentence_matches_event`), but also whether
+            # `_event_content_present` ties its content to `world.events[ev_idx + 1]` and not to `ev`.
+            # That marks `ev` as `absent` (`c_fidelity_missing_event`) and preserves `event_sentences[search_start]`
+            # for `ev_idx + 1` so a misshapen sentence's fault (`form_not_accepted`) is attributed to the right event.
             next_ev_matches_search_start = (
                 search_start < len(event_sentences)
                 and ev_idx + 1 < len(world.events)
-                and _sentence_matches_event(
-                    event_sentences[search_start],
-                    world.events[ev_idx + 1],
-                    world.noise_threshold,
-                    world=world,
-                    checker_profile=checker_profile,
+                and (
+                    _sentence_matches_event(
+                        event_sentences[search_start],
+                        world.events[ev_idx + 1],
+                        world.noise_threshold,
+                        world=world,
+                        checker_profile=checker_profile,
+                    )
+                    or (
+                        not _event_content_present(
+                            event_sentences[search_start],
+                            ev,
+                            world,
+                            checker_profile,
+                        )
+                        and _event_content_present(
+                            event_sentences[search_start],
+                            world.events[ev_idx + 1],
+                            world,
+                            checker_profile,
+                        )
+                    )
                 )
             )
             missing_ev_kind = (
@@ -5542,7 +6050,13 @@ def collect_prose_faults(
     goal_mode: str = DEFAULT_GOAL_MODE,
     checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> tuple[ProseFaultRecord, ...]:
-    """Run all prose checks (a)-(d) in collect-all mode and return every `ProseFaultRecord` (with no text)."""
+    """Run all prose checks (a)-(d) in collect-all mode and return every `ProseFaultRecord` (with no text).
+
+    Note (2026-11-02): In `check_prose_render_fidelity`, fault attribution changed (`next_ev_matches_search_start` preserves a candidate
+    sentence whose `_event_content_present` matches `ev_idx + 1` and not `ev`; in re-attributed scenes the first fault's `failure_kind` goes
+    from `"altered"` to `"absent"`, so the retry repair line changes from `"ensure event k is written ..."` to `"add one sentence for event k ..."`).
+    Attempt-0 verdicts are unchanged, except that a sentence containing a `SAY_n`, `MOVE_n` or `SEE_n` token is now rejected (`_sentence_matches_event`, render.py:3936), as intended by the card; bracket role labels were already rejected at the base, by `check_prose_no_markers`.
+    """
     if goal_mode not in VALID_GOAL_MODES:
         raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
     if checker_profile not in VALID_CHECKER_PROFILES:
