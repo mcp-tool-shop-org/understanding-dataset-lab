@@ -23,6 +23,8 @@ from udlab_generator.probe import (
 )
 from udlab_generator.render import (
     ATTEMPT_0_TEMPERATURE,
+    DEFAULT_ACCEPTED_FORMS_LINE,
+    DEFAULT_CHECKER_PROFILE,
     DEFAULT_CONSTRAINT_LAYOUT,
     DEFAULT_GOAL_MODE,
     DEFAULT_OLLAMA_BASE_URL,
@@ -38,6 +40,8 @@ from udlab_generator.render import (
     NUM_CTX_STEP_TOKENS,
     SEALED_DIAGNOSTICS_FILENAME,
     SEALED_RESPONSES_FILENAME,
+    VALID_ACCEPTED_FORMS_LINES,
+    VALID_CHECKER_PROFILES,
     VALID_CONSTRAINT_LAYOUTS,
     VALID_GOAL_MODES,
     VALID_RETRY_FORMS,
@@ -193,8 +197,14 @@ def _summarize_call_outcomes(call_records: Sequence[GenerationCallRecord]) -> di
     }
 
 
-def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
+def recheck_saved_responses(
+    output_dir: Path,
+    *,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
+) -> dict[str, object]:
     """Re-run every prose check on the saved texts in `<output_dir>/sealed_store/responses.sealed.jsonl` offline (no model, no GPU)."""
+    if checker_profile not in VALID_CHECKER_PROFILES:
+        raise ValueError(f"Invalid checker_profile {checker_profile!r}; expected one of {sorted(VALID_CHECKER_PROFILES)}")
     sealed_dir = output_dir / "sealed_store"
     responses_path = sealed_dir / SEALED_RESPONSES_FILENAME
     sealing_meta_path = sealed_dir / "sealing.sealed.json"
@@ -283,21 +293,25 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
                 world,
                 focal_agent=focal_agent,
                 goal_mode=entry_goal_mode,
+                checker_profile=checker_profile,
             )
             passed = True
             check_id: str | None = None
+            rule_id: str | None = None
             event_index: int | None = None
             event_kind: str | None = None
             failing_sentence: str | None = None
             reason: str | None = None
             faults: tuple[ProseFaultRecord, ...] = ()
             fault_check_ids: list[str] = []
+            fault_rule_ids: list[str] = []
             calls_kept += 1
             call_dup_stakes = count_duplicate_stake_statements(response_text, world)
             duplicate_stake_statements += call_dup_stakes
         except RenderCheckError as exc:
             passed = False
             check_id = exc.check_id
+            rule_id = exc.rule_id
             event_index = exc.event_index
             event_kind = exc.event_kind
             failing_sentence = _resolve_failing_sentence_in_raw_response(
@@ -311,9 +325,13 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
                 world,
                 focal_agent=focal_agent,
                 goal_mode=entry_goal_mode,
+                checker_profile=checker_profile,
             )
             fault_check_ids = list(dict.fromkeys(f.check_id for f in faults)) or (
                 [exc.check_id] if exc.check_id else []
+            )
+            fault_rule_ids = [f.rule_id for f in faults] or (
+                [exc.rule_id] if exc.rule_id else []
             )
             calls_refused += 1
             call_dup_stakes = count_duplicate_stake_statements(response_text, world)
@@ -396,6 +414,7 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
                 "verdict_matches_recorded": verdict_matches,
                 "recorded_refusal_format": recorded_refusal_format,
                 "check_id": check_id,
+                "rule_id": rule_id,
                 "event_index": event_index,
                 "event_kind": event_kind,
                 "failing_sentence": failing_sentence,
@@ -406,6 +425,7 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
                 "duplicate_stake_statements": call_dup_stakes,
                 "reason": reason,
                 "fault_check_ids": fault_check_ids,
+                "fault_rule_ids": fault_rule_ids,
                 "fault_vector": [f.to_dict() for f in faults],
             }
         )
@@ -420,9 +440,15 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
         else:
             scenarios_refused += 1
 
+    rule_id_counts: Counter[str] = Counter()
+    for c in call_results:
+        for rid in c.get("fault_rule_ids", []):  # type: ignore[union-attr]
+            rule_id_counts[str(rid)] += 1
+
     return {
         "output_dir": str(output_dir),
         "responses_sealed_path": str(responses_path),
+        "checker_profile": str(checker_profile),
         "num_calls": len(call_results),
         "calls": call_results,
         "scenarios_kept": scenarios_kept,
@@ -435,6 +461,7 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
         "refused": renderings_refused,
         "duplicate_stake_statements": duplicate_stake_statements,
         "refusals_by_check_id": dict(sorted(refusals_by_check_id.items())),
+        "rule_id_counts": dict(sorted(rule_id_counts.items())),
         "fault_vector_counts_by_check_id": summarize_fault_vector_counts(
             c["fault_check_ids"] for c in call_results  # type: ignore[misc]
         ),
@@ -459,7 +486,11 @@ def run_probe_only(sealed_jsonl_path: Path) -> dict[str, object]:
     }
 
 
-def verify_written_dataset(output_dir: Path) -> dict[str, object]:
+def verify_written_dataset(
+    output_dir: Path,
+    *,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
+) -> dict[str, object]:
     """Post-write verification command (`--verify-written <dir>`):
 
     1. Runs canonical `verify_sealed_part`, prose checks (a)-(d), independent B2 derivation
@@ -476,7 +507,11 @@ def verify_written_dataset(output_dir: Path) -> dict[str, object]:
     responses_sealed_path = sealed_dir / SEALED_RESPONSES_FILENAME
     generations_path = output_dir / GENERATIONS_FILENAME
 
-    recount_report = verify_written_dataset_recounts_and_prose(public_dir, sealed_dir)
+    recount_report = verify_written_dataset_recounts_and_prose(
+        public_dir,
+        sealed_dir,
+        checker_profile=checker_profile,
+    )
     probe_only_result = run_probe_only(keys_sealed_path)
     num_rows = int(probe_only_result["num_rows"])  # type: ignore[arg-type]
 
@@ -716,6 +751,8 @@ def build_and_probe_dataset(
     short_circuit_dead_scenarios: bool = False,
     goal_mode: str = DEFAULT_GOAL_MODE,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
+    accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
     presence_penalty: float | None = None,
     grant_id: str | None = None,
     resume: bool = False,
@@ -750,8 +787,18 @@ def build_and_probe_dataset(
         raise ValueError(
             f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}."
         )
+    if accepted_forms_line not in VALID_ACCEPTED_FORMS_LINES:
+        raise ValueError(
+            f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}."
+        )
+    if checker_profile not in VALID_CHECKER_PROFILES:
+        raise ValueError(
+            f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}."
+        )
     resolved_goal_mode = str(goal_mode)
     resolved_constraint_layout = str(constraint_layout)
+    resolved_accepted_forms_line = str(accepted_forms_line)
+    resolved_checker_profile = str(checker_profile)
     resolved_presence_penalty = float(presence_penalty) if presence_penalty is not None else None
     resolved_short_circuit = bool(short_circuit_dead_scenarios)
     dead_scenario_mode = (
@@ -801,6 +848,8 @@ def build_and_probe_dataset(
         goal_mode=resolved_goal_mode,
         presence_penalty=resolved_presence_penalty,
         constraint_layout=resolved_constraint_layout,
+        accepted_forms_line=resolved_accepted_forms_line,
+        checker_profile=resolved_checker_profile,
     )
 
     if resume:
@@ -850,6 +899,8 @@ def build_and_probe_dataset(
             short_circuit_dead_scenarios=resolved_short_circuit,
             goal_mode=resolved_goal_mode,
             constraint_layout=resolved_constraint_layout,
+            accepted_forms_line=resolved_accepted_forms_line,
+            checker_profile=resolved_checker_profile,
             presence_penalty=resolved_presence_penalty,
             start_owned_server=should_own_server,
             popen_factory=popen_factory,
@@ -891,6 +942,7 @@ def build_and_probe_dataset(
         mock_writer = MockWriter(
             goal_mode=resolved_goal_mode,
             constraint_layout=resolved_constraint_layout,
+            accepted_forms_line=resolved_accepted_forms_line,
         )
         all_mock_calls: list[GenerationCallRecord] = list(restored_calls)
         if resume and generations_path is not None:
@@ -1035,6 +1087,7 @@ def build_and_probe_dataset(
                             rendering_index=r_idx,
                             focal_agent=str(sr_obj.get("focal_agent") or ""),
                             goal_mode=str(sr_obj.get("goal_mode") or resolved_goal_mode),
+                            checker_profile=resolved_checker_profile,
                         )
                     )
         sealed_diagnostics_path = sealed_dir / SEALED_DIAGNOSTICS_FILENAME
@@ -1058,6 +1111,7 @@ def build_and_probe_dataset(
     hard_constraints_sha256 = compute_hard_constraints_sha256(
         goal_mode=resolved_goal_mode,
         constraint_layout=resolved_constraint_layout,
+        accepted_forms_line=resolved_accepted_forms_line,
     )
 
     writer_provenance: dict[str, Any] = {
@@ -1065,6 +1119,8 @@ def build_and_probe_dataset(
         "writer_pin": effective_writer_pin.to_dict(),
         "goal_mode": resolved_goal_mode,
         "constraint_layout": resolved_constraint_layout,
+        "accepted_forms_line": resolved_accepted_forms_line,
+        "checker_profile": resolved_checker_profile,
         "hard_constraints_sha256": hard_constraints_sha256,
         "presence_penalty": resolved_presence_penalty,
         "modelfile_parameters": modelfile_parameters,
@@ -1097,7 +1153,11 @@ def build_and_probe_dataset(
         all_worlds=worlds,
         allow_empty=True,
     )
-    recount_verification = verify_written_dataset_recounts_and_prose(public_dir, sealed_dir)
+    recount_verification = verify_written_dataset_recounts_and_prose(
+        public_dir,
+        sealed_dir,
+        checker_profile=resolved_checker_profile,
+    )
 
     sealed_rows = [
         json.loads(line)
@@ -1118,6 +1178,8 @@ def build_and_probe_dataset(
         "writer_pin": effective_writer_pin.to_dict(),
         "goal_mode": resolved_goal_mode,
         "constraint_layout": resolved_constraint_layout,
+        "accepted_forms_line": resolved_accepted_forms_line,
+        "checker_profile": resolved_checker_profile,
         "hard_constraints_sha256": hard_constraints_sha256,
         "presence_penalty": resolved_presence_penalty,
         "modelfile_parameters": modelfile_parameters,
@@ -1269,6 +1331,24 @@ def main(
         ),
     )
     parser.add_argument(
+        "--accepted-forms-line",
+        choices=tuple(sorted(VALID_ACCEPTED_FORMS_LINES)),
+        default=DEFAULT_ACCEPTED_FORMS_LINE,
+        help=(
+            f"Append two accepted-forms lines for move and see (occluded) to the writer prompt "
+            f"(default: {DEFAULT_ACCEPTED_FORMS_LINE})."
+        ),
+    )
+    parser.add_argument(
+        "--checker-profile",
+        choices=tuple(sorted(VALID_CHECKER_PROFILES)),
+        default=DEFAULT_CHECKER_PROFILE,
+        help=(
+            f"Checker profile: 'c' (default, Stage 2 rule surface + Corrections 1-3) "
+            f"or 'd' (Profile C + Widenings M2, M3, V2, P1)."
+        ),
+    )
+    parser.add_argument(
         "--grant-id",
         type=str,
         default=None,
@@ -1360,6 +1440,7 @@ def main(
             diag_summary = diagnose_paired_run(
                 args.diagnose_paired,
                 public_summary_out=args.paired_out,
+                checker_profile=args.checker_profile,
             )
             print(json.dumps(diag_summary, indent=2, sort_keys=True))
             return 0
@@ -1384,6 +1465,8 @@ def main(
                 seed_bank=args.paired_seed_bank,
                 goal_mode=args.goal_mode,
                 constraint_layout=args.constraint_layout,
+                accepted_forms_line=args.accepted_forms_line,
+                checker_profile=args.checker_profile,
                 presence_penalty=args.presence_penalty,
                 output_path=args.paired_out,
                 sealed_responses_path=paired_sealed_responses_path,
@@ -1402,7 +1485,10 @@ def main(
             return 0
 
         if args.recheck is not None:
-            recheck_res = recheck_saved_responses(args.recheck)
+            recheck_res = recheck_saved_responses(
+                args.recheck,
+                checker_profile=args.checker_profile,
+            )
             for call_info in recheck_res["calls"]:  # type: ignore[union-attr]
                 status = "PASS" if call_info["checks_passed"] else "FAIL"
                 cid = call_info["check_id"] or "ok"
@@ -1415,7 +1501,10 @@ def main(
             return 0
 
         if args.verify_written is not None:
-            verify_res = verify_written_dataset(args.verify_written)
+            verify_res = verify_written_dataset(
+                args.verify_written,
+                checker_profile=args.checker_profile,
+            )
             for console_line in format_verify_written_console_refusals(args.verify_written):
                 print(console_line)
             passed = bool(verify_res["passed"])
@@ -1449,6 +1538,8 @@ def main(
             short_circuit_dead_scenarios=bool(args.short_circuit_dead_scenarios),
             goal_mode=args.goal_mode,
             constraint_layout=args.constraint_layout,
+            accepted_forms_line=args.accepted_forms_line,
+            checker_profile=args.checker_profile,
             presence_penalty=args.presence_penalty,
             grant_id=args.grant_id,
             resume=args.resume,

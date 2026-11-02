@@ -1,0 +1,776 @@
+{
+ "schema_version": 1,
+ "stage": 3,
+ "author": "R&D (Claude), hand-written 2026-11-02; no model or Google-tool text",
+ "world": {
+  "scenario_id": "scen_fixture_0001",
+  "seed": 900001,
+  "domain_name": "synthetic_fixture_domain",
+  "rooms": [
+   "amber room",
+   "birch room",
+   "cobalt room"
+  ],
+  "doorways": [
+   [
+    "amber room",
+    "birch room"
+   ],
+   [
+    "birch room",
+    "cobalt room"
+   ]
+  ],
+  "agents": [
+   "Mira",
+   "Nolan",
+   "Pia"
+  ],
+  "absent_parties": [
+   "Quin"
+  ],
+  "objects": [
+   "copper token",
+   "glass prism",
+   "key to the archive",
+   "note from the desk"
+  ],
+  "containers_by_room": {
+   "amber room": [
+    "pine crate",
+    "tin locker"
+   ],
+   "birch room": [
+    "slate box",
+    "reed basket"
+   ],
+   "cobalt room": [
+    "cedar trunk",
+    "iron bin"
+   ]
+  },
+  "occluders_by_room": {
+   "amber room": "felt curtain",
+   "birch room": "timber screen",
+   "cobalt room": "canvas partition"
+  },
+  "fixtures_by_room": {
+   "amber room": "wall sundial",
+   "birch room": null,
+   "cobalt room": null
+  },
+  "noise_threshold": 40
+ },
+ "events": {
+  "say": {
+   "step": 1,
+   "kind": "say",
+   "actor": "Mira",
+   "room": "amber room",
+   "target_object": null,
+   "from_location": null,
+   "to_location": null,
+   "utterance": "The copper token is stored in the tin locker.",
+   "noise_level": 55,
+   "occluded": false,
+   "occluder": null,
+   "recipient": null,
+   "stated_reason": null
+  },
+  "move": {
+   "step": 1,
+   "kind": "move",
+   "actor": "Mira",
+   "room": "amber room",
+   "target_object": "copper token",
+   "from_location": "pine crate",
+   "to_location": "tin locker",
+   "utterance": null,
+   "noise_level": null,
+   "occluded": false,
+   "occluder": null,
+   "recipient": null,
+   "stated_reason": null
+  },
+  "see_occ": {
+   "step": 1,
+   "kind": "see",
+   "actor": "Mira",
+   "room": "amber room",
+   "target_object": "pine crate",
+   "from_location": null,
+   "to_location": null,
+   "utterance": null,
+   "noise_level": null,
+   "occluded": true,
+   "occluder": "felt curtain",
+   "recipient": null,
+   "stated_reason": null
+  },
+  "see_clear": {
+   "step": 1,
+   "kind": "see",
+   "actor": "Mira",
+   "room": "amber room",
+   "target_object": "copper token",
+   "from_location": null,
+   "to_location": "pine crate",
+   "utterance": null,
+   "noise_level": null,
+   "occluded": false,
+   "occluder": null,
+   "recipient": null,
+   "stated_reason": null
+  }
+ },
+ "fixtures": [
+  {
+   "id": "s2_v1",
+   "form": "S2",
+   "category": "valid",
+   "expect": "pass",
+   "event": "say",
+   "sentence": "\"The copper token is stored in the tin locker,\" Mira said at 55 dB in the amber room."
+  },
+  {
+   "id": "s2_v2",
+   "form": "S2",
+   "category": "valid",
+   "expect": "pass",
+   "event": "say",
+   "sentence": "\"The copper token is stored in the tin locker,\" Mira announced in the amber room at 55 dB."
+  },
+  {
+   "id": "s2_i1",
+   "form": "S2",
+   "category": "1_wrong_slot",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "\"The copper token is stored in the tin locker,\" Nolan said at 55 dB in the amber room."
+  },
+  {
+   "id": "s2_i2",
+   "form": "S2",
+   "category": "1_wrong_slot",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "\"The copper token is stored in the tin locker,\" Mira said at 55 dB in the birch room."
+  },
+  {
+   "id": "s2_i3",
+   "form": "S2",
+   "category": "1_wrong_slot",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "\"The copper token is stored in the tin locker,\" Mira said at 30 dB in the amber room."
+  },
+  {
+   "id": "s2_i4",
+   "form": "S2",
+   "category": "3_second_agent_next_to_verb",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "\"The copper token is stored in the tin locker,\" Mira, beside Nolan, said at 55 dB in the amber room."
+  },
+  {
+   "id": "s2_i5",
+   "form": "S2",
+   "category": "4_negation_nonfactive_irrealis",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "\"The copper token is stored in the tin locker,\" Mira never said at 55 dB in the amber room."
+  },
+  {
+   "id": "s2_i6",
+   "form": "S2",
+   "category": "5_hedge_incomplete",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "\"The copper token is stored in the tin locker,\" Mira almost said at 55 dB in the amber room."
+  },
+  {
+   "id": "s2_i7",
+   "form": "S2",
+   "category": "lookalike_other_speaker_in_quote",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "\"Nolan said the copper token is stored in the tin locker,\" Mira said at 55 dB in the amber room."
+  },
+  {
+   "id": "s2_i8",
+   "form": "S2",
+   "category": "7_partial_span",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "\"The copper token is stored in the tin locker,\" Mira said at 55 dB in the amber room, and then she moved the glass prism to the slate box."
+  },
+  {
+   "id": "s3_v1",
+   "form": "S3",
+   "category": "valid",
+   "expect": "pass",
+   "event": "say",
+   "sentence": "At 55 dB in the amber room, Mira said, \"The copper token is stored in the tin locker.\""
+  },
+  {
+   "id": "s3_v2",
+   "form": "S3",
+   "category": "valid",
+   "expect": "pass",
+   "event": "say",
+   "sentence": "At 55 dB in the amber room, Mira announced, \"The copper token is stored in the tin locker.\""
+  },
+  {
+   "id": "s3_i1",
+   "form": "S3",
+   "category": "1_wrong_slot",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "At 55 dB in the cobalt room, Mira said, \"The copper token is stored in the tin locker.\""
+  },
+  {
+   "id": "s3_i2",
+   "form": "S3",
+   "category": "lookalike_second_agent_in_fronted_phrase",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "At 55 dB in the amber room with Nolan, Mira said, \"The copper token is stored in the tin locker.\""
+  },
+  {
+   "id": "s3_i3",
+   "form": "S3",
+   "category": "4_negation_nonfactive_irrealis",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "At 55 dB in the amber room, Mira refused to say, \"The copper token is stored in the tin locker.\""
+  },
+  {
+   "id": "s3_i4",
+   "form": "S3",
+   "category": "6_cross_kind_embedding",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "At 55 dB in the amber room, Mira said, \"Nolan moved the copper token from the pine crate to the tin locker.\""
+  },
+  {
+   "id": "s3_i5",
+   "form": "S3",
+   "category": "8_bundled_reordered",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "At 55 dB in the amber room, Mira said, \"The copper token is stored in the tin locker.\", and Nolan saw the glass prism."
+  },
+  {
+   "id": "s4_v1",
+   "form": "S4",
+   "category": "valid",
+   "expect": "pass",
+   "event": "say",
+   "sentence": "Mira said at 55 dB, \"The copper token is stored in the tin locker,\" in the amber room."
+  },
+  {
+   "id": "s4_v2",
+   "form": "S4",
+   "category": "valid",
+   "expect": "pass",
+   "event": "say",
+   "sentence": "Mira stated at 55 dB, \"The copper token is stored in the tin locker,\" in the amber room."
+  },
+  {
+   "id": "s4_i1",
+   "form": "S4",
+   "category": "lookalike_room_inside_quote",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "Mira said at 55 dB, \"The copper token is stored in the tin locker in the amber room.\""
+  },
+  {
+   "id": "s4_i2",
+   "form": "S4",
+   "category": "1_wrong_slot",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "Mira said at 55 dB, \"The copper token is stored in the tin locker,\" in the birch room."
+  },
+  {
+   "id": "s4_i3",
+   "form": "S4",
+   "category": "3_second_agent_next_to_verb",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "Mira and Nolan said at 55 dB, \"The copper token is stored in the tin locker,\" in the amber room."
+  },
+  {
+   "id": "s4_i4",
+   "form": "S4",
+   "category": "9_delimiter_collision",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "Mira said at 55 dB, \"The note from the desk is going to the amber room,\" in the birch room."
+  },
+  {
+   "id": "m2_v1",
+   "form": "M2",
+   "category": "valid",
+   "expect": "pass",
+   "event": "move",
+   "sentence": "From the pine crate to the tin locker, Mira moved the copper token in the amber room."
+  },
+  {
+   "id": "m2_v2",
+   "form": "M2",
+   "category": "valid",
+   "expect": "pass",
+   "event": "move",
+   "sentence": "In the amber room, from the pine crate to the tin locker, Mira moved the copper token."
+  },
+  {
+   "id": "m2_v3",
+   "form": "M2",
+   "category": "valid",
+   "expect": "pass",
+   "event": "move",
+   "sentence": "From the pine crate to the tin locker, Mira carried the copper token in the amber room."
+  },
+  {
+   "id": "m2_i1",
+   "form": "M2",
+   "category": "2_asymmetric_swap",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "From the tin locker to the pine crate, Mira moved the copper token in the amber room."
+  },
+  {
+   "id": "m2_i2",
+   "form": "M2",
+   "category": "1_wrong_slot",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "From the pine crate to the tin locker, Mira moved the glass prism in the amber room."
+  },
+  {
+   "id": "m2_i3",
+   "form": "M2",
+   "category": "1_wrong_slot",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "From the pine crate to the tin locker, Nolan moved the copper token in the amber room."
+  },
+  {
+   "id": "m2_i4",
+   "form": "M2",
+   "category": "3_second_agent_next_to_verb",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "From the pine crate to the tin locker, Nolan watched as Mira moved the copper token in the amber room."
+  },
+  {
+   "id": "m2_i5",
+   "form": "M2",
+   "category": "4_negation_nonfactive_irrealis",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "From the pine crate to the tin locker, Mira failed to move the copper token in the amber room."
+  },
+  {
+   "id": "m2_i6",
+   "form": "M2",
+   "category": "5_hedge_incomplete",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "From the pine crate toward the tin locker, Mira started to move the copper token in the amber room."
+  },
+  {
+   "id": "m2_i7",
+   "form": "M2",
+   "category": "6_cross_kind_embedding",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "At 55 dB in the amber room, Mira said, \"From the pine crate to the tin locker, Nolan moved the copper token.\""
+  },
+  {
+   "id": "m2_i8",
+   "form": "M2",
+   "category": "7_partial_span",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "From the pine crate to the tin locker, Mira moved the copper token in the amber room, and then the glass prism to the slate box."
+  },
+  {
+   "id": "m2_i9",
+   "form": "M2",
+   "category": "8_bundled_reordered",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "From the pine crate to the tin locker, Mira moved the copper token in the amber room after Nolan saw the glass prism."
+  },
+  {
+   "id": "m2_i10",
+   "form": "M2",
+   "category": "9_delimiter_collision",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "From the pine crate to the key to the archive, Mira moved the copper token in the amber room."
+  },
+  {
+   "id": "m2_i11",
+   "form": "M2",
+   "category": "11_dual_location",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "From the pine crate in the birch room to the tin locker, Mira moved the copper token."
+  },
+  {
+   "id": "m2_i12",
+   "form": "M2",
+   "category": "lookalike_path_only_source",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "From the pine crate, Mira moved the copper token in the amber room."
+  },
+  {
+   "id": "m3_v1",
+   "form": "M3",
+   "category": "valid",
+   "expect": "pass",
+   "event": "move",
+   "sentence": "In the amber room, the copper token was moved from the pine crate to the tin locker by Mira."
+  },
+  {
+   "id": "m3_v2",
+   "form": "M3",
+   "category": "valid",
+   "expect": "pass",
+   "event": "move",
+   "sentence": "The copper token was transferred from the pine crate into the tin locker by Mira in the amber room."
+  },
+  {
+   "id": "m3_i1",
+   "form": "M3",
+   "category": "lookalike_by_non_actor",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "In the amber room, the copper token was moved from the pine crate to the tin locker by Nolan."
+  },
+  {
+   "id": "m3_i2",
+   "form": "M3",
+   "category": "lookalike_passive_no_agent",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "In the amber room, the copper token was moved from the pine crate to the tin locker."
+  },
+  {
+   "id": "m3_i3",
+   "form": "M3",
+   "category": "2_asymmetric_swap",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "In the amber room, the copper token was moved from the tin locker to the pine crate by Mira."
+  },
+  {
+   "id": "m3_i4",
+   "form": "M3",
+   "category": "1_wrong_slot",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "In the amber room, the glass prism was moved from the pine crate to the tin locker by Mira."
+  },
+  {
+   "id": "m3_i5",
+   "form": "M3",
+   "category": "3_second_agent_next_to_verb",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "In the amber room, the copper token was moved from the pine crate to the tin locker by Mira and Nolan."
+  },
+  {
+   "id": "m3_i6",
+   "form": "M3",
+   "category": "4_negation_nonfactive_irrealis",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "In the amber room, the copper token was never moved from the pine crate to the tin locker by Mira."
+  },
+  {
+   "id": "m3_i7",
+   "form": "M3",
+   "category": "5_hedge_incomplete",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "In the amber room, the copper token was nearly moved from the pine crate to the tin locker by Mira."
+  },
+  {
+   "id": "m3_i8",
+   "form": "M3",
+   "category": "7_partial_span",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "In the amber room, the copper token was moved from the pine crate to the tin locker by Mira, who then hid the glass prism."
+  },
+  {
+   "id": "m3_i9",
+   "form": "M3",
+   "category": "9_delimiter_collision",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "In the amber room, the key to the archive was moved from the pine crate to the tin locker by Mira."
+  },
+  {
+   "id": "m3_i10",
+   "form": "M3",
+   "category": "11_dual_location",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "The copper token was moved from the pine crate to the tin locker in the birch room by Mira."
+  },
+  {
+   "id": "v2_v1",
+   "form": "V2",
+   "category": "valid",
+   "expect": "pass",
+   "event": "see_occ",
+   "sentence": "In the amber room, the felt curtain hid the pine crate from Mira at the far-side alcove."
+  },
+  {
+   "id": "v2_v2",
+   "form": "V2",
+   "category": "valid",
+   "expect": "pass",
+   "event": "see_occ",
+   "sentence": "From the far-side alcove in the amber room, the felt curtain hid the pine crate from Mira."
+  },
+  {
+   "id": "v2_i1",
+   "form": "V2",
+   "category": "lookalike_wrong_subject_of_hid",
+   "expect": "fail",
+   "event": "see_occ",
+   "sentence": "In the amber room, Nolan hid the pine crate from Mira at the far-side alcove."
+  },
+  {
+   "id": "v2_i2",
+   "form": "V2",
+   "category": "lookalike_actor_not_after_from",
+   "expect": "fail",
+   "event": "see_occ",
+   "sentence": "In the amber room, the felt curtain hid Mira from the pine crate at the far-side alcove."
+  },
+  {
+   "id": "v2_i3",
+   "form": "V2",
+   "category": "1_wrong_slot",
+   "expect": "fail",
+   "event": "see_occ",
+   "sentence": "In the amber room, the felt curtain hid the pine crate from Nolan at the far-side alcove."
+  },
+  {
+   "id": "v2_i4",
+   "form": "V2",
+   "category": "1_wrong_slot",
+   "expect": "fail",
+   "event": "see_occ",
+   "sentence": "In the amber room, the timber screen hid the pine crate from Mira at the far-side alcove."
+  },
+  {
+   "id": "v2_i5",
+   "form": "V2",
+   "category": "4_negation_nonfactive_irrealis",
+   "expect": "fail",
+   "event": "see_occ",
+   "sentence": "In the amber room, the felt curtain no longer hid the pine crate from Mira at the far-side alcove."
+  },
+  {
+   "id": "v2_i6",
+   "form": "V2",
+   "category": "5_hedge_incomplete",
+   "expect": "fail",
+   "event": "see_occ",
+   "sentence": "In the amber room, the felt curtain partly hid the pine crate from Mira at the far-side alcove."
+  },
+  {
+   "id": "v2_i7",
+   "form": "V2",
+   "category": "3_second_agent_next_to_verb",
+   "expect": "fail",
+   "event": "see_occ",
+   "sentence": "In the amber room, the felt curtain hid the pine crate from Mira and Nolan at the far-side alcove."
+  },
+  {
+   "id": "v2_i8",
+   "form": "V2",
+   "category": "6_cross_kind_embedding",
+   "expect": "fail",
+   "event": "see_occ",
+   "sentence": "At 55 dB in the amber room, Mira said, \"The felt curtain hid the pine crate from Nolan.\""
+  },
+  {
+   "id": "v2_i9",
+   "form": "V2",
+   "category": "7_partial_span",
+   "expect": "fail",
+   "event": "see_occ",
+   "sentence": "In the amber room, the felt curtain hid the pine crate from Mira at the far-side alcove, and Mira then saw the glass prism."
+  },
+  {
+   "id": "v2_i10",
+   "form": "V2",
+   "category": "11_dual_location",
+   "expect": "fail",
+   "event": "see_occ",
+   "sentence": "In the birch room, the felt curtain hid the pine crate from Mira at the far-side alcove."
+  },
+  {
+   "id": "v3_v1",
+   "form": "V3",
+   "category": "lookalike_fronted_container_viewer_position",
+   "expect": "fail",
+   "event": "see_clear",
+   "sentence": "In the amber room, in the pine crate, Mira saw the copper token."
+  },
+  {
+   "id": "v3_v2",
+   "form": "V3",
+   "category": "lookalike_fronted_container_viewer_position",
+   "expect": "fail",
+   "event": "see_clear",
+   "sentence": "Inside the pine crate in the amber room, Mira saw the copper token."
+  },
+  {
+   "id": "v3_i1",
+   "form": "V3",
+   "category": "lookalike_wrong_container",
+   "expect": "fail",
+   "event": "see_clear",
+   "sentence": "Inside the tin locker in the amber room, Mira saw the copper token."
+  },
+  {
+   "id": "v3_i2",
+   "form": "V3",
+   "category": "1_wrong_slot",
+   "expect": "fail",
+   "event": "see_clear",
+   "sentence": "Inside the pine crate in the amber room, Nolan saw the copper token."
+  },
+  {
+   "id": "v3_i3",
+   "form": "V3",
+   "category": "4_negation_nonfactive_irrealis",
+   "expect": "fail",
+   "event": "see_clear",
+   "sentence": "Inside the pine crate in the amber room, Mira never saw the copper token."
+  },
+  {
+   "id": "v3_i4",
+   "form": "V3",
+   "category": "5_hedge_incomplete",
+   "expect": "fail",
+   "event": "see_clear",
+   "sentence": "Inside the pine crate in the amber room, Mira thought she saw the copper token."
+  },
+  {
+   "id": "v3_i5",
+   "form": "V3",
+   "category": "11_dual_location",
+   "expect": "fail",
+   "event": "see_clear",
+   "sentence": "Inside the pine crate in the birch room, Mira saw the copper token."
+  },
+  {
+   "id": "v3_i6",
+   "form": "V3",
+   "category": "3_second_agent_next_to_verb",
+   "expect": "fail",
+   "event": "see_clear",
+   "sentence": "Inside the pine crate in the amber room, Mira watched Nolan see the copper token."
+  },
+  {
+   "id": "p1_v1",
+   "form": "P1",
+   "category": "valid",
+   "expect": "pass",
+   "event": "see_clear",
+   "sentence": "Mira, standing quietly, saw the copper token in the pine crate in the amber room."
+  },
+  {
+   "id": "p1_v2",
+   "form": "P1",
+   "category": "valid",
+   "expect": "pass",
+   "event": "move",
+   "sentence": "In the amber room, Mira, working quickly, moved the copper token from the pine crate to the tin locker."
+  },
+  {
+   "id": "p1_v3",
+   "form": "P1",
+   "category": "valid",
+   "expect": "pass",
+   "event": "say",
+   "sentence": "In the amber room, Mira, leaning forward, said at 55 dB: \"The copper token is stored in the tin locker.\""
+  },
+  {
+   "id": "p1_i1",
+   "form": "P1",
+   "category": "lookalike_party_name_in_phrase",
+   "expect": "fail",
+   "event": "see_clear",
+   "sentence": "Mira, standing beside Nolan, saw the copper token in the pine crate in the amber room."
+  },
+  {
+   "id": "p1_i2",
+   "form": "P1",
+   "category": "lookalike_room_in_phrase",
+   "expect": "fail",
+   "event": "see_clear",
+   "sentence": "Mira, standing in the birch room, saw the copper token in the pine crate in the amber room."
+  },
+  {
+   "id": "p1_i3",
+   "form": "P1",
+   "category": "lookalike_event_verb_in_phrase",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "In the amber room, Mira, having seen the glass prism, moved the copper token from the pine crate to the tin locker."
+  },
+  {
+   "id": "p1_i4",
+   "form": "P1",
+   "category": "lookalike_negation_in_phrase",
+   "expect": "fail",
+   "event": "move",
+   "sentence": "In the amber room, Mira, not wanting to move it, moved the copper token from the pine crate to the tin locker."
+  },
+  {
+   "id": "p1_i5",
+   "form": "P1",
+   "category": "lookalike_phrase_too_long",
+   "expect": "fail",
+   "event": "see_clear",
+   "sentence": "Mira, standing very quietly near the far wall by the door, saw the copper token in the pine crate in the amber room."
+  },
+  {
+   "id": "p1_i6",
+   "form": "P1",
+   "category": "3_second_agent_next_to_verb",
+   "expect": "fail",
+   "event": "say",
+   "sentence": "In the amber room, Mira, who Nolan was watching, said at 55 dB: \"The copper token is stored in the tin locker.\""
+  },
+  {
+   "id": "p1_i7",
+   "form": "P1",
+   "category": "5_hedge_incomplete",
+   "expect": "fail",
+   "event": "see_clear",
+   "sentence": "Mira, squinting hard, tried to see the copper token in the pine crate in the amber room."
+  },
+  {
+   "id": "p1_i8",
+   "form": "P1",
+   "category": "lookalike_container_in_phrase",
+   "expect": "fail",
+   "event": "see_clear",
+   "sentence": "Mira, leaning on the tin locker, saw the copper token in the pine crate in the amber room."
+  }
+ ]
+}

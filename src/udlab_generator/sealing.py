@@ -29,6 +29,7 @@ from udlab_generator.keys import (
 )
 from udlab_generator.probe import _oof_multinomial_nb
 from udlab_generator.render import (
+    DEFAULT_CHECKER_PROFILE,
     RenderCheckError,
     RenderedScenario,
     check_rendered_prose,
@@ -1116,6 +1117,8 @@ def independent_recount_world_keys(w: World) -> dict[str, Any]:
 def verify_written_dataset_recounts_and_prose(
     public_dir: Path,
     sealed_dir: Path,
+    *,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> dict[str, Any]:
     """Verify sealed part, prose checks (a)-(d), independent B2 derivation, and all independent recounts."""
     verify_sealed_part(public_dir, sealed_dir)
@@ -1156,7 +1159,7 @@ def verify_written_dataset_recounts_and_prose(
 
         # Re-run all prose checks (a)-(d) on every written rendering
         try:
-            check_rendered_prose(prose, w_obj, focal_agent=focal_ag)
+            check_rendered_prose(prose, w_obj, focal_agent=focal_ag, checker_profile=checker_profile)
         except RenderCheckError as exc:
             sanitized_exc = sanitize_render_check_error_for_stderr(exc, prose)
             sanitized_summary = format_non_sealed_refusal_reason(
