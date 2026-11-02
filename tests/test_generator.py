@@ -13063,6 +13063,797 @@ def test_125_rescore_prose_records_refuses_prose_output_and_emits_no_prose_strin
         assert sent not in serialized
 
 
+def _load_stage3_gate0_fixture_doc() -> dict[str, object]:
+    fix_path = Path(__file__).resolve().parent / "fixtures" / "stage3" / "stage3_gate0_fixtures.json"
+    return json.loads(fix_path.read_text(encoding="utf-8"))
+
+
+def _load_stage3_gate0_cases() -> list[tuple[str, dict[str, object], dict[str, object], dict[str, object]]]:
+    doc = _load_stage3_gate0_fixture_doc()
+    world_spec = doc["world"]  # type: ignore[assignment]
+    events_map = doc["events"]  # type: ignore[assignment]
+    fixtures = doc["fixtures"]  # type: ignore[assignment]
+    return [
+        (str(item["id"]), item, events_map[str(item["event"])], world_spec)  # type: ignore[index]
+        for item in fixtures  # type: ignore[union-attr]
+    ]
+
+
+_STAGE3_PROFILE_C_PASSING_FORMS: frozenset[str] = frozenset({"S2", "S3", "S4"})
+
+
+def test_126_stage3_gate0_fixture_file_integrity_and_aggregate_counts() -> None:
+    """Card udlab-stage3-build, Build Item 1:
+    Verify `tests/fixtures/stage3/stage3_gate0_fixtures.json` SHA-256 and aggregate pass/fail counts
+    on Profile C (6/16 valid pass, 65/65 invalid fail) and Profile D (16/16 valid pass, 65/65 invalid fail),
+    plus 110/110 on `tests/fixtures/checker_tightening/{move,see,say}.json` under both C and D.
+    """
+    from udlab_generator.render import _sentence_matches_event
+
+    fix_path = Path(__file__).resolve().parent / "fixtures" / "stage3" / "stage3_gate0_fixtures.json"
+    assert fix_path.is_file()
+    assert (
+        hashlib.sha256(fix_path.read_bytes()).hexdigest()
+        == "5927461e17a9105e7b21873f6a8b80b25398e8698c16cf10492a7be0d907bbd4"
+    )
+    doc = json.loads(fix_path.read_text(encoding="utf-8"))
+    world = _build_checker_tightening_fixture_world(doc["world"])
+    events_map = doc["events"]
+    fixtures = doc["fixtures"]
+    assert len(fixtures) == 81
+    valid_items = [f for f in fixtures if f["category"] == "valid"]
+    invalid_items = [f for f in fixtures if f["category"] != "valid"]
+    assert len(valid_items) == 16
+    assert len(invalid_items) == 65
+
+    c_valid_passed = [
+        f["id"]
+        for f in valid_items
+        if _sentence_matches_event(
+            str(f["sentence"]),
+            Event(**events_map[str(f["event"])]),
+            world.noise_threshold,
+            world=world,
+            checker_profile="c",
+        )
+    ]
+    c_invalid_failed = [
+        f["id"]
+        for f in invalid_items
+        if not _sentence_matches_event(
+            str(f["sentence"]),
+            Event(**events_map[str(f["event"])]),
+            world.noise_threshold,
+            world=world,
+            checker_profile="c",
+        )
+    ]
+    assert len(c_valid_passed) == 6
+    assert set(c_valid_passed) == {
+        f["id"] for f in valid_items if f["form"] in _STAGE3_PROFILE_C_PASSING_FORMS
+    }
+    assert len(c_invalid_failed) == 65
+
+    d_valid_passed = [
+        f["id"]
+        for f in valid_items
+        if _sentence_matches_event(
+            str(f["sentence"]),
+            Event(**events_map[str(f["event"])]),
+            world.noise_threshold,
+            world=world,
+            checker_profile="d",
+        )
+    ]
+    d_invalid_failed = [
+        f["id"]
+        for f in invalid_items
+        if not _sentence_matches_event(
+            str(f["sentence"]),
+            Event(**events_map[str(f["event"])]),
+            world.noise_threshold,
+            world=world,
+            checker_profile="d",
+        )
+    ]
+    assert len(d_valid_passed) == 16
+    assert len(d_invalid_failed) == 65
+
+    # Also verify existing 176 checker_tightening fixtures (including all 110 defect/adversarial fixtures) pass unchanged under both Profile C and Profile D
+    total_ct = 0
+    invalid_ct = 0
+    for kind in ("move", "see", "say"):
+        for fid, item, wspec in _load_checker_tightening_cases(kind):
+            w_ct = _build_checker_tightening_fixture_world(wspec)
+            ev_ct = Event(**item["event"])  # type: ignore[arg-type]
+            exp_ct = item["expect"] == "pass"
+            if not exp_ct:
+                invalid_ct += 1
+            for prof in ("c", "d"):
+                got_ct = _sentence_matches_event(
+                    str(item["sentence"]),
+                    ev_ct,
+                    w_ct.noise_threshold,
+                    world=w_ct,
+                    checker_profile=prof,
+                )
+                assert got_ct is exp_ct, f"{kind}/{fid} under profile={prof!r}: expected {exp_ct}, got {got_ct}"
+            total_ct += 1
+    assert total_ct == 176
+    assert invalid_ct == 139
+
+
+@pytest.mark.parametrize(
+    ("fixture_id", "fixture_item", "event_spec", "world_spec"),
+    _load_stage3_gate0_cases(),
+    ids=[c[0] for c in _load_stage3_gate0_cases()],
+)
+def test_127_stage3_gate0_fixtures_profile_c(
+    fixture_id: str,
+    fixture_item: dict[str, object],
+    event_spec: dict[str, object],
+    world_spec: dict[str, object],
+) -> None:
+    """Parametrised Stage 3 Gate 0 fixture suite under Profile C (`checker_profile='c'`).
+    In Profile C:
+    - Valid S2, S3, S4 pass (6/16 valid fixtures).
+    - Valid M2, M3, V2, P1 fail (widened forms are Profile D only).
+    - All 65 invalid fixtures fail (65/65).
+    """
+    from udlab_generator.render import _sentence_matches_event
+
+    world = _build_checker_tightening_fixture_world(world_spec)
+    ev = Event(**event_spec)  # type: ignore[arg-type]
+    if fixture_item["category"] == "valid":
+        expected = str(fixture_item["form"]) in _STAGE3_PROFILE_C_PASSING_FORMS
+    else:
+        expected = False
+    actual = _sentence_matches_event(
+        str(fixture_item["sentence"]),
+        ev,
+        world.noise_threshold,
+        world=world,
+        checker_profile="c",
+    )
+    assert actual is expected, (
+        f"Stage 3 fixture {fixture_id!r} ({fixture_item['category']!r}, {fixture_item['form']!r}) "
+        f"under Profile C expected {expected}, got {actual}: {fixture_item['sentence']!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("fixture_id", "fixture_item", "event_spec", "world_spec"),
+    _load_stage3_gate0_cases(),
+    ids=[c[0] for c in _load_stage3_gate0_cases()],
+)
+def test_128_stage3_gate0_fixtures_profile_d(
+    fixture_id: str,
+    fixture_item: dict[str, object],
+    event_spec: dict[str, object],
+    world_spec: dict[str, object],
+) -> None:
+    """Parametrised Stage 3 Gate 0 fixture suite under Profile D (`checker_profile='d'`).
+    In Profile D:
+    - All 16 valid fixtures pass (16/16).
+    - All 65 invalid fixtures fail (65/65).
+    """
+    from udlab_generator.render import _sentence_matches_event
+
+    world = _build_checker_tightening_fixture_world(world_spec)
+    ev = Event(**event_spec)  # type: ignore[arg-type]
+    expected = fixture_item["expect"] == "pass"
+    actual = _sentence_matches_event(
+        str(fixture_item["sentence"]),
+        ev,
+        world.noise_threshold,
+        world=world,
+        checker_profile="d",
+    )
+    assert actual is expected, (
+        f"Stage 3 fixture {fixture_id!r} ({fixture_item['category']!r}, {fixture_item['form']!r}) "
+        f"under Profile D expected {expected}, got {actual}: {fixture_item['sentence']!r}"
+    )
+
+
+def test_129_stage3_corrections_1_to_3_in_both_profiles_c_and_d() -> None:
+    """Card udlab-stage3-build, Build Item 2:
+    Unit tests for Corrections 1-3 in both Profile C and Profile D:
+    1. Say quote trailing punctuation (comma form, period form, bare form all match; 1 extra inner word fails).
+    2. Bystander inside a fronted location phrase is rejected before actor subject.
+    3. Container before the actor subject in `see` is rejected.
+    """
+    from udlab_generator.render import _sentence_matches_event
+
+    doc = _load_stage3_gate0_fixture_doc()
+    world = _build_checker_tightening_fixture_world(doc["world"])  # type: ignore[arg-type]
+
+    ev_say = Event(
+        step=1,
+        kind="say",
+        actor="Mira",
+        room="amber room",
+        target_object="copper token",
+        from_location=None,
+        to_location="tin locker",
+        utterance="The copper token is stored in the tin locker.",
+        noise_level=55,
+    )
+    ev_move = Event(
+        step=2,
+        kind="move",
+        actor="Mira",
+        room="amber room",
+        target_object="copper token",
+        from_location="pine crate",
+        to_location="tin locker",
+        occluded=False,
+        occluder=None,
+    )
+    ev_see_clear = Event(
+        step=3,
+        kind="see",
+        actor="Mira",
+        room="amber room",
+        target_object="copper token",
+        from_location="pine crate",
+        to_location="pine crate",
+        occluded=False,
+        occluder=None,
+    )
+    ev_see_occ = Event(
+        step=4,
+        kind="see",
+        actor="Mira",
+        room="amber room",
+        target_object="pine crate",
+        from_location="pine crate",
+        to_location="pine crate",
+        occluded=True,
+        occluder="felt curtain",
+    )
+
+    for prof in ("c", "d"):
+        # Correction 1: comma form, period form, and bare form (utterance without period) all match
+        assert _sentence_matches_event(
+            '"The copper token is stored in the tin locker," Mira said at 55 dB in the amber room.',
+            ev_say,
+            world.noise_threshold,
+            world=world,
+            checker_profile=prof,
+        )
+        assert _sentence_matches_event(
+            '"The copper token is stored in the tin locker." Mira said at 55 dB in the amber room.',
+            ev_say,
+            world.noise_threshold,
+            world=world,
+            checker_profile=prof,
+        )
+        assert _sentence_matches_event(
+            'In the amber room, Mira said at 55 dB: "The copper token is stored in the tin locker"',
+            ev_say,
+            world.noise_threshold,
+            world=world,
+            checker_profile=prof,
+        )
+        # Quote with one extra inner word must fail
+        assert not _sentence_matches_event(
+            '"The copper token is safely stored in the tin locker," Mira said at 55 dB in the amber room.',
+            ev_say,
+            world.noise_threshold,
+            world=world,
+            checker_profile=prof,
+        )
+
+        # Correction 2: bystander inside fronted location phrase rejected; non-party container passes
+        assert not _sentence_matches_event(
+            "Near Nolan in the amber room, Mira moved the copper token from the pine crate to the tin locker.",
+            ev_move,
+            world.noise_threshold,
+            world=world,
+            checker_profile=prof,
+        )
+        assert _sentence_matches_event(
+            "Near the pine crate in the amber room, Mira moved the copper token from the pine crate to the tin locker.",
+            ev_move,
+            world.noise_threshold,
+            world=world,
+            checker_profile=prof,
+        )
+
+        # Correction 3: container before actor subject in `see` (both clear and occluded) rejected
+        assert not _sentence_matches_event(
+            "Inside the pine crate in the amber room, Mira saw the copper token.",
+            ev_see_clear,
+            world.noise_threshold,
+            world=world,
+            checker_profile=prof,
+        )
+        assert not _sentence_matches_event(
+            "In the amber room at the far-side alcove, the pine crate stood behind the felt curtain, which blocked Mira's sight.",
+            ev_see_occ,
+            world.noise_threshold,
+            world=world,
+            checker_profile=prof,
+        )
+
+
+def test_130_stage3_widenings_m2_m3_v2_p1_in_profile_d_only() -> None:
+    """Card udlab-stage3-build, Build Item 3:
+    Verify widenings M2 (fronted path), M3 (passive move with by <actor>), V2 (occluded see with hid),
+    and P1 (comma-delimited phrase <=6 words between actor and verb) pass in Profile D and fail in Profile C,
+    and adversarial variants fail in both.
+    """
+    from udlab_generator.render import _sentence_matches_event
+
+    doc = _load_stage3_gate0_fixture_doc()
+    world = _build_checker_tightening_fixture_world(doc["world"])  # type: ignore[arg-type]
+
+    ev_move = Event(
+        step=1,
+        kind="move",
+        actor="Mira",
+        room="amber room",
+        target_object="copper token",
+        from_location="pine crate",
+        to_location="tin locker",
+        occluded=False,
+        occluder=None,
+    )
+    ev_move_occ = Event(
+        step=2,
+        kind="move",
+        actor="Mira",
+        room="amber room",
+        target_object="copper token",
+        from_location="pine crate",
+        to_location="tin locker",
+        occluded=True,
+        occluder="felt curtain",
+    )
+    ev_see_occ = Event(
+        step=3,
+        kind="see",
+        actor="Mira",
+        room="amber room",
+        target_object="pine crate",
+        from_location="pine crate",
+        to_location="pine crate",
+        occluded=True,
+        occluder="felt curtain",
+    )
+
+    valid_d_only = [
+        # M2
+        (ev_move, "In the amber room, from the pine crate to the tin locker, Mira moved the copper token."),
+        (
+            ev_move_occ,
+            "In the amber room, from the pine crate to the tin locker, Mira moved the copper token behind the felt curtain blocking sight.",
+        ),
+        # M3
+        (ev_move, "In the amber room, the copper token was moved by Mira from the pine crate to the tin locker."),
+        (
+            ev_move_occ,
+            "In the amber room, the copper token was moved from the pine crate to the tin locker by Mira behind the felt curtain blocking sight.",
+        ),
+        # V2
+        (
+            ev_see_occ,
+            "In the amber room at the far-side alcove, the felt curtain hid the pine crate from Mira's view.",
+        ),
+        (
+            ev_see_occ,
+            "In the amber room at the far-side alcove, the felt curtain hid the pine crate from Mira.",
+        ),
+        # P1
+        (
+            ev_move,
+            "Mira, standing quietly, moved the copper token from the pine crate to the tin locker in the amber room.",
+        ),
+    ]
+    for ev, sent in valid_d_only:
+        assert not _sentence_matches_event(sent, ev, world.noise_threshold, world=world, checker_profile="c")
+        assert _sentence_matches_event(sent, ev, world.noise_threshold, world=world, checker_profile="d")
+
+    adversarial_both_fail = [
+        # M2 destination before source
+        (ev_move, "In the amber room, to the tin locker from the pine crate, Mira moved the copper token."),
+        # M3 missing 'by Mira' or wrong agent
+        (ev_move, "In the amber room, the copper token was moved from the pine crate to the tin locker."),
+        (ev_move, "In the amber room, the copper token was moved by Nolan from the pine crate to the tin locker."),
+        # V2 non-occlusion verb ('decorated')
+        (
+            ev_see_occ,
+            "In the amber room at the far-side alcove, the felt curtain decorated the pine crate from Mira's view.",
+        ),
+        # P1 event verb or room/party in appositive slot
+        (
+            ev_move,
+            "Mira, who moved quickly, moved the copper token from the pine crate to the tin locker in the amber room.",
+        ),
+        (
+            ev_move,
+            "Mira, standing in the amber room, moved the copper token from the pine crate to the tin locker in the amber room.",
+        ),
+    ]
+    for ev, sent in adversarial_both_fail:
+        for prof in ("c", "d"):
+            assert not _sentence_matches_event(sent, ev, world.noise_threshold, world=world, checker_profile=prof)
+
+
+def test_131_checker_profile_flag_and_rule_id_subrule_tags(tmp_path: Path) -> None:
+    """Card udlab-stage3-build, Build Item 4:
+    Verify `--checker-profile {c,d}` (default `c`), `rule_id` subrule tags on `ProseFaultRecord` and `RenderCheckError`,
+    and `rule_id_counts` in `rescore_prose_records` and `recheck_saved_responses`.
+    """
+    from dataclasses import replace
+    from udlab_generator import (
+        DEFAULT_CHECKER_PROFILE,
+        EVENT_FIDELITY_SUBRULE_IDS,
+        VALID_CHECKER_PROFILES,
+        VALID_FAULT_RULE_IDS,
+        RenderCheckError,
+        check_rendered_prose,
+        collect_prose_faults,
+        recheck_saved_responses,
+        render_world_template,
+        rescore_prose_records,
+        world_from_scenario_seed,
+    )
+    from udlab_generator.cli import main as cli_main
+    from udlab_generator.render import _sentence_rejection_rule_id
+
+    assert DEFAULT_CHECKER_PROFILE == "c"
+    assert VALID_CHECKER_PROFILES == frozenset({"c", "d"})
+    assert set(EVENT_FIDELITY_SUBRULE_IDS).issubset(VALID_FAULT_RULE_IDS)
+
+    doc = _load_stage3_gate0_fixture_doc()
+    world = _build_checker_tightening_fixture_world(doc["world"])  # type: ignore[arg-type]
+
+    ev_move = Event(
+        step=1,
+        kind="move",
+        actor="Mira",
+        room="amber room",
+        target_object="copper token",
+        from_location="pine crate",
+        to_location="tin locker",
+        occluded=False,
+        occluder=None,
+    )
+    ev_move_occ = replace(ev_move, occluded=True, occluder="felt curtain")
+    ev_say = Event(
+        step=2,
+        kind="say",
+        actor="Mira",
+        room="amber room",
+        target_object="copper token",
+        from_location=None,
+        to_location="tin locker",
+        utterance="The copper token is stored in the tin locker.",
+        noise_level=55,
+    )
+
+    # Verify subrule tags produced for failure modes:
+    assert (
+        _sentence_rejection_rule_id(
+            "In the amber room, Mira did not move the copper token from the pine crate to the tin locker.",
+            ev_move,
+            world.noise_threshold,
+            world=world,
+        )
+        == "negation_or_hedge"
+    )
+    assert (
+        _sentence_rejection_rule_id(
+            "Mira moved the copper token from the pine crate to the tin locker.",
+            ev_move,
+            world.noise_threshold,
+            world=world,
+        )
+        == "missing_room"
+    )
+    assert (
+        _sentence_rejection_rule_id(
+            "In the amber room, Mira inspected the copper token from the pine crate to the tin locker.",
+            ev_move,
+            world.noise_threshold,
+            world=world,
+        )
+        == "wrong_verb"
+    )
+    assert (
+        _sentence_rejection_rule_id(
+            "In the amber room, the copper token was moved from the pine crate to the tin locker.",
+            ev_move,
+            world.noise_threshold,
+            world=world,
+        )
+        == "actor_not_subject"
+    )
+    assert (
+        _sentence_rejection_rule_id(
+            "In the amber room, the copper token was moved by Mira from the pine crate to the tin locker.",
+            ev_move,
+            world.noise_threshold,
+            world=world,
+            checker_profile="c",
+        )
+        == "m3_by_agent"
+    )
+    assert (
+        _sentence_rejection_rule_id(
+            "In the amber room, Near the copper token, Mira moved the glass prism from the pine crate to the tin locker.",
+            ev_move,
+            world.noise_threshold,
+            world=world,
+        )
+        == "defect_1_object"
+    )
+    assert (
+        _sentence_rejection_rule_id(
+            "In the amber room, Mira moved the copper token to the tin locker from the pine crate.",
+            ev_move,
+            world.noise_threshold,
+            world=world,
+        )
+        == "from_after_to"
+    )
+    assert (
+        _sentence_rejection_rule_id(
+            "In the amber room, Mira moved the copper token from the pine crate to the tin locker near the felt curtain.",
+            ev_move_occ,
+            world.noise_threshold,
+            world=world,
+        )
+        == "occluder_clause"
+    )
+    assert (
+        _sentence_rejection_rule_id(
+            'In the amber room, Mira said: "The copper token is stored in the tin locker."',
+            ev_say,
+            world.noise_threshold,
+            world=world,
+        )
+        == "missing_db"
+    )
+
+    # Full rendering test: replace a move sentence with M3 passive form, which fails under C and passes under D
+    w0 = world_from_scenario_seed(20261030, index=0)
+    focal = w0.agents[0]
+    base_prose = render_world_template(w0, focal)
+    p1, p2 = base_prose.split("\n\n", 1)
+    # Find the first move event in w0 and rewrite its sentence in M3 passive form
+    move_ev = next(ev for ev in w0.events if ev.kind == "move" and not ev.occluded)
+    from udlab_generator.render import _render_event_sentence
+
+    canon_move_sent = _render_event_sentence(move_ev, w0, focal)
+    m3_move_sent = (
+        f"In the {move_ev.room}, the {move_ev.target_object} "
+        f"was moved by {move_ev.actor} from the {move_ev.from_location} to the {move_ev.to_location}."
+    )
+    assert canon_move_sent in p2
+    m3_prose = f"{p1}\n\n{p2.replace(canon_move_sent, m3_move_sent, 1)}"
+
+    # Under Profile C: fails with check_id="c_fidelity_missing_event" and rule_id="m3_by_agent"
+    with pytest.raises(RenderCheckError) as exc_info:
+        check_rendered_prose(m3_prose, w0, focal_agent=focal, checker_profile="c")
+    assert exc_info.value.check_id == "c_fidelity_missing_event"
+    assert exc_info.value.rule_id == "m3_by_agent"
+
+    faults_c = collect_prose_faults(m3_prose, w0, focal_agent=focal, checker_profile="c")
+    assert len(faults_c) >= 1
+    assert faults_c[0].check_id == "c_fidelity_missing_event"
+    assert faults_c[0].rule_id == "m3_by_agent"
+    assert set(faults_c[0].to_dict().keys()) == {"check_id", "event_index", "event_kind", "failure_kind"}
+    assert faults_c[0].to_dict(include_rule_id=True)["rule_id"] == "m3_by_agent"
+
+    # Under Profile D: passes!
+    check_rendered_prose(m3_prose, w0, focal_agent=focal, checker_profile="d")
+    faults_d = collect_prose_faults(m3_prose, w0, focal_agent=focal, checker_profile="d")
+    assert faults_d == ()
+
+    # rescore_prose_records under C vs D
+    res_c = rescore_prose_records(
+        [{"world": w0, "focal_agent": focal, "prose": m3_prose}],
+        checker_version="stage3-v1",
+        checker_profile="c",
+    )
+    res_d = rescore_prose_records(
+        [{"world": w0, "focal_agent": focal, "prose": m3_prose}],
+        checker_version="stage3-v1",
+        checker_profile="d",
+    )
+    assert res_c[0]["checker_profile"] == "c"
+    assert res_c[0]["passed"] is False
+    assert res_c[0]["primary_check_id"] == "c_fidelity_missing_event"
+    assert res_c[0]["primary_rule_id"] == "m3_by_agent"
+    assert "m3_by_agent" in res_c[0]["fault_rule_ids"]  # type: ignore[operator]
+    assert res_c[0]["rule_id_counts"].get("m3_by_agent", 0) >= 1  # type: ignore[union-attr]
+
+    assert res_d[0]["checker_profile"] == "d"
+    assert res_d[0]["passed"] is True
+    assert res_d[0]["primary_check_id"] is None
+    assert res_d[0]["primary_rule_id"] is None
+    assert res_d[0]["fault_rule_ids"] == []
+    assert res_d[0]["rule_id_counts"] == {}
+
+    # CLI --checker-profile and recheck_saved_responses
+    out_dir = tmp_path / "build_prof_d"
+    rc = cli_main(
+        [
+            "--count",
+            "1",
+            "--seed",
+            "20261030",
+            "--private-seed",
+            "ab" * 32,
+            "--out-dir",
+            str(out_dir),
+            "--writer",
+            "mock",
+            "--checker-profile",
+            "d",
+        ]
+    )
+    assert rc == 0
+    summary = json.loads((out_dir / "build_summary.json").read_text(encoding="utf-8"))
+    assert summary["checker_profile"] == "d"
+    recheck_rep = recheck_saved_responses(out_dir, checker_profile="d")
+    assert recheck_rep["checker_profile"] == "d"
+    assert recheck_rep["rule_id_counts"] == {}
+
+
+def test_132_accepted_forms_line_flag_copy_identity_and_prompt_alignment(tmp_path: Path) -> None:
+    """Card udlab-stage3-build, Build Item 5:
+    Verify `--accepted-forms-line {off,on}` (default `off`):
+    - When `off` (default), prompts and `hard_constraints_sha256` are byte-identical to `e5ee696b`
+      across all `(goal_mode, constraint_layout)` combinations.
+    - When `on`, appends the exact 4 accepted-forms lines at the end of the
+      `EVENT-ORDER & ROOM-CONTAINMENT RULES` block in both `line` and `table` layouts.
+    - `verify_prompt_and_checker_requirements_aligned` passes for all combinations.
+    """
+    from udlab_generator import (
+        ACCEPTED_FORMS_LINE_LINES,
+        ACCEPTED_FORMS_LINE_TEXT,
+        DEFAULT_ACCEPTED_FORMS_LINE,
+        VALID_ACCEPTED_FORMS_LINES,
+        compute_hard_constraints_sha256,
+        format_writer_prompt,
+        parse_writer_prompt_requirements,
+        render_writer_prompt_constraints,
+        verify_prompt_and_checker_requirements_aligned,
+        world_from_scenario_seed,
+    )
+    from udlab_generator.cli import build_and_probe_dataset
+
+    assert DEFAULT_ACCEPTED_FORMS_LINE == "off"
+    assert VALID_ACCEPTED_FORMS_LINES == frozenset({"off", "on"})
+    assert len(ACCEPTED_FORMS_LINE_LINES) == 4
+    assert ACCEPTED_FORMS_LINE_LINES == (
+        'Accepted say shapes (any one): <actor> <verb> at <noise_level> dB in the <room>, "<utterance>." | "<utterance>," <actor> <verb> at <noise_level> dB in the <room>. | At <noise_level> dB in the <room>, <actor> <verb>, "<utterance>." | <actor> <verb> at <noise_level> dB, "<utterance>," in the <room>.',
+        'Accepted move shapes (any one): <actor> <verb> the <target_object> from the <from_location> to the <to_location> in the <room>. | From the <from_location> to the <to_location>, <actor> <verb> the <target_object> in the <room>. | In the <room>, the <target_object> was <verb> from the <from_location> to the <to_location> by <actor>.',
+        "Accepted blocked-sight shape (in addition to the table's): In the <room>, the <occluder> hid the <target_object> from <actor> at the far-side alcove.",
+        "You may add one short descriptive phrase about the actor, between commas, right after the actor's name; it must not name anyone, any place or any object.",
+    )
+
+    w0 = world_from_scenario_seed(20261030, index=0)
+    focal = w0.agents[0]
+
+    # Pinned SHA-256 digests of `render_writer_prompt_constraints` at e5ee696b when accepted_forms_line="off"
+    expected_off_constraint_hashes = {
+        ("copy", "line"): compute_hard_constraints_sha256(goal_mode="copy", constraint_layout="line"),
+        ("splice", "line"): compute_hard_constraints_sha256(goal_mode="splice", constraint_layout="line"),
+        ("copy", "table"): compute_hard_constraints_sha256(goal_mode="copy", constraint_layout="table"),
+        ("splice", "table"): compute_hard_constraints_sha256(goal_mode="splice", constraint_layout="table"),
+    }
+    assert expected_off_constraint_hashes[("copy", "line")] == "6a2b9c6f51c12f840fa80f60fe94f59ad20da41b66084731f75460b297820304"
+
+    for gm in ("copy", "splice"):
+        for cl in ("line", "table"):
+            # 1. Default and explicit "off" are byte-identical
+            c_default = render_writer_prompt_constraints(goal_mode=gm, constraint_layout=cl)
+            c_off = render_writer_prompt_constraints(
+                goal_mode=gm,
+                constraint_layout=cl,
+                accepted_forms_line="off",
+            )
+            assert c_default == c_off
+            for line_item in ACCEPTED_FORMS_LINE_LINES:
+                assert line_item not in c_off
+
+            p_default = format_writer_prompt(w0, focal, goal_mode=gm, constraint_layout=cl)
+            p_off = format_writer_prompt(
+                w0,
+                focal,
+                goal_mode=gm,
+                constraint_layout=cl,
+                accepted_forms_line="off",
+            )
+            assert p_default == p_off
+
+            # 2. With accepted_forms_line="on", the exact 4 lines appear at the end of c_fidelity_event_order
+            c_on = render_writer_prompt_constraints(
+                goal_mode=gm,
+                constraint_layout=cl,
+                accepted_forms_line="on",
+            )
+            assert ACCEPTED_FORMS_LINE_TEXT in c_on
+            # Verify they sit immediately before "- (c_fidelity_missing_event)"
+            marker = f"{ACCEPTED_FORMS_LINE_TEXT}\n- (c_fidelity_missing_event)"
+            assert marker in c_on
+            # And outside that 4-line insertion, c_on is identical to c_off
+            assert c_on.replace(f"\n{ACCEPTED_FORMS_LINE_TEXT}", "") == c_off
+
+            p_on = format_writer_prompt(
+                w0,
+                focal,
+                goal_mode=gm,
+                constraint_layout=cl,
+                accepted_forms_line="on",
+            )
+            assert p_on.replace(f"\n{ACCEPTED_FORMS_LINE_TEXT}", "") == p_off
+
+            # 3. Alignment check and requirement parser pass for both "off" and "on"
+            for afl in ("off", "on"):
+                assert verify_prompt_and_checker_requirements_aligned(
+                    goal_mode=gm,
+                    constraint_layout=cl,
+                    accepted_forms_line=afl,
+                )
+                parsed_from_expanded = parse_writer_prompt_requirements(
+                    p_on if afl == "on" else p_off,
+                    goal_mode=gm,
+                    constraint_layout=cl,
+                )
+                assert "c_fidelity_missing_event" in [r.check_id for r in parsed_from_expanded]
+
+    # 4. Verify build_and_probe_dataset and resume guard with accepted_forms_line="on" and checker_profile="d"
+    out_dir = tmp_path / "build_afl_on"
+    summary = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        private_seed_hex="cd" * 32,
+        output_dir=out_dir,
+        writer_kind="mock",
+        goal_mode="splice",
+        constraint_layout="table",
+        accepted_forms_line="on",
+        checker_profile="d",
+    )
+    assert summary["accepted_forms_line"] == "on"
+    assert summary["checker_profile"] == "d"
+    assert summary["hard_constraints_sha256"] == compute_hard_constraints_sha256(
+        goal_mode="splice",
+        constraint_layout="table",
+        accepted_forms_line="on",
+    )
+    with pytest.raises(ValueError, match=r"Cannot --resume: checkpoint header.*accepted_forms_line"):
+        build_and_probe_dataset(
+            count=1,
+            base_seed=20261030,
+            output_dir=out_dir,
+            writer_kind="mock",
+            goal_mode="splice",
+            constraint_layout="table",
+            accepted_forms_line="off",
+            checker_profile="d",
+            resume=True,
+        )
+    with pytest.raises(ValueError, match=r"Cannot --resume: checkpoint header.*checker_profile"):
+        build_and_probe_dataset(
+            count=1,
+            base_seed=20261030,
+            output_dir=out_dir,
+            writer_kind="mock",
+            goal_mode="splice",
+            constraint_layout="table",
+            accepted_forms_line="on",
+            checker_profile="c",
+            resume=True,
+        )
+
+
+
 
 
 

@@ -20,7 +20,7 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 from urllib.parse import urlparse
 import urllib.error
 import urllib.request
@@ -113,6 +113,19 @@ DEFAULT_GOAL_MODE: str = "copy"
 VALID_GOAL_MODES: frozenset[str] = frozenset({"copy", "splice"})
 DEFAULT_CONSTRAINT_LAYOUT: str = "line"
 VALID_CONSTRAINT_LAYOUTS: frozenset[str] = frozenset({"line", "table"})
+CheckerProfile = Literal["c", "d"]
+DEFAULT_CHECKER_PROFILE: CheckerProfile = "c"
+VALID_CHECKER_PROFILES: frozenset[str] = frozenset({"c", "d"})
+AcceptedFormsLine = Literal["off", "on"]
+DEFAULT_ACCEPTED_FORMS_LINE: AcceptedFormsLine = "off"
+VALID_ACCEPTED_FORMS_LINES: frozenset[str] = frozenset({"off", "on"})
+ACCEPTED_FORMS_LINE_LINES: tuple[str, str, str, str] = (
+    'Accepted say shapes (any one): <actor> <verb> at <noise_level> dB in the <room>, "<utterance>." | "<utterance>," <actor> <verb> at <noise_level> dB in the <room>. | At <noise_level> dB in the <room>, <actor> <verb>, "<utterance>." | <actor> <verb> at <noise_level> dB, "<utterance>," in the <room>.',
+    "Accepted move shapes (any one): <actor> <verb> the <target_object> from the <from_location> to the <to_location> in the <room>. | From the <from_location> to the <to_location>, <actor> <verb> the <target_object> in the <room>. | In the <room>, the <target_object> was <verb> from the <from_location> to the <to_location> by <actor>.",
+    "Accepted blocked-sight shape (in addition to the table's): In the <room>, the <occluder> hid the <target_object> from <actor> at the far-side alcove.",
+    "You may add one short descriptive phrase about the actor, between commas, right after the actor's name; it must not name anyone, any place or any object.",
+)
+ACCEPTED_FORMS_LINE_TEXT: str = "\n".join(ACCEPTED_FORMS_LINE_LINES)
 VALID_GOAL_SOURCES: frozenset[str] = frozenset({"model_text", "token"})
 GOAL_TOKEN_PREFIX: str = "[[GOAL:"
 GOAL_TOKEN_SUFFIX: str = "]]"
@@ -284,6 +297,7 @@ class RenderCheckError(ValueError):
         failure_kind: str = "altered",
         event_variant: str | None = None,
         goal_mode: str = DEFAULT_GOAL_MODE,
+        rule_id: str | None = None,
     ) -> None:
         if failure_kind not in VALID_FAILURE_KINDS:
             raise ValueError(f"failure_kind must be one of {sorted(VALID_FAILURE_KINDS)}, got {failure_kind!r}")
@@ -293,6 +307,7 @@ class RenderCheckError(ValueError):
             norm_fail = normalize_prose_line_endings(failing_sentence)
             failing_sentence_sha256 = _sha256_bytes(norm_fail.encode("utf-8"))
         self.check_id = check_id
+        self.rule_id = rule_id if rule_id is not None else check_id
         self.reason = message
         self.failing_sentence = failing_sentence
         self.event_index = event_index
@@ -1334,12 +1349,21 @@ def get_event_order_table_rows() -> dict[str, str]:
     }
 
 
-def format_event_order_table_rule_text() -> str:
+def format_event_order_table_rule_text(
+    *,
+    accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
+) -> str:
     """Render the full `c_fidelity_event_order` `rule_text` for `constraint_layout='table'`."""
+    if accepted_forms_line not in VALID_ACCEPTED_FORMS_LINES:
+        raise ValueError(
+            f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
+        )
     rows = get_event_order_table_rows()
     lines = [format_event_order_table_header()]
     for kind in EVENT_ORDER_TABLE_ROW_KINDS:
         lines.append(f"  {rows[kind]}")
+    if accepted_forms_line == "on":
+        lines.extend(ACCEPTED_FORMS_LINE_LINES)
     return "\n".join(lines)
 
 
@@ -1412,9 +1436,10 @@ def get_writer_prose_requirements(
     goal_mode: str = DEFAULT_GOAL_MODE,
     *,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
+    accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
     agents: Sequence[str] | None = None,
 ) -> tuple[ProseRequirementSpec, ...]:
-    """Return the writer prose requirement specs for `goal_mode` (`'copy'` or `'splice'`) and `constraint_layout` (`'line'` or `'table'`)."""
+    """Return the writer prose requirement specs for `goal_mode` (`'copy'` or `'splice'`), `constraint_layout` (`'line'` or `'table'`), and `accepted_forms_line` (`'off'` or `'on'`)."""
     if goal_mode not in VALID_GOAL_MODES:
         raise ValueError(
             f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}"
@@ -1423,7 +1448,11 @@ def get_writer_prose_requirements(
         raise ValueError(
             f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
         )
-    if goal_mode == "copy" and constraint_layout == "line":
+    if accepted_forms_line not in VALID_ACCEPTED_FORMS_LINES:
+        raise ValueError(
+            f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
+        )
+    if goal_mode == "copy" and constraint_layout == "line" and accepted_forms_line == "off":
         return WRITER_PROSE_REQUIREMENTS
     out: list[ProseRequirementSpec] = []
     for req in WRITER_PROSE_REQUIREMENTS:
@@ -1447,7 +1476,15 @@ def get_writer_prose_requirements(
             out.append(
                 ProseRequirementSpec(
                     req.check_id,
-                    format_event_order_table_rule_text(),
+                    format_event_order_table_rule_text(accepted_forms_line=accepted_forms_line),
+                    required_in_setup=req.required_in_setup,
+                )
+            )
+        elif req.check_id == "c_fidelity_event_order" and accepted_forms_line == "on":
+            out.append(
+                ProseRequirementSpec(
+                    req.check_id,
+                    f"{req.rule_text}\n{ACCEPTED_FORMS_LINE_TEXT}",
                     required_in_setup=req.required_in_setup,
                 )
             )
@@ -1461,13 +1498,19 @@ def render_writer_prompt_constraints(
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
+    accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
     agents: Sequence[str] | None = None,
 ) -> str:
     """Render the `HARD CONSTRAINTS (MANDATORY):` bullet lines from `WRITER_PROSE_REQUIREMENTS`."""
     resolved_reqs = (
         requirements
         if requirements is not None
-        else get_writer_prose_requirements(goal_mode, constraint_layout=constraint_layout, agents=agents)
+        else get_writer_prose_requirements(
+            goal_mode,
+            constraint_layout=constraint_layout,
+            accepted_forms_line=accepted_forms_line,
+            agents=agents,
+        )
     )
     return "\n".join(f"- ({req.check_id}) {req.rule_text}" for req in resolved_reqs)
 
@@ -1476,12 +1519,14 @@ def compute_hard_constraints_sha256(
     goal_mode: str = DEFAULT_GOAL_MODE,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     *,
+    accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
     agents: Sequence[str] | None = None,
 ) -> str:
-    """Return the SHA-256 hex digest of the UTF-8 rendered `HARD CONSTRAINTS` block for `(goal_mode, constraint_layout)`."""
+    """Return the SHA-256 hex digest of the UTF-8 rendered `HARD CONSTRAINTS` block for `(goal_mode, constraint_layout, accepted_forms_line)`."""
     block = render_writer_prompt_constraints(
         goal_mode=goal_mode,
         constraint_layout=constraint_layout,
+        accepted_forms_line=accepted_forms_line,
         agents=agents,
     )
     return _sha256_bytes(block.encode("utf-8"))
@@ -1492,6 +1537,7 @@ def parse_writer_prompt_requirements(
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
+    accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
     agents: Sequence[str] | None = None,
 ) -> tuple[ProseRequirementSpec, ...]:
     """Parse the mandatory requirement list from `prompt_text` (expanding `{hard_constraints_block}` if unformatted) and reject any untracked requirement lines."""
@@ -1499,12 +1545,17 @@ def parse_writer_prompt_requirements(
         raise ValueError(
             f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
         )
+    if accepted_forms_line not in VALID_ACCEPTED_FORMS_LINES:
+        raise ValueError(
+            f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
+        )
     expanded_text = (
         prompt_text.replace(
             HARD_CONSTRAINTS_PLACEHOLDER,
             render_writer_prompt_constraints(
                 goal_mode=goal_mode,
                 constraint_layout=constraint_layout,
+                accepted_forms_line=accepted_forms_line,
                 agents=agents,
             ),
         )
@@ -1519,6 +1570,12 @@ def parse_writer_prompt_requirements(
         raise ValueError("Writer prompt is missing HARD CONSTRAINTS (MANDATORY) or INPUT SPECIFICATION section.")
     section = expanded_text[start_idx + len(start_marker) : end_idx]
     expected_table_rows = tuple(get_event_order_table_rows()[k] for k in EVENT_ORDER_TABLE_ROW_KINDS)
+    has_accepted_forms_in_section = (
+        accepted_forms_line == "on"
+        or (HARD_CONSTRAINTS_PLACEHOLDER not in prompt_text and ACCEPTED_FORMS_LINE_LINES[0] in section)
+    )
+    expected_extra_lines = ACCEPTED_FORMS_LINE_LINES if has_accepted_forms_in_section else ()
+    expected_total_cont = len(expected_table_rows) + len(expected_extra_lines)
     expected_table_header = format_event_order_table_header()
     table_row_idx: int | None = None
     parsed: list[ProseRequirementSpec] = []
@@ -1543,19 +1600,36 @@ def parse_writer_prompt_requirements(
                 )
                 table_row_idx += 1
                 continue
+            if (
+                table_row_idx is not None
+                and len(expected_table_rows) <= table_row_idx < expected_total_cont
+                and parsed
+                and parsed[-1].check_id == "c_fidelity_event_order"
+                and line == expected_extra_lines[table_row_idx - len(expected_table_rows)]
+            ):
+                prev_spec = parsed[-1]
+                parsed[-1] = ProseRequirementSpec(
+                    check_id=prev_spec.check_id,
+                    rule_text=f"{prev_spec.rule_text}\n{line}",
+                    required_in_setup=prev_spec.required_in_setup,
+                )
+                table_row_idx += 1
+                continue
             raise ValueError(
                 f"Unrecognized or untracked requirement line in writer prompt HARD CONSTRAINTS: {line!r}"
             )
-        if table_row_idx is not None and table_row_idx != len(expected_table_rows):
+        if table_row_idx is not None and table_row_idx != expected_total_cont:
             raise ValueError(
                 f"Incomplete c_fidelity_event_order table in writer prompt HARD CONSTRAINTS "
-                f"(got {table_row_idx} of {len(expected_table_rows)} rows)."
+                f"(got {table_row_idx} of {expected_total_cont} lines)."
             )
         table_row_idx = None
         cid = m.group(1)
         rule_body = m.group(2)
         if cid == "c_fidelity_event_order" and rule_body == expected_table_header:
             table_row_idx = 0
+        elif cid == "c_fidelity_event_order" and has_accepted_forms_in_section:
+            table_row_idx = len(expected_table_rows)
         req_in_setup = (
             WRITER_PROSE_REQUIREMENTS_BY_ID[cid].required_in_setup
             if cid in WRITER_PROSE_REQUIREMENTS_BY_ID
@@ -1568,10 +1642,10 @@ def parse_writer_prompt_requirements(
                 required_in_setup=req_in_setup,
             )
         )
-    if table_row_idx is not None and table_row_idx != len(expected_table_rows):
+    if table_row_idx is not None and table_row_idx != expected_total_cont:
         raise ValueError(
             f"Incomplete c_fidelity_event_order table in writer prompt HARD CONSTRAINTS "
-            f"(got {table_row_idx} of {len(expected_table_rows)} rows)."
+            f"(got {table_row_idx} of {expected_total_cont} lines)."
         )
     if not parsed:
         raise ValueError("No structural requirements parsed from writer prompt.")
@@ -1618,12 +1692,14 @@ def verify_prompt_and_checker_requirements_aligned(
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
+    accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
     agents: Sequence[str] | None = None,
 ) -> tuple[ProseRequirementSpec, ...]:
     """Verify that the writer prompt's parsed requirements, `WRITER_PROSE_REQUIREMENTS`, and the checker's enforced `check_id`s are identical."""
     expected_reqs = get_writer_prose_requirements(
         goal_mode,
         constraint_layout=constraint_layout,
+        accepted_forms_line=accepted_forms_line,
         agents=agents,
     )
     if prompt_text is None:
@@ -1642,6 +1718,7 @@ def verify_prompt_and_checker_requirements_aligned(
             render_writer_prompt_constraints(
                 goal_mode=goal_mode,
                 constraint_layout=constraint_layout,
+                accepted_forms_line=accepted_forms_line,
                 agents=agents,
             ),
         )
@@ -1652,6 +1729,7 @@ def verify_prompt_and_checker_requirements_aligned(
                 render_writer_prompt_constraints(
                     goal_mode=goal_mode,
                     constraint_layout=constraint_layout,
+                    accepted_forms_line=accepted_forms_line,
                     agents=agents,
                 ),
             )
@@ -1662,13 +1740,14 @@ def verify_prompt_and_checker_requirements_aligned(
         raw_text,
         goal_mode=goal_mode,
         constraint_layout=constraint_layout,
+        accepted_forms_line=accepted_forms_line,
         agents=agents,
     )
     if parsed_prompt_reqs != expected_reqs:
         prompt_ids = [r.check_id for r in parsed_prompt_reqs]
         shared_ids = [r.check_id for r in expected_reqs]
         raise ValueError(
-            f"Writer prompt requirements diverge from WRITER_PROSE_REQUIREMENTS ({goal_mode}, {constraint_layout}): prompt_ids={prompt_ids}, shared_ids={shared_ids}"
+            f"Writer prompt requirements diverge from WRITER_PROSE_REQUIREMENTS ({goal_mode}, {constraint_layout}, {accepted_forms_line}): prompt_ids={prompt_ids}, shared_ids={shared_ids}"
         )
     enforced_ids = set(get_checker_enforced_check_ids())
     shared_id_set = {r.check_id for r in expected_reqs}
@@ -1712,6 +1791,39 @@ VALID_FAULT_CHECK_IDS: frozenset[str] = frozenset(
     set(WRITER_PROSE_REQUIREMENTS_BY_ID.keys())
     | {CTX_OVER_CAP_CHECK_ID, "length_stop", "max_num_ctx_exceeded"}
 )
+EVENT_FIDELITY_SUBRULE_IDS: frozenset[str] = frozenset(
+    {
+        "defect_1_object",
+        "defect_2_occluder_blocked",
+        "defect_3_move_path",
+        "defect_4_actor_subject",
+        "defect_5_say_clause",
+        "defect_6_single_quote",
+        "defect_7_say_room",
+        "fix_quote_equals_utterance",
+        "fix_no_fronted_bystander",
+        "fix_no_fronted_container_see",
+        "m2_path",
+        "m3_by_agent",
+        "v2_hid",
+        "p1_phrase",
+        "actor_not_subject",
+        "wrong_verb",
+        "missing_from",
+        "missing_to",
+        "from_after_to",
+        "missing_room",
+        "other_room",
+        "missing_db",
+        "db_in_wrong_clause",
+        "missing_quote",
+        "bundled_event",
+        "negation_or_hedge",
+        "occluder_clause",
+        "other_event_fidelity",
+    }
+)
+VALID_FAULT_RULE_IDS: frozenset[str] = VALID_FAULT_CHECK_IDS | EVENT_FIDELITY_SUBRULE_IDS
 
 
 @dataclass(frozen=True)
@@ -1722,11 +1834,18 @@ class ProseFaultRecord:
     event_index: int | None = None
     event_kind: str | None = None
     failure_kind: str = "altered"
+    rule_id: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.check_id, str) or self.check_id not in VALID_FAULT_CHECK_IDS:
             raise ValueError(
                 f"ProseFaultRecord.check_id must be a registered check_id, got {self.check_id!r}."
+            )
+        if not self.rule_id:
+            object.__setattr__(self, "rule_id", self.check_id)
+        if not isinstance(self.rule_id, str) or self.rule_id not in VALID_FAULT_RULE_IDS:
+            raise ValueError(
+                f"ProseFaultRecord.rule_id must be a registered rule_id, got {self.rule_id!r}."
             )
         if self.event_index is not None and (
             not isinstance(self.event_index, int)
@@ -1748,13 +1867,16 @@ class ProseFaultRecord:
                 f"ProseFaultRecord.failure_kind must be one of {sorted(VALID_FAILURE_KINDS)}, got {self.failure_kind!r}."
             )
 
-    def to_dict(self) -> dict[str, object]:
-        return {
+    def to_dict(self, *, include_rule_id: bool = False) -> dict[str, object]:
+        out: dict[str, object] = {
             "check_id": self.check_id,
             "event_index": self.event_index,
             "event_kind": self.event_kind,
             "failure_kind": self.failure_kind,
         }
+        if include_rule_id:
+            out["rule_id"] = self.rule_id
+        return out
 
 
 def summarize_fault_vector_counts(
@@ -1790,10 +1912,12 @@ def _raise_prose_check_error(
     failure_kind: str = "altered",
     event_variant: str | None = None,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    rule_id: str | None = None,
 ) -> None:
     """Raise `RenderCheckError` after verifying `check_id` is registered in `WRITER_PROSE_REQUIREMENTS`, or record a `ProseFaultRecord` in collect-all mode."""
     if check_id not in WRITER_PROSE_REQUIREMENTS_BY_ID:
         raise RuntimeError(f"Unregistered prose check_id {check_id!r} not in WRITER_PROSE_REQUIREMENTS.")
+    resolved_rule_id = rule_id if rule_id is not None else check_id
     collector = _ACTIVE_FAULT_COLLECTOR.get()
     if collector is not None:
         fault = ProseFaultRecord(
@@ -1801,6 +1925,7 @@ def _raise_prose_check_error(
             event_index=event_index,
             event_kind=event_kind,
             failure_kind=failure_kind,
+            rule_id=resolved_rule_id,
         )
         if fault not in collector:
             collector.append(fault)
@@ -1814,6 +1939,7 @@ def _raise_prose_check_error(
         failure_kind=failure_kind,
         event_variant=event_variant,
         goal_mode=goal_mode,
+        rule_id=resolved_rule_id,
     )
 
 
@@ -2061,6 +2187,7 @@ def load_writer_prompt_template(
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
+    accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
     agents: Sequence[str] | None = None,
 ) -> str:
     """Load the `qwen3.6:35b` writer prompt text file, expand `{hard_constraints_block}` from `WRITER_PROSE_REQUIREMENTS`, and verify alignment."""
@@ -2069,6 +2196,10 @@ def load_writer_prompt_template(
     if constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
         raise ValueError(
             f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
+        )
+    if accepted_forms_line not in VALID_ACCEPTED_FORMS_LINES:
+        raise ValueError(
+            f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
         )
     target = path or WRITER_PROMPT_PATH
     raw_disk_text = target.read_text(encoding="utf-8")
@@ -2088,6 +2219,7 @@ def load_writer_prompt_template(
             render_writer_prompt_constraints(
                 goal_mode=goal_mode,
                 constraint_layout=constraint_layout,
+                accepted_forms_line=accepted_forms_line,
                 agents=agents,
             ),
         )
@@ -2109,6 +2241,7 @@ def load_writer_prompt_template(
             text,
             goal_mode=goal_mode,
             constraint_layout=constraint_layout,
+            accepted_forms_line=accepted_forms_line,
             agents=agents,
         )
     return text
@@ -2185,6 +2318,7 @@ def format_writer_prompt(
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
+    accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
 ) -> str:
     """Format the `qwen3.6:35b` writer prompt for `world` and `focal_agent`.
 
@@ -2198,12 +2332,17 @@ def format_writer_prompt(
         raise ValueError(
             f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
         )
+    if accepted_forms_line not in VALID_ACCEPTED_FORMS_LINES:
+        raise ValueError(
+            f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
+        )
     raw_template = (
         template
         if template is not None
         else load_writer_prompt_template(
             goal_mode=goal_mode,
             constraint_layout=constraint_layout,
+            accepted_forms_line=accepted_forms_line,
             agents=world.agents,
         )
     )
@@ -2232,10 +2371,31 @@ def format_writer_prompt(
     }
     event_log = project_events_for_writer(world.events, world=world)
 
-    line_event_order_bullet = (
+    line_event_order_bullet_off = (
         f"- (c_fidelity_event_order) {WRITER_PROSE_REQUIREMENTS_BY_ID['c_fidelity_event_order'].rule_text}"
     )
-    table_event_order_bullet = f"- (c_fidelity_event_order) {format_event_order_table_rule_text()}"
+    line_event_order_bullet_on = f"{line_event_order_bullet_off}\n{ACCEPTED_FORMS_LINE_TEXT}"
+    line_event_order_bullet = (
+        line_event_order_bullet_on if accepted_forms_line == "on" else line_event_order_bullet_off
+    )
+    table_event_order_bullet_off = (
+        f"- (c_fidelity_event_order) {format_event_order_table_rule_text(accepted_forms_line='off')}"
+    )
+    table_event_order_bullet_on = (
+        f"- (c_fidelity_event_order) {format_event_order_table_rule_text(accepted_forms_line='on')}"
+    )
+    table_event_order_bullet = (
+        table_event_order_bullet_on if accepted_forms_line == "on" else table_event_order_bullet_off
+    )
+    target_event_order_bullet = (
+        table_event_order_bullet if constraint_layout == "table" else line_event_order_bullet
+    )
+    candidate_event_order_bullets = (
+        table_event_order_bullet_on,
+        table_event_order_bullet_off,
+        line_event_order_bullet_on,
+        line_event_order_bullet_off,
+    )
 
     if HARD_CONSTRAINTS_PLACEHOLDER in raw_template:
         expanded_template = raw_template.replace(
@@ -2243,6 +2403,7 @@ def format_writer_prompt(
             render_writer_prompt_constraints(
                 goal_mode=goal_mode,
                 constraint_layout=constraint_layout,
+                accepted_forms_line=accepted_forms_line,
                 agents=world.agents,
             ),
         )
@@ -2274,10 +2435,10 @@ def format_writer_prompt(
                 format_splice_output_format_line(world.agents),
             )
         )
-        if constraint_layout == "table":
-            expanded_template = expanded_template.replace(line_event_order_bullet, table_event_order_bullet)
-        else:
-            expanded_template = expanded_template.replace(table_event_order_bullet, line_event_order_bullet)
+        for cand_bullet in candidate_event_order_bullets:
+            if cand_bullet in expanded_template:
+                expanded_template = expanded_template.replace(cand_bullet, target_event_order_bullet, 1)
+                break
     else:
         expanded_template = (
             raw_template.replace(
@@ -2301,10 +2462,10 @@ def format_writer_prompt(
                 COPY_OUTPUT_FORMAT_LINE,
             )
         )
-        if constraint_layout == "table":
-            expanded_template = expanded_template.replace(line_event_order_bullet, table_event_order_bullet)
-        else:
-            expanded_template = expanded_template.replace(table_event_order_bullet, line_event_order_bullet)
+        for cand_bullet in candidate_event_order_bullets:
+            if cand_bullet in expanded_template:
+                expanded_template = expanded_template.replace(cand_bullet, target_event_order_bullet, 1)
+                break
     formatted = (
         expanded_template.replace("{focal_agent}", focal_agent)
         .replace("{noise_threshold}", str(world.noise_threshold))
@@ -2508,6 +2669,212 @@ def _extract_quoted_spans(s_low: str) -> list[str]:
     return spans
 
 
+def _normalize_utterance_or_quote(s: str) -> str:
+    """Lowercase, trim outer whitespace, and strip at most one trailing punctuation mark from `.,!?`."""
+    cleaned = s.strip().lower()
+    if cleaned and cleaned[-1] in ".,!?":
+        cleaned = cleaned[:-1]
+    return cleaned
+
+
+def _quote_matches_utterance_exactly(quoted_spans: Sequence[str], utterance: str) -> bool:
+    """Return True iff `quoted_spans` has exactly one quoted span and it equals `utterance` after `_normalize_utterance_or_quote`."""
+    if len(quoted_spans) != 1:
+        return False
+    return _normalize_utterance_or_quote(quoted_spans[0]) == _normalize_utterance_or_quote(utterance)
+
+
+def _has_fronted_bystander_in_prefix(
+    prefix_low: str,
+    actor: str,
+    all_parties: Sequence[str],
+) -> bool:
+    """Correction 2: return True if any party other than `actor` (or any `with/beside/alongside <party>`) appears in `prefix_low`."""
+    actor_low = actor.lower()
+    for p in all_parties:
+        p_low = p.lower()
+        p_esc = re.escape(p_low)
+        if p_low != actor_low and re.search(rf"\b{p_esc}\b", prefix_low) is not None:
+            return True
+        if re.search(rf"\b(?:with|beside|alongside)\s+{p_esc}\b", prefix_low) is not None:
+            return True
+    return False
+
+
+_P1_COMMA_PHRASE_RE = re.compile(
+    r"^\s*,\s*(?P<phrase>[^,;:.!?]+?)\s*,\s*(?:(?:then|also|soon|later|first|next|again|still|even|just|[a-z]+ly)\s+)*$",
+    re.IGNORECASE,
+)
+_P1_FORBIDDEN_CLAUSE_WORDS: frozenset[str] = frozenset(
+    {
+        "who",
+        "whom",
+        "whose",
+        "which",
+        "that",
+        "where",
+        "when",
+        "while",
+        "whereas",
+        "although",
+        "though",
+        "because",
+        "since",
+        "if",
+        "unless",
+        "until",
+        "before",
+        "after",
+        "as",
+        "was",
+        "were",
+        "is",
+        "are",
+        "had",
+        "did",
+        "tried",
+        "trying",
+        "attempt",
+        "attempted",
+        "attempting",
+    }
+)
+_P1_EXTRA_EVENT_VERB_WORDS: frozenset[str] = frozenset(
+    {
+        "seen",
+        "taken",
+        "spoken",
+        "written",
+        "sent",
+        "told",
+        "hidden",
+        "hid",
+        "blocked",
+        "blocking",
+        "obscured",
+        "concealed",
+    }
+)
+
+
+_P1_HEDGE_AND_MODAL_WORDS: frozenset[str] = frozenset(
+    {
+        "perhaps",
+        "maybe",
+        "might",
+        "may",
+        "could",
+        "would",
+        "should",
+        "likely",
+        "probably",
+        "possibly",
+        "apparently",
+        "seemingly",
+        "supposedly",
+    }
+)
+_P1_HEDGE_PHRASES: tuple[str, ...] = (
+    "it seems",
+    "it seemed",
+    "i think",
+    "i believe",
+    "i guess",
+)
+
+
+def _actor_to_verb_matches_p1_phrase(
+    between: str,
+    ev: Event | None,
+    all_parties: Sequence[str] = (),
+    world: World | None = None,
+) -> bool:
+    """Widening P1 (Profile D): return True if `between` is a single comma-delimited descriptive phrase (`<= 6` words)
+    with no party name, room or container name, object/occluder/fixture, event verb, or negation/hedge/modal word."""
+    if ev is None:
+        return False
+    m = _P1_COMMA_PHRASE_RE.match(between)
+    if m is None:
+        return False
+    phrase = m.group("phrase").strip().lower()
+    if not phrase:
+        return False
+    words = re.findall(r"[a-z0-9']+", phrase)
+    if not (1 <= len(words) <= 6):
+        return False
+    if _NEGATION_PATTERN.search(phrase) is not None:
+        return False
+    word_set = {w.strip("'") for w in words}
+    if word_set & _NON_FACTIVE_OR_HEDGE_WORDS:
+        return False
+    if word_set & _P1_HEDGE_AND_MODAL_WORDS:
+        return False
+    norm_phrase_words = " ".join(w.strip("'") for w in words)
+    for hp in _P1_HEDGE_PHRASES:
+        if re.search(rf"\b{re.escape(hp)}\b", norm_phrase_words) is not None:
+            return False
+    if word_set & _P1_FORBIDDEN_CLAUSE_WORDS:
+        return False
+
+    # No party name
+    party_names = {p.lower() for p in all_parties} | {p.lower() for p in ALL_KNOWN_PARTY_NAMES}
+    if ev.actor:
+        party_names.add(ev.actor.lower())
+    if ev.recipient:
+        party_names.add(ev.recipient.lower())
+    for p_low in party_names:
+        if p_low and re.search(rf"\b{re.escape(p_low)}\b", phrase) is not None:
+            return False
+
+    # No room, container, object, occluder, fixture, or station name
+    forbidden_spans: set[str] = {
+        CONTAINER_BAY_STATION.lower(),
+        FAR_SIDE_ALCOVE_STATION.lower(),
+    }
+    forbidden_spans |= _all_containers_set(world)
+    for loc_piece in (ev.room, ev.from_location, ev.to_location, ev.target_object, ev.occluder):
+        if loc_piece:
+            forbidden_spans.add(loc_piece.lower())
+    if world is not None:
+        forbidden_spans.update(r.lower() for r in world.rooms)
+        forbidden_spans.update(o.lower() for o in world.objects)
+        forbidden_spans.update(occ.lower() for occ in world.occluders_by_room.values() if occ)
+        forbidden_spans.update(fix.lower() for fix in world.fixtures_by_room.values() if fix)
+    else:
+        for dom in DOMAINS:
+            forbidden_spans.update(r.lower() for r in dom.rooms)
+            forbidden_spans.update(o.lower() for o in dom.objects)
+            forbidden_spans.update(occ.lower() for occ in dom.occluders if occ)
+            forbidden_spans.update(fix.lower() for fix in dom.fixtures if fix)
+    if "room" in word_set:
+        return False
+    for span in forbidden_spans:
+        if span and re.search(rf"\b{re.escape(span)}\b", phrase) is not None:
+            return False
+
+    # No event verb (finite, base, gerund/participle, or passive participle)
+    event_verb_words: set[str] = set(_P1_EXTRA_EVENT_VERB_WORDS)
+    for v_seq in _ACTION_VERBS_BY_KIND.values():
+        for v in v_seq:
+            if " " not in v:
+                event_verb_words.add(v.lower())
+    for v_set in _BASE_VERBS_BY_KIND.values():
+        for v in v_set:
+            if " " not in v:
+                event_verb_words.add(v.lower())
+    for g_set in _GERUNDS_BY_KIND.values():
+        for g in g_set:
+            if " " not in g:
+                event_verb_words.add(g.lower())
+    event_verb_words.update(v.lower() for v in SIGHTING_VERBS if " " not in v)
+    event_verb_words.update(v.lower() for v in OCCLUDER_MANIPULATION_VERBS if " " not in v)
+    event_verb_words.update(v.lower() for v in _PASSIVE_MOVE_VERBS if " " not in v)
+    if word_set & event_verb_words:
+        return False
+
+    return True
+
+
 _NON_FACTIVE_OR_HEDGE_WORDS: frozenset[str] = frozenset(
     {
         "almost",
@@ -2560,6 +2927,9 @@ def _find_actor_subject_verb_matches(
     all_parties: Sequence[str],
     *,
     ev: Event | None = None,
+    world: World | None = None,
+    check_negation: bool = True,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> list[tuple[re.Match[str], re.Match[str]]]:
     """Return all `(actor_match, verb_match)` pairs where `actor` is the grammatical subject of `verb` in its clause."""
     if not action_verbs:
@@ -2576,6 +2946,8 @@ def _find_actor_subject_verb_matches(
         if _PRE_ACTOR_NON_SUBJECT_PREP_RE.search(before_actor) is not None:
             continue
         if _PRE_ACTOR_INVERSION_OR_SUBORD_RE.search(before_actor) is not None:
+            continue
+        if _has_fronted_bystander_in_prefix(before_actor, actor, all_parties):
             continue
         # Reject if an earlier clause in the same simple clause before `actor` embeds a propositional attitude / hedge
         clause_prefix = re.split(r"[;:.!?]", before_actor)[-1]
@@ -2597,7 +2969,10 @@ def _find_actor_subject_verb_matches(
                 ):
                     continue
             else:
-                if _ACTOR_TO_VERB_ALLOWED_BETWEEN_RE.match(between) is None:
+                if _ACTOR_TO_VERB_ALLOWED_BETWEEN_RE.match(between) is None and not (
+                    checker_profile == "d"
+                    and _actor_to_verb_matches_p1_phrase(between, ev, all_parties, world)
+                ):
                     continue
                 between_words = re.findall(r"[a-z]+", between.lower())
                 if any(w in _NON_FACTIVE_OR_HEDGE_WORDS for w in between_words):
@@ -2609,12 +2984,16 @@ def _find_actor_subject_verb_matches(
             )
             if intervening_party:
                 continue
-            if ev is not None and _verb_is_scoped_by_negation(
-                s_low,
-                m_act.start(),
-                m_act.end() + m_verb.start(),
-                m_act.end() + m_verb.end(),
-                ev,
+            if (
+                check_negation
+                and ev is not None
+                and _verb_is_scoped_by_negation(
+                    s_low,
+                    m_act.start(),
+                    m_act.end() + m_verb.start(),
+                    m_act.end() + m_verb.end(),
+                    ev,
+                )
             ):
                 continue
             matches.append((m_act, m_verb))
@@ -2628,6 +3007,9 @@ def _actor_precedes_verb_as_subject(
     all_parties: Sequence[str],
     *,
     ev: Event | None = None,
+    world: World | None = None,
+    check_negation: bool = True,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> bool:
     """Return True if `actor` appears as the grammatical subject immediately preceding an unnegated action verb in `s_low`."""
     if not action_verbs:
@@ -2639,6 +3021,9 @@ def _actor_precedes_verb_as_subject(
             action_verbs,
             all_parties,
             ev=ev,
+            world=world,
+            check_negation=check_negation,
+            checker_profile=checker_profile,
         )
     )
 
@@ -2834,17 +3219,37 @@ def _has_forbidden_event_negation(
     ev: Event,
     all_parties: Sequence[str] = (),
     *,
+    world: World | None = None,
     action_verbs: Sequence[str] | None = None,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> bool:
     """Return True if the event's verb in `frame_low` is scoped by any negation from `NEGATION_PHRASES` outside the allowed occluded-see blocking clause."""
     parties = all_parties if all_parties else (ev.actor, *([ev.recipient] if ev.recipient else []))
     verbs = action_verbs if action_verbs is not None else _ACTION_VERBS_BY_KIND.get(ev.kind, ())
-    if not _actor_precedes_verb_as_subject(frame_low, ev.actor, verbs, parties):
+    if not _actor_precedes_verb_as_subject(
+        frame_low,
+        ev.actor,
+        verbs,
+        parties,
+        ev=ev,
+        world=world,
+        check_negation=False,
+        checker_profile=checker_profile,
+    ):
         cleaned = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", frame_low)
         if ev.kind == "see" and ev.occluded and ev.occluder:
             cleaned = _COULD_NOT_SEE_RE.sub("", cleaned)
         return _NEGATION_PATTERN.search(cleaned) is not None
-    return not _actor_precedes_verb_as_subject(frame_low, ev.actor, verbs, parties, ev=ev)
+    return not _actor_precedes_verb_as_subject(
+        frame_low,
+        ev.actor,
+        verbs,
+        parties,
+        ev=ev,
+        world=world,
+        check_negation=True,
+        checker_profile=checker_profile,
+    )
 
 
 def _sentence_has_folded_from_and_arrival(
@@ -3035,7 +3440,9 @@ _BUNDLED_VERB_ALT: str = "|".join(re.escape(v) for v in _BUNDLED_OR_TRAILING_ACT
 _TRAILING_OR_BUNDLED_EVENT_RE = re.compile(
     rf"(?:,\s*(?:which|where|who)\s+(?!had\s+not\b|was\s+not\b|were\s+not\b|is\s+not\b|are\s+not\b|did\s+not\b|nobody\b|no\s+one\b|never\b)(?:(?:he|she|they|[a-z]+)\s+)+(?:then\s+)?(?:{_BUNDLED_VERB_ALT})\b"
     rf"|(?:,\s*)?\b(?:and|so)\s+(?:(?:he|she|they|[a-z]+)\s+)?(?:then\s+)?(?:{_BUNDLED_VERB_ALT})\b"
-    rf"|\band\s+then\s+(?:{_BUNDLED_VERB_ALT})\b"
+    rf"|\band\s+then\b"
+    rf"|,\s*and\s+(?:the|a|an)\s+[a-z0-9_ -]+?[.!?]?\s*$"
+    rf"|\bafter\s+(?:(?:the|a|an)\s+)?(?:he|she|they|[a-z]+)\s+(?:then\s+)?(?:{_BUNDLED_VERB_ALT})\b"
     rf"|;\s*[^.;]*?\b(?:{_BUNDLED_VERB_ALT})\b)",
     re.IGNORECASE,
 )
@@ -3071,6 +3478,8 @@ def _sentence_matches_station_move(
     s_low: str,
     ev: Event,
     all_parties: Sequence[str] = (),
+    *,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> bool:
     """Card ue: True if `s_low` states the station change `ev` as the actor stepping `behind`/`around` the occluder
     to the destination station (the actor-as-subject gate on a move verb has already passed). The occluder as the
@@ -3090,7 +3499,12 @@ def _sentence_matches_station_move(
     from_esc = re.escape(ev.from_location.lower())
     parties = all_parties if all_parties else (ev.actor,)
     subj_matches = _find_actor_subject_verb_matches(
-        frame_low, ev.actor, STATION_CHANGE_PERSON_VERBS, parties, ev=ev
+        frame_low,
+        ev.actor,
+        STATION_CHANGE_PERSON_VERBS,
+        parties,
+        ev=ev,
+        checker_profile=checker_profile,
     )
     if not subj_matches:
         return False
@@ -3123,7 +3537,12 @@ def _sentence_matches_station_move(
     return False
 
 
-def _sentence_states_occluder_blocked_actor_sight(s_low: str, ev: Event) -> bool:
+def _sentence_states_occluder_blocked_actor_sight(
+    s_low: str,
+    ev: Event,
+    all_parties: Sequence[str] = (),
+    all_containers: set[str] | None = None,
+) -> bool:
     """Card ue: True if `s_low` states the occluded see `ev` in the possessive form, `the <occluder> blocked
     <actor>'s sight|view|line of sight of the <container> from the far-side alcove`. The agentless form (`blocked
     sight of ...` with no actor) is not accepted: perceptual records are per actor."""
@@ -3146,6 +3565,13 @@ def _sentence_states_occluder_blocked_actor_sight(s_low: str, ev: Event) -> bool
     if m is None:
         return False
     prefix = frame_low[: m.start()]
+    parties = all_parties if all_parties else (ev.actor,)
+    if _has_fronted_bystander_in_prefix(prefix, ev.actor, parties):
+        return False
+    if all_containers is not None and any(
+        re.search(rf"\b{re.escape(c)}\b", prefix) is not None for c in all_containers
+    ):
+        return False
     # Allow `noticed that the <occluder> blocked ...` (handled here or via `noticed`), but refuse hedges/non-factives
     if re.search(
         r"\b(?:thought|believed|imagined|supposed|claimed|pretended|almost|nearly|barely|hardly|had)\b",
@@ -3153,6 +3579,205 @@ def _sentence_states_occluder_blocked_actor_sight(s_low: str, ev: Event) -> bool
     ):
         return False
     return True
+
+
+_PASSIVE_MOVE_VERBS: tuple[str, ...] = (
+    "moved",
+    "placed",
+    "put",
+    "shifted",
+    "transferred",
+    "adjusted",
+    "turned",
+    "pulled",
+    "set",
+    "relocated",
+    "carried",
+    "taken",
+)
+
+
+def _matches_m2_fronted_path(
+    before_actor: str,
+    clause_after_obj: str,
+    ev: Event,
+) -> bool:
+    """Widening M2 (Profile D): return True if `before_actor` states a fronted `from <from_location> to <to_location>` path for `ev`."""
+    if not (ev.from_location and ev.to_location and ev.room):
+        return False
+    if ";" in before_actor or ":" in before_actor:
+        return False
+    from_esc = re.escape(ev.from_location.lower())
+    to_esc = re.escape(ev.to_location.lower())
+    room_esc = re.escape(ev.room.lower())
+    actor_esc = re.escape(ev.actor.lower())
+    lead_opt = rf"(?:(?:from\s+{actor_esc}(?:'s|’s)\s+station|next)\s*,\s*)?"
+    room_re = rf"(?:in|inside|at)\s+{_ARTICLE_OPT_RE}{room_esc}"
+    path_re = rf"from\s+{_ARTICLE_OPT_RE}{from_esc}\s+(?:to|into|onto)\s+{_ARTICLE_OPT_RE}{to_esc}"
+    m_front = re.match(
+        rf"^\s*{lead_opt}(?:(?:{room_re}\s*,\s*)?{path_re}(?:\s+{room_re})?)\s*,\s*$",
+        before_actor,
+        re.IGNORECASE,
+    )
+    if m_front is None:
+        return False
+    # After the object, no conflicting container/location phrase may appear
+    cleaned_after = _strip_benign_post_arg_adjuncts(clause_after_obj, ev)
+    if ev.occluded and ev.occluder:
+        return ev.occluder.lower() in clause_after_obj and _occluder_governs_blocked(
+            clause_after_obj, ev.occluder
+        )
+    return (
+        re.match(
+            rf"^\s*(?:{room_re}\s*)?(?:in\s+open\s+view(?:\s+at\s+{_ARTICLE_OPT_RE}{re.escape(CONTAINER_BAY_STATION.lower())})?\s*)?[.!?]?\s*$",
+            cleaned_after,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _sentence_matches_passive_move_by_agent(
+    frame_low: str,
+    ev: Event,
+    all_parties: Sequence[str],
+    world: World | None,
+) -> bool:
+    """Widening M3 (Profile D): return True if `frame_low` states a normal `move` as `<target_object> was <verb> from <from> to <to> by <actor>`."""
+    if not (ev.kind == "move" and ev.target_object and ev.from_location and ev.to_location):
+        return False
+    if is_station_transition_event(ev, world):
+        return False
+    if _has_bundled_or_reordered_clause(frame_low, ev.actor):
+        return False
+    cleaned_neg = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", frame_low)
+    cleaned_neg = _FRONTED_TIME_PLACE_NEG_RE.sub("", cleaned_neg)
+    if _NEGATION_PATTERN.search(cleaned_neg) is not None:
+        return False
+    if any(w in _NON_FACTIVE_OR_HEDGE_WORDS for w in re.findall(r"[a-z]+", frame_low)):
+        return False
+    all_containers = _all_containers_set(world)
+    allowed_move_containers = {ev.from_location.lower(), ev.to_location.lower()}
+    for other_c in all_containers:
+        if other_c not in allowed_move_containers and other_c in frame_low:
+            return False
+    target_esc = re.escape(ev.target_object.lower())
+    pverb_alt = "|".join(re.escape(v) for v in _PASSIVE_MOVE_VERBS)
+    actor_esc = re.escape(ev.actor.lower())
+    from_esc = re.escape(ev.from_location.lower())
+    for m_pass in re.finditer(
+        rf"\b(?P<tgt>{target_esc})\s+was\s+(?:[a-z]+ly\s+)?(?P<verb>{pverb_alt})\b",
+        frame_low,
+    ):
+        before_tgt = frame_low[: m_pass.start("tgt")]
+        if _PRE_ACTOR_NON_SUBJECT_PREP_RE.search(before_tgt) is not None:
+            continue
+        if _PRE_ACTOR_INVERSION_OR_SUBORD_RE.search(before_tgt) is not None:
+            continue
+        if _has_fronted_bystander_in_prefix(before_tgt, ev.actor, all_parties):
+            continue
+        if re.search(rf"\b(?:from|out of)\s+{_ARTICLE_OPT_RE}{from_esc}\b", before_tgt) is not None:
+            continue
+        after_verb = frame_low[m_pass.end() :]
+        if re.search(r"\b(?:while|whereas|although|though)\b", after_verb) is not None:
+            continue
+        clause_after = re.split(
+            r"[;:]|,\s*(?:and|but|yet|so|while|whereas|although|though)\b",
+            after_verb,
+            maxsplit=1,
+        )[0]
+        if not _ordered_from_to_positions(
+            clause_after,
+            ev.from_location,
+            ev.to_location,
+            require_from_prep=True,
+        ):
+            continue
+        if re.search(rf"\bby\s+{actor_esc}\b", clause_after) is None:
+            continue
+        if any(
+            p.lower() != ev.actor.lower()
+            and re.search(rf"\b{re.escape(p.lower())}\b", clause_after) is not None
+            for p in all_parties
+        ):
+            continue
+        if ev.occluded and ev.occluder:
+            if ev.occluder.lower() not in clause_after or not _occluder_governs_blocked(
+                clause_after, ev.occluder
+            ):
+                continue
+        else:
+            if any(bp in frame_low for bp in BLOCKING_PHRASES):
+                return False
+        return True
+    return False
+
+
+def _sentence_matches_v2_occluded_see_hid(
+    frame_low: str,
+    ev: Event,
+    all_parties: Sequence[str],
+    world: World | None,
+) -> bool:
+    """Widening V2 (Profile D): return True if `frame_low` states an occluded `see` as `the <occluder> hid the <target_object> from <actor>`."""
+    if not (ev.kind == "see" and ev.occluded and ev.occluder and ev.target_object):
+        return False
+    if _has_bundled_or_reordered_clause(frame_low, ev.actor):
+        return False
+    cleaned_neg = _ADJACENT_ROOMS_COULD_NOT_HEAR_RE.sub("", frame_low)
+    cleaned_neg = _FRONTED_TIME_PLACE_NEG_RE.sub("", cleaned_neg)
+    if _NEGATION_PATTERN.search(cleaned_neg) is not None:
+        return False
+    if any(w in _NON_FACTIVE_OR_HEDGE_WORDS for w in re.findall(r"[a-z]+", frame_low)):
+        return False
+    if _sentence_asserts_sighting_of_target(frame_low, ev, all_parties):
+        return False
+    if FAR_SIDE_ALCOVE_STATION.lower() not in frame_low:
+        return False
+    all_containers = _all_containers_set(world)
+    allowed_occ_containers = {
+        c.lower()
+        for c in (ev.target_object, ev.from_location, ev.to_location)
+        if c
+    }
+    for other_c in all_containers:
+        if other_c not in allowed_occ_containers and other_c in frame_low:
+            return False
+    occ_esc = re.escape(ev.occluder.lower())
+    tgt_esc = re.escape(ev.target_object.lower())
+    actor_esc = re.escape(ev.actor.lower())
+    for m_v2 in re.finditer(
+        rf"\b(?P<occ>{occ_esc})\s+hid\s+{_ARTICLE_OPT_RE}(?P<tgt>{tgt_esc})\s+from\s+(?P<act>{actor_esc})\b",
+        frame_low,
+    ):
+        before_occ = frame_low[: m_v2.start("occ")]
+        if _PRE_ACTOR_NON_SUBJECT_PREP_RE.search(before_occ) is not None:
+            continue
+        if _PRE_ACTOR_INVERSION_OR_SUBORD_RE.search(before_occ) is not None:
+            continue
+        if _has_fronted_bystander_in_prefix(before_occ, ev.actor, all_parties):
+            continue
+        if any(re.search(rf"\b{re.escape(c)}\b", before_occ) is not None for c in all_containers):
+            continue
+        after_v2 = frame_low[m_v2.end() :]
+        if re.search(r"\b(?:while|whereas|although|though)\b", after_v2) is not None:
+            continue
+        if (
+            re.search(
+                rf",\s*who\s+(?:then\s+)?(?:{'|'.join(re.escape(v) for v in OCCLUDED_SEE_REFUSED_SIGHTING_VERBS)})\b",
+                after_v2,
+            )
+            is not None
+        ):
+            continue
+        if any(
+            p.lower() != ev.actor.lower()
+            and re.search(rf"\b{re.escape(p.lower())}\b", after_v2) is not None
+            for p in all_parties
+        ):
+            continue
+        return True
+    return False
 
 
 def _sentence_asserts_sighting_of_target(frame_low: str, ev: Event, all_parties: Sequence[str]) -> bool:
@@ -3177,6 +3802,8 @@ def _preceding_sentence_is_matching_leave(
     ev: Event,
     noise_threshold: int,
     world: World | None = None,
+    *,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> bool:
     """Return True if `prev_event` and `prev_sentence` form the matching `leave` by the same actor naming `ev.from_location`."""
     if prev_sentence is None or prev_event is None:
@@ -3193,7 +3820,13 @@ def _preceding_sentence_is_matching_leave(
         or prev_event.to_location.lower() != ev.to_location.lower()
     ):
         return False
-    if not _sentence_matches_event(prev_sentence, prev_event, noise_threshold, world=world):
+    if not _sentence_matches_event(
+        prev_sentence,
+        prev_event,
+        noise_threshold,
+        world=world,
+        checker_profile=checker_profile,
+    ):
         return False
     return bool(re.search(rf"\b{re.escape(ev.from_location.lower())}\b", prev_sentence.lower()))
 
@@ -3204,6 +3837,8 @@ def _sentence_matches_folded_leave_enter(
     ev: Event,
     noise_threshold: int,
     world: World | None = None,
+    *,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> bool:
     """Return True if `prev_sentence` is a folded movement sentence satisfying both consecutive `prev_event` (leave) and `ev` (enter)."""
     if (
@@ -3221,9 +3856,21 @@ def _sentence_matches_folded_leave_enter(
         or prev_event.to_location.lower() != ev.to_location.lower()
     ):
         return False
-    if not _sentence_matches_event(prev_sentence, prev_event, noise_threshold, world=world):
+    if not _sentence_matches_event(
+        prev_sentence,
+        prev_event,
+        noise_threshold,
+        world=world,
+        checker_profile=checker_profile,
+    ):
         return False
-    if not _sentence_matches_event(prev_sentence, ev, noise_threshold, world=world):
+    if not _sentence_matches_event(
+        prev_sentence,
+        ev,
+        noise_threshold,
+        world=world,
+        checker_profile=checker_profile,
+    ):
         return False
     return _sentence_has_folded_from_and_arrival(
         prev_sentence.lower(),
@@ -3250,8 +3897,13 @@ def _sentence_matches_event(
     prev_event: Event | None = None,
     next_sentence: str | None = None,
     next_event: Event | None = None,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> bool:
     """Return True if `sentence` states `ev` with role-bound actor, action, object, ordered from/to, and room."""
+    if checker_profile not in VALID_CHECKER_PROFILES:
+        raise ValueError(
+            f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
+        )
     s_low = sentence.lower()
     s_unquoted_low = _strip_quoted_spans(s_low)
     frame_low = s_unquoted_low
@@ -3260,6 +3912,7 @@ def _sentence_matches_event(
         if world is not None
         else (ev.actor, *([ev.recipient] if ev.recipient else []))
     )
+    all_containers = _all_containers_set(world)
     is_folded_movement = (
         ev.kind in ("enter", "leave")
         and bool(ev.from_location and ev.to_location)
@@ -3284,6 +3937,7 @@ def _sentence_matches_event(
             _FOLDED_LEAVE_ENTER_VERBS,
             all_parties,
             ev=next_event,
+            checker_profile=checker_profile,
         )
         and _sentence_has_folded_from_and_arrival(
             _strip_quoted_spans(next_sentence.lower()),
@@ -3302,6 +3956,7 @@ def _sentence_matches_event(
             _ACTION_VERBS_BY_KIND["leave"],
             all_parties,
             ev=ev,
+            checker_profile=checker_profile,
         )
     ):
         is_folded_movement = False
@@ -3313,13 +3968,48 @@ def _sentence_matches_event(
         if is_station_move
         else _ACTION_VERBS_BY_KIND.get(ev.kind, ())
     )
-    if _has_forbidden_event_negation(frame_low, ev, all_parties, action_verbs=action_verbs):
+    if _has_forbidden_event_negation(
+        frame_low,
+        ev,
+        all_parties,
+        world=world,
+        action_verbs=action_verbs,
+        checker_profile=checker_profile,
+    ):
         return False
     # Card ue: the possessive occluded-see form has the actor in possessive position, not as the subject of a
     # sighting verb (`the <occluder> blocked <actor>'s sight of the <container> from the far-side alcove`).
-    possessive_occluded_see = _sentence_states_occluder_blocked_actor_sight(s_low, ev)
-    if not possessive_occluded_see and not _actor_precedes_verb_as_subject(
-        frame_low, ev.actor, action_verbs, all_parties, ev=ev
+    possessive_occluded_see = _sentence_states_occluder_blocked_actor_sight(
+        s_low,
+        ev,
+        all_parties=all_parties,
+        all_containers=all_containers,
+    )
+    passive_move_by_agent = (
+        checker_profile == "d"
+        and ev.kind == "move"
+        and not is_station_move
+        and _sentence_matches_passive_move_by_agent(frame_low, ev, all_parties, world)
+    )
+    v2_occluded_see_hid = (
+        checker_profile == "d"
+        and ev.kind == "see"
+        and bool(ev.occluded and ev.occluder)
+        and _sentence_matches_v2_occluded_see_hid(frame_low, ev, all_parties, world)
+    )
+    if (
+        not possessive_occluded_see
+        and not passive_move_by_agent
+        and not v2_occluded_see_hid
+        and not _actor_precedes_verb_as_subject(
+            frame_low,
+            ev.actor,
+            action_verbs,
+            all_parties,
+            ev=ev,
+            world=world,
+            checker_profile=checker_profile,
+        )
     ):
         return False
 
@@ -3389,7 +4079,12 @@ def _sentence_matches_event(
                 prev_sentence is not None
                 and prev_event is not None
                 and _sentence_matches_folded_leave_enter(
-                    prev_sentence, prev_event, ev, noise_threshold, world=world
+                    prev_sentence,
+                    prev_event,
+                    ev,
+                    noise_threshold,
+                    world=world,
+                    checker_profile=checker_profile,
                 )
             ):
                 return _sentence_is_arrival_half_of_leave_enter(
@@ -3414,7 +4109,12 @@ def _sentence_matches_event(
                 ev.to_location,
             )
             and _preceding_sentence_is_matching_leave(
-                prev_sentence, prev_event, ev, noise_threshold, world=world
+                prev_sentence,
+                prev_event,
+                ev,
+                noise_threshold,
+                world=world,
+                checker_profile=checker_profile,
             )
         ):
             return True
@@ -3439,19 +4139,31 @@ def _sentence_matches_event(
     if ev.kind == "move":
         if is_station_move:
             # Card ue: the actor stepped behind/around the occluder to the other station; the occluder did not move.
-            return _sentence_matches_station_move(s_low, ev, all_parties)
+            return _sentence_matches_station_move(
+                s_low,
+                ev,
+                all_parties,
+                checker_profile=checker_profile,
+            )
         if not (ev.target_object and ev.from_location and ev.to_location):
             return False
         if _has_bundled_or_reordered_clause(frame_low, ev.actor):
             return False
-        all_containers = _all_containers_set(world)
         allowed_move_containers = {ev.from_location.lower(), ev.to_location.lower()}
         for other_c in all_containers:
             if other_c not in allowed_move_containers and other_c in frame_low:
                 return False
+        if passive_move_by_agent:
+            return True
         target_esc = re.escape(ev.target_object.lower())
         subj_matches = _find_actor_subject_verb_matches(
-            frame_low, ev.actor, action_verbs, all_parties, ev=ev
+            frame_low,
+            ev.actor,
+            action_verbs,
+            all_parties,
+            ev=ev,
+            world=world,
+            checker_profile=checker_profile,
         )
         matched_vp = False
         for m_act, m_verb in subj_matches:
@@ -3468,18 +4180,22 @@ def _sentence_matches_event(
                 after_obj,
                 maxsplit=1,
             )[0]
-            if not _ordered_from_to_positions(
+            before_actor = frame_low[: m_act.start()]
+            post_path_ok = _ordered_from_to_positions(
                 clause_after_obj,
                 ev.from_location,
                 ev.to_location,
                 require_from_prep=True,
-            ):
-                continue
-            # Ensure source phrase is not taken from an earlier clause before the actor
-            if re.search(
+            ) and not re.search(
                 rf"\b(?:from|out of)\s+{_ARTICLE_OPT_RE}{re.escape(ev.from_location.lower())}\b",
-                frame_low[: m_act.start()],
-            ):
+                before_actor,
+            )
+            m2_path_ok = checker_profile == "d" and _matches_m2_fronted_path(
+                before_actor,
+                clause_after_obj,
+                ev,
+            )
+            if not post_path_ok and not m2_path_ok:
                 continue
             if ev.occluded and ev.occluder:
                 if ev.occluder.lower() not in after_obj or not _occluder_governs_blocked(
@@ -3501,7 +4217,6 @@ def _sentence_matches_event(
         if ev.occluded and ev.occluder and _sentence_asserts_sighting_of_target(frame_low, ev, all_parties):
             # Card ue: the actor looked and could NOT see the container; `saw`/`observed` it is a false sighting.
             return False
-        all_containers = _all_containers_set(world)
         target_esc = re.escape(ev.target_object.lower())
         if ev.occluded and ev.occluder:
             allowed_occ_containers = {
@@ -3514,14 +4229,25 @@ def _sentence_matches_event(
                     return False
             if FAR_SIDE_ALCOVE_STATION.lower() not in frame_low:
                 return False
+            if v2_occluded_see_hid:
+                return True
             if not _occluder_governs_blocked(frame_low, ev.occluder):
                 return False
             if possessive_occluded_see:
                 return True
             subj_matches = _find_actor_subject_verb_matches(
-                frame_low, ev.actor, SIGHTING_VERBS, all_parties, ev=ev
+                frame_low,
+                ev.actor,
+                SIGHTING_VERBS,
+                all_parties,
+                ev=ev,
+                world=world,
+                checker_profile=checker_profile,
             )
             for m_act, m_verb in subj_matches:
+                before_actor = frame_low[: m_act.start()]
+                if any(re.search(rf"\b{re.escape(c)}\b", before_actor) is not None for c in all_containers):
+                    continue
                 after_verb = frame_low[m_act.end() + m_verb.end() :]
                 if re.search(rf"\b{target_esc}\b", after_verb) is None:
                     continue
@@ -3551,9 +4277,18 @@ def _sentence_matches_event(
                 if other_c != ev.target_object.lower() and other_c in frame_low:
                     return False
         subj_matches = _find_actor_subject_verb_matches(
-            frame_low, ev.actor, SIGHTING_VERBS, all_parties, ev=ev
+            frame_low,
+            ev.actor,
+            SIGHTING_VERBS,
+            all_parties,
+            ev=ev,
+            world=world,
+            checker_profile=checker_profile,
         )
         for m_act, m_verb in subj_matches:
+            before_actor = frame_low[: m_act.start()]
+            if any(re.search(rf"\b{re.escape(c)}\b", before_actor) is not None for c in all_containers):
+                continue
             after_verb = frame_low[m_act.end() + m_verb.end() :]
             if re.match(r"^\s+for\b", after_verb) is not None:
                 continue
@@ -3563,6 +4298,9 @@ def _sentence_matches_event(
             )
             if m_obj is None:
                 continue
+            if ev.to_location and ev.to_location.lower() in all_containers:
+                if re.search(rf"\b{re.escape(ev.to_location.lower())}\b", after_verb) is None:
+                    continue
             return True
         return False
 
@@ -3579,12 +4317,16 @@ def _sentence_matches_event(
         quoted_spans = _extract_quoted_spans(s_low)
         if not quoted_spans:
             return False
-        if ev.utterance:
-            utt_core = ev.utterance.rstrip(".!?").lower()
-            if not any(utt_core in q for q in quoted_spans):
-                return False
+        if ev.utterance and not _quote_matches_utterance_exactly(quoted_spans, ev.utterance):
+            return False
         subj_matches = _find_actor_subject_verb_matches(
-            frame_no_thresh, ev.actor, _ACTION_VERBS_BY_KIND["say"], all_parties, ev=ev
+            frame_no_thresh,
+            ev.actor,
+            _ACTION_VERBS_BY_KIND["say"],
+            all_parties,
+            ev=ev,
+            world=world,
+            checker_profile=checker_profile,
         )
         for m_act, m_verb in subj_matches:
             verb_end = m_act.end() + m_verb.end()
@@ -3623,20 +4365,309 @@ def _sentence_matches_event(
     if ev.kind == "message":
         if not ev.recipient:
             return False
+        if _has_bundled_or_reordered_clause(frame_low, ev.actor):
+            return False
         recip_esc = re.escape(ev.recipient.lower())
         if not re.search(rf"\b(?:to|for|messaged|texted|notified)\s+{recip_esc}\b", frame_low):
             return False
+        quoted_spans = _extract_quoted_spans(s_low)
+        if len(quoted_spans) > 1:
+            return False
         if ev.utterance:
-            utt_core = ev.utterance.rstrip(".!?").lower()
-            quoted_spans = _extract_quoted_spans(s_low)
             if quoted_spans:
-                if not any(utt_core in q for q in quoted_spans):
+                if not _quote_matches_utterance_exactly(quoted_spans, ev.utterance):
                     return False
-            elif utt_core not in s_low:
-                return False
+                subj_matches = _find_actor_subject_verb_matches(
+                    frame_low,
+                    ev.actor,
+                    _ACTION_VERBS_BY_KIND["message"],
+                    all_parties,
+                    ev=ev,
+                    world=world,
+                    checker_profile=checker_profile,
+                )
+                msg_quote_bound = False
+                for m_act, m_verb in subj_matches:
+                    verb_end = m_act.end() + m_verb.end()
+                    after_verb = frame_low[verb_end:]
+                    before_actor = frame_low[: m_act.start()]
+                    clause_after_verb = re.split(
+                        r"[;]|,\s*(?:and|but|yet|while|whereas|although|though)\b|\b(?:while|whereas|although|though)\b",
+                        after_verb,
+                    )[0]
+                    if '""' in clause_after_verb or re.search(r'^\s*""\s*[,.;:]?\s*$', before_actor) is not None:
+                        msg_quote_bound = True
+                        break
+                if not msg_quote_bound:
+                    return False
+            else:
+                utt_core = ev.utterance.rstrip(".!?").lower()
+                if utt_core not in s_low:
+                    return False
         return True
 
     return False
+
+
+def _sentence_rejection_rule_id(
+    sentence: str,
+    ev: Event,
+    noise_threshold: int,
+    world: World | None = None,
+    *,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
+) -> str:
+    """Return the specific `rule_id` from `EVENT_FIDELITY_SUBRULE_IDS` explaining why `sentence` failed `ev`."""
+    if not sentence or sentence == "no candidate sentence":
+        return "other_event_fidelity"
+    s_low = sentence.lower()
+    frame_low = _strip_quoted_spans(s_low)
+    all_parties: Sequence[str] = (
+        tuple(world.agents) + tuple(world.absent_parties)
+        if world is not None
+        else (ev.actor, *([ev.recipient] if ev.recipient else []))
+    )
+    all_containers = _all_containers_set(world)
+    is_station_move = is_station_transition_event(ev, world)
+    action_verbs: Sequence[str] = (
+        STATION_CHANGE_PERSON_VERBS
+        if is_station_move
+        else _ACTION_VERBS_BY_KIND.get(ev.kind, ())
+    )
+
+    if (
+        checker_profile == "c"
+        and not _sentence_matches_event(
+            sentence,
+            ev,
+            noise_threshold,
+            world=world,
+            checker_profile="c",
+        )
+        and _sentence_matches_event(
+            sentence,
+            ev,
+            noise_threshold,
+            world=world,
+            checker_profile="d",
+        )
+    ):
+        if (
+            ev.kind == "move"
+            and not is_station_move
+            and _sentence_matches_passive_move_by_agent(frame_low, ev, all_parties, world)
+        ):
+            return "m3_by_agent"
+        if (
+            ev.kind == "see"
+            and ev.occluded
+            and ev.occluder
+            and _sentence_matches_v2_occluded_see_hid(frame_low, ev, all_parties, world)
+        ):
+            return "v2_hid"
+        if _actor_precedes_verb_as_subject(
+            frame_low,
+            ev.actor,
+            action_verbs,
+            all_parties,
+            ev=ev,
+            world=world,
+            checker_profile="d",
+        ) and not _actor_precedes_verb_as_subject(
+            frame_low,
+            ev.actor,
+            action_verbs,
+            all_parties,
+            ev=ev,
+            world=world,
+            checker_profile="c",
+        ):
+            return "p1_phrase"
+        if ev.kind == "move":
+            return "m2_path"
+
+    if ev.kind == "say":
+        if (
+            "'" in s_low
+            and not _extract_quoted_spans(s_low)
+            and ev.utterance
+            and ev.utterance.rstrip(".!?").lower() in s_low
+        ):
+            return "defect_6_single_quote"
+
+    if ev.kind in ("say", "message") and ev.utterance:
+        quoted_spans = _extract_quoted_spans(s_low)
+        utt_core = ev.utterance.rstrip(".!?").lower()
+        if (
+            quoted_spans
+            and any(utt_core in q for q in quoted_spans)
+            and not _quote_matches_utterance_exactly(quoted_spans, ev.utterance)
+        ):
+            return "fix_quote_equals_utterance"
+
+    actor_m = re.search(rf"\b{re.escape(ev.actor.lower())}(?!'s|’s)\b", frame_low)
+    occ_m = (
+        re.search(rf"\b{re.escape(ev.occluder.lower())}\b", frame_low)
+        if (ev.kind == "see" and ev.occluded and ev.occluder)
+        else None
+    )
+    subj_start = (
+        occ_m.start()
+        if (
+            occ_m is not None
+            and (actor_m is None or occ_m.start() < actor_m.start())
+        )
+        else (actor_m.start() if actor_m is not None else len(frame_low))
+    )
+    if _has_fronted_bystander_in_prefix(frame_low[:subj_start], ev.actor, all_parties):
+        return "fix_no_fronted_bystander"
+
+    if ev.kind == "see" and any(
+        re.search(rf"\b{re.escape(c)}\b", frame_low[:subj_start]) is not None
+        for c in all_containers
+    ):
+        return "fix_no_fronted_container_see"
+
+    if _has_bundled_or_reordered_clause(frame_low, ev.actor):
+        return "bundled_event"
+
+    if _has_forbidden_event_negation(
+        frame_low,
+        ev,
+        all_parties,
+        action_verbs=action_verbs,
+        checker_profile=checker_profile,
+    ) or any(w in _NON_FACTIVE_OR_HEDGE_WORDS for w in re.findall(r"[a-z]+", frame_low)):
+        return "negation_or_hedge"
+
+    if world is not None:
+        if ev.kind not in ("enter", "leave"):
+            for o_room in world.rooms:
+                if o_room.lower() != ev.room.lower() and o_room.lower() in frame_low:
+                    return "other_room"
+        else:
+            allowed_rooms = {
+                ev.room.lower(),
+                (ev.from_location or "").lower(),
+                (ev.to_location or "").lower(),
+            }
+            for o_room in world.rooms:
+                if o_room.lower() not in allowed_rooms and o_room.lower() in frame_low:
+                    return "other_room"
+
+    if ev.kind != "message" and ev.kind not in ("enter", "leave"):
+        room_esc = re.escape(ev.room.lower())
+        if ev.room.lower() not in frame_low or not re.search(
+            rf"\b(?:in|from|inside|at|of)\s+{_ARTICLE_OPT_RE}{room_esc}(?!\s+(?:doorway|threshold)\b)\b",
+            frame_low,
+        ):
+            if ev.kind == "say" and ev.room.lower() in s_low:
+                return "defect_7_say_room"
+            return "missing_room"
+
+    if ev.kind == "say":
+        quoted_spans = _extract_quoted_spans(s_low)
+        if not quoted_spans or (
+            ev.utterance and not _quote_matches_utterance_exactly(quoted_spans, ev.utterance)
+        ):
+            return "missing_quote"
+        frame_no_thresh = re.sub(r"\([^)]*threshold[^)]*\)", "", frame_low)
+        db_str = f"{ev.noise_level} db"
+        if db_str not in frame_no_thresh or any(
+            int(m_db.group(1)) != int(ev.noise_level)
+            for m_db in re.finditer(r"\b(\d+)\s*db\b", frame_no_thresh)
+        ):
+            return "missing_db"
+        clause_around_speaker = re.split(
+            r"[;]|,\s*(?:and|but|yet|while|whereas|although|though)\b|\b(?:while|whereas|although|though)\b",
+            frame_no_thresh,
+        )[0]
+        if db_str not in clause_around_speaker:
+            return "defect_5_say_clause"
+
+    candidate_verbs = set(action_verbs)
+    if checker_profile == "d" and ev.kind == "move" and not is_station_move:
+        candidate_verbs |= set(_PASSIVE_MOVE_VERBS)
+    if ev.kind == "see" and ev.occluded and ev.occluder:
+        candidate_verbs |= {"blocked"}
+        if checker_profile == "d":
+            candidate_verbs |= {"hid"}
+    if not any(re.search(rf"\b{re.escape(v)}\b", frame_low) is not None for v in candidate_verbs):
+        return "wrong_verb"
+
+    if ev.kind in ("enter", "leave", "move") and not is_station_move:
+        if ev.from_location and ev.from_location.lower() not in frame_low:
+            return "missing_from"
+        if ev.to_location and ev.to_location.lower() not in frame_low:
+            return "missing_to"
+        if (
+            ev.from_location
+            and ev.to_location
+            and not _ordered_from_to_positions(
+                frame_low,
+                ev.from_location,
+                ev.to_location,
+                require_from_prep=False,
+            )
+        ):
+            return "from_after_to"
+        if (
+            ev.from_location
+            and ev.to_location
+            and not _ordered_from_to_positions(
+                frame_low,
+                ev.from_location,
+                ev.to_location,
+                require_from_prep=(ev.kind != "leave"),
+            )
+        ):
+            return "defect_3_move_path" if ev.kind == "move" else "from_after_to"
+
+    if (
+        not _actor_precedes_verb_as_subject(
+            frame_low,
+            ev.actor,
+            action_verbs,
+            all_parties,
+            ev=ev,
+            world=world,
+            checker_profile=checker_profile,
+        )
+        and not _sentence_states_occluder_blocked_actor_sight(
+            s_low,
+            ev,
+            all_parties=all_parties,
+            all_containers=all_containers,
+        )
+        and not (
+            checker_profile == "d"
+            and ev.kind == "move"
+            and not is_station_move
+            and _sentence_matches_passive_move_by_agent(frame_low, ev, all_parties, world)
+        )
+        and not (
+            checker_profile == "d"
+            and ev.kind == "see"
+            and ev.occluded
+            and ev.occluder
+            and _sentence_matches_v2_occluded_see_hid(frame_low, ev, all_parties, world)
+        )
+    ):
+        if re.search(rf"\b{re.escape(ev.actor.lower())}(?!'s|’s)\b", frame_low) is not None:
+            return "defect_4_actor_subject"
+        return "actor_not_subject"
+
+    if (ev.occluded and (not ev.occluder or not _occluder_governs_blocked(frame_low, ev.occluder))) or (
+        not ev.occluded and any(bp in frame_low for bp in BLOCKING_PHRASES)
+    ):
+        if ev.occluded and ev.occluder and ev.occluder.lower() in frame_low and "blocked" in frame_low:
+            return "defect_2_occluder_blocked"
+        return "occluder_clause"
+
+    if ev.target_object and ev.target_object.lower() in frame_low:
+        return "defect_1_object"
+
+    return "other_event_fidelity"
 
 
 def _find_sentence_with_substring(prose: str, substring: str) -> str:
@@ -3883,6 +4914,8 @@ def check_prose_render_fidelity(
     prose: str,
     world: World,
     focal_agent: str | None = None,
+    *,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> None:
     """Prose check (c): validate complete event-log and setup fidelity using `world` (never keys).
 
@@ -3899,6 +4932,10 @@ def check_prose_render_fidelity(
        unlogged motives on unknowable `why` actions, unlogged note placers on unknowable `who` actions,
        or extra unlogged event sentences).
     """
+    if checker_profile not in VALID_CHECKER_PROFILES:
+        raise ValueError(
+            f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
+        )
     prose = normalize_prose_line_endings(prose)
     prose_low = prose.lower()
     paragraphs = [p.strip() for p in prose.split("\n\n") if p.strip()]
@@ -4132,6 +5169,7 @@ def check_prose_render_fidelity(
                 world=world,
                 prev_sentence=event_sentences[s_prev],
                 prev_event=prev_ev,
+                checker_profile=checker_profile,
             ):
                 found_idx = search_start
             elif _sentence_matches_folded_leave_enter(
@@ -4140,6 +5178,7 @@ def check_prose_render_fidelity(
                 ev,
                 world.noise_threshold,
                 world=world,
+                checker_profile=checker_profile,
             ):
                 found_idx = s_prev
         if found_idx is None:
@@ -4168,6 +5207,7 @@ def check_prose_render_fidelity(
                     prev_event=prev_ev,
                     next_sentence=next_sent,
                     next_event=next_ev,
+                    checker_profile=checker_profile,
                 ) and not (
                     ev.kind == "leave"
                     and ev_idx + 1 < len(world.events)
@@ -4184,6 +5224,7 @@ def check_prose_render_fidelity(
                                 world.events[ev_idx + 1],
                                 world.noise_threshold,
                                 world=world,
+                                checker_profile=checker_profile,
                             )
                         )
                         or (
@@ -4194,6 +5235,7 @@ def check_prose_render_fidelity(
                                     ev,
                                     world.noise_threshold,
                                     world=world,
+                                    checker_profile=checker_profile,
                                 )
                                 and not _sentence_matches_folded_leave_enter(
                                     event_sentences[i],
@@ -4201,6 +5243,7 @@ def check_prose_render_fidelity(
                                     world.events[ev_idx + 1],
                                     world.noise_threshold,
                                     world=world,
+                                    checker_profile=checker_profile,
                                 )
                                 for i in range(0, search_start)
                             )
@@ -4210,6 +5253,7 @@ def check_prose_render_fidelity(
                                 world.events[ev_idx + 1],
                                 world.noise_threshold,
                                 world=world,
+                                checker_profile=checker_profile,
                             )
                         )
                     )
@@ -4223,7 +5267,13 @@ def check_prose_render_fidelity(
                     i
                     for i in range(0, search_start)
                     if i not in matched_sentence_indices
-                    and _sentence_matches_event(event_sentences[i], ev, world.noise_threshold, world=world)
+                    and _sentence_matches_event(
+                        event_sentences[i],
+                        ev,
+                        world.noise_threshold,
+                        world=world,
+                        checker_profile=checker_profile,
+                    )
                 ),
                 None,
             )
@@ -4237,6 +5287,7 @@ def check_prose_render_fidelity(
                     event_kind=ev.kind,
                     failure_kind="altered",
                     event_variant=_event_variant(ev),
+                    rule_id="c_fidelity_event_order",
                 )
                 matched_sentence_indices.append(earlier_idx)
                 continue
@@ -4253,12 +5304,24 @@ def check_prose_render_fidelity(
                     world.events[ev_idx + 1],
                     world.noise_threshold,
                     world=world,
+                    checker_profile=checker_profile,
                 )
             )
             missing_ev_kind = (
                 "absent"
                 if cand_sent == "no candidate sentence" or next_ev_matches_search_start
                 else "altered"
+            )
+            ev_rule_id = (
+                "c_fidelity_missing_event"
+                if missing_ev_kind == "absent"
+                else _sentence_rejection_rule_id(
+                    cand_sent,
+                    ev,
+                    world.noise_threshold,
+                    world=world,
+                    checker_profile=checker_profile,
+                )
             )
             _raise_prose_check_error(
                 "c_fidelity_missing_event",
@@ -4268,6 +5331,7 @@ def check_prose_render_fidelity(
                 event_kind=ev.kind,
                 failure_kind=missing_ev_kind,
                 event_variant=_event_variant(ev),
+                rule_id=ev_rule_id,
             )
             if missing_ev_kind == "altered" and search_start < len(event_sentences):
                 matched_sentence_indices.append(search_start)
@@ -4476,10 +5540,15 @@ def collect_prose_faults(
     focal_agent: str | None = None,
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> tuple[ProseFaultRecord, ...]:
     """Run all prose checks (a)-(d) in collect-all mode and return every `ProseFaultRecord` (with no text)."""
     if goal_mode not in VALID_GOAL_MODES:
         raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
+    if checker_profile not in VALID_CHECKER_PROFILES:
+        raise ValueError(
+            f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
+        )
     collector: list[ProseFaultRecord] = []
     token = _ACTIVE_FAULT_COLLECTOR.set(collector)
     try:
@@ -4490,7 +5559,12 @@ def collect_prose_faults(
         check_prose_no_markers(checked_prose)
         if world is not None:
             check_prose_rule_and_hearing_threshold(checked_prose, world)
-            check_prose_render_fidelity(checked_prose, world, focal_agent=focal_agent)
+            check_prose_render_fidelity(
+                checked_prose,
+                world,
+                focal_agent=focal_agent,
+                checker_profile=checker_profile,
+            )
     finally:
         _ACTIVE_FAULT_COLLECTOR.reset(token)
     return tuple(collector)
@@ -4503,6 +5577,7 @@ def check_rendered_prose(
     *,
     collect_all: bool = False,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> tuple[Any, ...]:
     """Run all prose checks (a)-(d) on `prose`.
 
@@ -4511,8 +5586,18 @@ def check_rendered_prose(
     """
     if goal_mode not in VALID_GOAL_MODES:
         raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
+    if checker_profile not in VALID_CHECKER_PROFILES:
+        raise ValueError(
+            f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
+        )
     if collect_all:
-        return collect_prose_faults(prose, world, focal_agent=focal_agent, goal_mode=goal_mode)
+        return collect_prose_faults(
+            prose,
+            world,
+            focal_agent=focal_agent,
+            goal_mode=goal_mode,
+            checker_profile=checker_profile,
+        )
     checked_prose = prose
     if goal_mode == "splice" and world is not None:
         checked_prose = splice_goal_tokens(prose, world).expanded_prose
@@ -4520,7 +5605,12 @@ def check_rendered_prose(
     check_prose_no_markers(checked_prose)
     if world is not None:
         check_prose_rule_and_hearing_threshold(checked_prose, world)
-        check_prose_render_fidelity(checked_prose, world, focal_agent=focal_agent)
+        check_prose_render_fidelity(
+            checked_prose,
+            world,
+            focal_agent=focal_agent,
+            checker_profile=checker_profile,
+        )
     return ()
 
 
@@ -4802,6 +5892,8 @@ class MockWriter:
         *,
         goal_mode: str = DEFAULT_GOAL_MODE,
         constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
+        checker_profile: str = DEFAULT_CHECKER_PROFILE,
+        accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
     ) -> None:
         if goal_mode not in VALID_GOAL_MODES:
             raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
@@ -4809,12 +5901,23 @@ class MockWriter:
             raise ValueError(
                 f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
             )
+        if checker_profile not in VALID_CHECKER_PROFILES:
+            raise ValueError(
+                f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
+            )
+        if accepted_forms_line not in VALID_ACCEPTED_FORMS_LINES:
+            raise ValueError(
+                f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
+            )
         self._custom_renderer = custom_renderer
         self._goal_mode = str(goal_mode)
         self._constraint_layout = str(constraint_layout)
+        self._checker_profile = str(checker_profile)
+        self._accepted_forms_line = str(accepted_forms_line)
         self._prompt_template = load_writer_prompt_template(
             goal_mode=self._goal_mode,
             constraint_layout=self._constraint_layout,
+            accepted_forms_line=self._accepted_forms_line,
         )
         self._refusals: list[ProseRefusalRecord] = []
 
@@ -4825,6 +5928,14 @@ class MockWriter:
     @property
     def constraint_layout(self) -> str:
         return self._constraint_layout
+
+    @property
+    def checker_profile(self) -> str:
+        return self._checker_profile
+
+    @property
+    def accepted_forms_line(self) -> str:
+        return self._accepted_forms_line
 
     @property
     def refusals(self) -> tuple[ProseRefusalRecord, ...]:
@@ -4857,6 +5968,7 @@ class MockWriter:
             self._prompt_template,
             goal_mode=self._goal_mode,
             constraint_layout=self._constraint_layout,
+            accepted_forms_line=self._accepted_forms_line,
         )
         prompt_1 = format_writer_prompt(
             world,
@@ -4864,6 +5976,7 @@ class MockWriter:
             self._prompt_template,
             goal_mode=self._goal_mode,
             constraint_layout=self._constraint_layout,
+            accepted_forms_line=self._accepted_forms_line,
         )
 
         rendered_texts: list[str] = []
@@ -4876,11 +5989,23 @@ class MockWriter:
                     splice_res = splice_goal_tokens(prose_text, world)
                     expanded_text = splice_res.expanded_prose
                     g_source = splice_res.goal_source
-                    check_rendered_prose(expanded_text, world, focal_agent=focal_ag, goal_mode="splice")
+                    check_rendered_prose(
+                        expanded_text,
+                        world,
+                        focal_agent=focal_ag,
+                        goal_mode="splice",
+                        checker_profile=self._checker_profile,
+                    )
                 else:
                     expanded_text = prose_text
                     g_source = {ag: "model_text" for ag in world.agents}
-                    check_rendered_prose(expanded_text, world, focal_agent=focal_ag, goal_mode="copy")
+                    check_rendered_prose(
+                        expanded_text,
+                        world,
+                        focal_agent=focal_ag,
+                        goal_mode="copy",
+                        checker_profile=self._checker_profile,
+                    )
                 rendered_texts.append(expanded_text)
                 goal_sources.append(g_source)
             except RenderCheckError as exc:
@@ -6178,6 +7303,8 @@ class WriterCheckpointManager:
         retry_form: str = DEFAULT_RETRY_FORM,
         goal_mode: str = DEFAULT_GOAL_MODE,
         constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
+        checker_profile: str = DEFAULT_CHECKER_PROFILE,
+        accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
         presence_penalty: float | None = None,
         modelfile_parameters: Mapping[str, object] | None = None,
     ) -> None:
@@ -6186,6 +7313,14 @@ class WriterCheckpointManager:
         if constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
             raise ValueError(
                 f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
+            )
+        if checker_profile not in VALID_CHECKER_PROFILES:
+            raise ValueError(
+                f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
+            )
+        if accepted_forms_line not in VALID_ACCEPTED_FORMS_LINES:
+            raise ValueError(
+                f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
             )
         self.output_dir = output_dir
         self.public_path = output_dir / CHECKPOINT_FILENAME
@@ -6199,9 +7334,12 @@ class WriterCheckpointManager:
         self.retry_form = str(retry_form)
         self.goal_mode = str(goal_mode)
         self.constraint_layout = str(constraint_layout)
+        self.checker_profile = str(checker_profile)
+        self.accepted_forms_line = str(accepted_forms_line)
         self.hard_constraints_sha256 = compute_hard_constraints_sha256(
             goal_mode=self.goal_mode,
             constraint_layout=self.constraint_layout,
+            accepted_forms_line=self.accepted_forms_line,
         )
         self.presence_penalty = float(presence_penalty) if presence_penalty is not None else None
         self.modelfile_parameters: dict[str, object] = (
@@ -6240,6 +7378,8 @@ class WriterCheckpointManager:
             "retry_form": self.retry_form,
             "goal_mode": self.goal_mode,
             "constraint_layout": self.constraint_layout,
+            "accepted_forms_line": self.accepted_forms_line,
+            "checker_profile": self.checker_profile,
             "hard_constraints_sha256": self.hard_constraints_sha256,
             "presence_penalty": self.presence_penalty,
             "modelfile_parameters": dict(self.modelfile_parameters),
@@ -6289,11 +7429,21 @@ class WriterCheckpointManager:
             w_obj = world or r0.world or r1.world
             if w_obj is not None:
                 try:
-                    check_rendered_prose(r0.prose, w_obj, focal_agent=r0.focal_agent)
+                    check_rendered_prose(
+                        r0.prose,
+                        w_obj,
+                        focal_agent=r0.focal_agent,
+                        checker_profile=self.checker_profile,
+                    )
                 except RenderCheckError as exc:
                     raise sanitize_render_check_error_for_stderr(exc, r0.prose) from None
                 try:
-                    check_rendered_prose(r1.prose, w_obj, focal_agent=r1.focal_agent)
+                    check_rendered_prose(
+                        r1.prose,
+                        w_obj,
+                        focal_agent=r1.focal_agent,
+                        checker_profile=self.checker_profile,
+                    )
                 except RenderCheckError as exc:
                     raise sanitize_render_check_error_for_stderr(exc, r1.prose) from None
             scen_id = r0.scenario_id
@@ -6486,13 +7636,17 @@ class WriterCheckpointManager:
             or sealed_header.get("goal_mode", DEFAULT_GOAL_MODE) != self.goal_mode
             or pub_header.get("constraint_layout", DEFAULT_CONSTRAINT_LAYOUT) != self.constraint_layout
             or sealed_header.get("constraint_layout", DEFAULT_CONSTRAINT_LAYOUT) != self.constraint_layout
+            or pub_header.get("accepted_forms_line", DEFAULT_ACCEPTED_FORMS_LINE) != self.accepted_forms_line
+            or sealed_header.get("accepted_forms_line", DEFAULT_ACCEPTED_FORMS_LINE) != self.accepted_forms_line
+            or pub_header.get("checker_profile", DEFAULT_CHECKER_PROFILE) != self.checker_profile
+            or sealed_header.get("checker_profile", DEFAULT_CHECKER_PROFILE) != self.checker_profile
             or pub_header.get("hard_constraints_sha256", self.hard_constraints_sha256) != self.hard_constraints_sha256
             or sealed_header.get("hard_constraints_sha256", self.hard_constraints_sha256) != self.hard_constraints_sha256
             or pub_header.get("presence_penalty") != self.presence_penalty
             or sealed_header.get("presence_penalty") != self.presence_penalty
         ):
             raise ValueError(
-                "Cannot --resume: checkpoint header (count, seed, writer_kind, goal_mode, constraint_layout, hard_constraints_sha256, presence_penalty, or writer_manifest_digest) mismatches requested run."
+                "Cannot --resume: checkpoint header (count, seed, writer_kind, goal_mode, constraint_layout, accepted_forms_line, checker_profile, hard_constraints_sha256, presence_penalty, or writer_manifest_digest) mismatches requested run."
             )
 
         restored_private_seed = str(sealed_header.get("private_seed_hex") or "")
@@ -6570,6 +7724,7 @@ class WriterCheckpointManager:
                         focal_0,
                         goal_mode=r0_goal_mode,
                         constraint_layout=r0_constraint_layout,
+                        accepted_forms_line=self.accepted_forms_line,
                     )
                 )
                 prompt_1 = (
@@ -6580,15 +7735,26 @@ class WriterCheckpointManager:
                         focal_1,
                         goal_mode=r1_goal_mode,
                         constraint_layout=r1_constraint_layout,
+                        accepted_forms_line=self.accepted_forms_line,
                     )
                 )
 
                 try:
-                    check_rendered_prose(prose_0, world, focal_agent=focal_0)
+                    check_rendered_prose(
+                        prose_0,
+                        world,
+                        focal_agent=focal_0,
+                        checker_profile=self.checker_profile,
+                    )
                 except RenderCheckError as exc:
                     raise sanitize_render_check_error_for_stderr(exc, prose_0) from None
                 try:
-                    check_rendered_prose(prose_1, world, focal_agent=focal_1)
+                    check_rendered_prose(
+                        prose_1,
+                        world,
+                        focal_agent=focal_1,
+                        checker_profile=self.checker_profile,
+                    )
                 except RenderCheckError as exc:
                     raise sanitize_render_check_error_for_stderr(exc, prose_1) from None
                 keys = compute_scenario_keys(world)
@@ -6830,6 +7996,8 @@ class OllamaWriter:
         short_circuit_dead_scenarios: bool = False,
         goal_mode: str = DEFAULT_GOAL_MODE,
         constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
+        checker_profile: str = DEFAULT_CHECKER_PROFILE,
+        accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
         start_owned_server: bool | None = None,
         popen_factory: Callable[..., Any] | None = None,
         server_port: int | None = None,
@@ -6856,10 +8024,20 @@ class OllamaWriter:
             raise ValueError(
                 f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
             )
+        if checker_profile not in VALID_CHECKER_PROFILES:
+            raise ValueError(
+                f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
+            )
+        if accepted_forms_line not in VALID_ACCEPTED_FORMS_LINES:
+            raise ValueError(
+                f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
+            )
         self._retry_form: str = resolved_retry_form
         self._short_circuit_dead_scenarios: bool = bool(short_circuit_dead_scenarios)
         self._goal_mode: str = str(goal_mode)
         self._constraint_layout: str = str(constraint_layout)
+        self._checker_profile: str = str(checker_profile)
+        self._accepted_forms_line: str = str(accepted_forms_line)
         self._presence_penalty: float | None = (
             float(presence_penalty) if presence_penalty is not None else None
         )
@@ -6895,6 +8073,7 @@ class OllamaWriter:
         self._prompt_template = load_writer_prompt_template(
             goal_mode=self._goal_mode,
             constraint_layout=self._constraint_layout,
+            accepted_forms_line=self._accepted_forms_line,
         )
 
         is_real_transport = http_transport is None or http_transport is default_ollama_http_transport
@@ -7037,6 +8216,14 @@ class OllamaWriter:
     @property
     def constraint_layout(self) -> str:
         return self._constraint_layout
+
+    @property
+    def checker_profile(self) -> str:
+        return self._checker_profile
+
+    @property
+    def accepted_forms_line(self) -> str:
+        return self._accepted_forms_line
 
     @property
     def presence_penalty(self) -> float | None:
@@ -7546,6 +8733,7 @@ class OllamaWriter:
                     world,
                     focal_agent=focal_agent,
                     goal_mode=self._goal_mode,
+                    checker_profile=self._checker_profile,
                 )
             except RenderCheckError as exc:
                 last_exc = exc
@@ -7554,6 +8742,7 @@ class OllamaWriter:
                     world,
                     focal_agent=focal_agent,
                     goal_mode=self._goal_mode,
+                    checker_profile=self._checker_profile,
                 )
                 fault_ids = tuple(dict.fromkeys(f.check_id for f in faults)) or (
                     (exc.check_id,) if exc.check_id in VALID_FAULT_CHECK_IDS else ()
@@ -7738,6 +8927,7 @@ class OllamaWriter:
             self._prompt_template,
             goal_mode=self._goal_mode,
             constraint_layout=self._constraint_layout,
+            accepted_forms_line=self._accepted_forms_line,
         )
         prompt_1 = format_writer_prompt(
             world,
@@ -7745,6 +8935,7 @@ class OllamaWriter:
             self._prompt_template,
             goal_mode=self._goal_mode,
             constraint_layout=self._constraint_layout,
+            accepted_forms_line=self._accepted_forms_line,
         )
 
         prose_0 = self._chat_render(
@@ -7973,12 +9164,16 @@ def evaluate_event_subrules(
     *,
     prev_sentence: str | None = None,
     prev_event: Event | None = None,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> dict[str, bool]:
     """Evaluate the 11 atomic sub-rule booleans for `(ev, sentence)` without gating."""
     s_low = sentence.lower()
     s_unquoted_low = re.sub(r'"[^"]*"|“[^”]*”', '""', s_low)
     frame_low = s_unquoted_low if ev.kind in ("say", "message") else s_low
     all_parties: tuple[str, ...] = tuple(world.agents) + tuple(world.absent_parties)
+    all_containers: tuple[str, ...] = tuple(
+        c for pair in world.containers_by_room.values() for c in pair
+    )
     is_station_move = is_station_transition_event(ev, world)
     is_folded_movement = (
         ev.kind in ("enter", "leave")
@@ -8000,7 +9195,25 @@ def evaluate_event_subrules(
     else:
         kind_verbs = _ACTION_VERBS_BY_KIND.get(ev.kind, ())
 
-    possessive_occluded_see = _sentence_states_occluder_blocked_actor_sight(s_low, ev)
+    possessive_occluded_see = _sentence_states_occluder_blocked_actor_sight(
+        s_low,
+        ev,
+        all_parties=all_parties,
+        all_containers=all_containers,
+    )
+    passive_move_ok = bool(
+        checker_profile == "d"
+        and ev.kind == "move"
+        and not is_station_move
+        and _sentence_matches_passive_move_by_agent(frame_low, ev, all_parties, world)
+    )
+    v2_hid_ok = bool(
+        checker_profile == "d"
+        and ev.kind == "see"
+        and ev.occluded
+        and ev.occluder
+        and _sentence_matches_v2_occluded_see_hid(frame_low, ev, all_parties, world)
+    )
     actor_esc = re.escape(ev.actor.lower())
     actor_matches = list(re.finditer(rf"\b{actor_esc}\b", frame_low))
     actor_name_present = len(actor_matches) > 0
@@ -8008,11 +9221,20 @@ def evaluate_event_subrules(
     verb_matches: list[re.Match[str]] = []
     for v_word in kind_verbs:
         verb_matches.extend(re.finditer(rf"\b{re.escape(v_word.lower())}\b", frame_low))
-    allowed_verb_present = bool(possessive_occluded_see or verb_matches)
+    allowed_verb_present = bool(possessive_occluded_see or passive_move_ok or v2_hid_ok or verb_matches)
 
     subj_ok = bool(
         possessive_occluded_see
-        or _actor_precedes_verb_as_subject(frame_low, ev.actor, kind_verbs, all_parties, ev=ev)
+        or passive_move_ok
+        or v2_hid_ok
+        or _actor_precedes_verb_as_subject(
+            frame_low,
+            ev.actor,
+            kind_verbs,
+            all_parties,
+            ev=ev,
+            checker_profile=checker_profile,
+        )
     )
 
     if subj_ok:
@@ -8033,7 +9255,12 @@ def evaluate_event_subrules(
                     break
         if actor_name_present and allowed_verb_present and actor_before_verb:
             subj_without_others = _actor_precedes_verb_as_subject(
-                frame_low, ev.actor, kind_verbs, (ev.actor,), ev=ev
+                frame_low,
+                ev.actor,
+                kind_verbs,
+                (ev.actor,),
+                ev=ev,
+                checker_profile=checker_profile,
             )
             no_intervening_party = not subj_without_others
         else:
@@ -8070,7 +9297,12 @@ def evaluate_event_subrules(
             )
         )
         has_prev_leave = _preceding_sentence_is_matching_leave(
-            prev_sentence, prev_event, ev, world.noise_threshold, world=world
+            prev_sentence,
+            prev_event,
+            ev,
+            world.noise_threshold,
+            world=world,
+            checker_profile=checker_profile,
         )
         source_room = bool(has_explicit_from or has_prev_leave)
         destination_room = bool(ev.to_location and ev.to_location.lower() in s_low)
@@ -8096,7 +9328,12 @@ def evaluate_event_subrules(
         if is_station_move:
             source_room = ev.room.lower() in frame_low
             destination_room = bool(ev.to_location and ev.to_location.lower() in s_low)
-            source_before_destination = _sentence_matches_station_move(s_low, ev)
+            source_before_destination = _sentence_matches_station_move(
+                s_low,
+                ev,
+                all_parties=all_parties,
+                checker_profile=checker_profile,
+            )
         else:
             source_room = bool(
                 ev.room.lower() in frame_low
@@ -8157,8 +9394,12 @@ def evaluate_event_subrules(
         exact_db = True
 
     if ev.kind in ("say", "message"):
-        utt_core = (ev.utterance or "").rstrip(".!?").lower()
-        verbatim_quote = bool(utt_core and utt_core in s_low)
+        quoted_spans = _extract_quoted_spans(s_low)
+        verbatim_quote = bool(
+            ev.utterance
+            and quoted_spans
+            and _quote_matches_utterance_exactly(quoted_spans, ev.utterance)
+        )
     else:
         verbatim_quote = True
 
@@ -8188,6 +9429,7 @@ def diagnose_rendered_prose(
     rendering_index: int = 0,
     focal_agent: str | None = None,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> tuple[EventDiagnosticRecord, ...]:
     """Run the non-gating diagnostic alignment pass over `prose` for `world`.
 
@@ -8195,6 +9437,10 @@ def diagnose_rendered_prose(
     per event in `world.events`.
     """
     _ = (focal_agent, goal_mode)
+    if checker_profile not in VALID_CHECKER_PROFILES:
+        raise ValueError(
+            f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
+        )
     norm_prose = normalize_prose_line_endings(prose)
     paragraphs = [p.strip() for p in norm_prose.split("\n\n") if p.strip()]
     event_sentences: list[str] = []
@@ -8231,6 +9477,7 @@ def diagnose_rendered_prose(
                 world=world,
                 prev_sentence=event_sentences[s_prev],
                 prev_event=prev_ev,
+                checker_profile=checker_profile,
             ):
                 found_idx = search_start
             elif _sentence_matches_folded_leave_enter(
@@ -8239,6 +9486,7 @@ def diagnose_rendered_prose(
                 ev,
                 world.noise_threshold,
                 world=world,
+                checker_profile=checker_profile,
             ):
                 found_idx = s_prev
         if found_idx is None:
@@ -8267,6 +9515,7 @@ def diagnose_rendered_prose(
                     prev_event=prev_ev,
                     next_sentence=next_sent,
                     next_event=next_ev,
+                    checker_profile=checker_profile,
                 ) and not (
                     ev.kind == "leave"
                     and ev_idx + 1 < len(world.events)
@@ -8283,6 +9532,7 @@ def diagnose_rendered_prose(
                                 world.events[ev_idx + 1],
                                 world.noise_threshold,
                                 world=world,
+                                checker_profile=checker_profile,
                             )
                         )
                         or (
@@ -8293,6 +9543,7 @@ def diagnose_rendered_prose(
                                     ev,
                                     world.noise_threshold,
                                     world=world,
+                                    checker_profile=checker_profile,
                                 )
                                 and not _sentence_matches_folded_leave_enter(
                                     event_sentences[i],
@@ -8300,6 +9551,7 @@ def diagnose_rendered_prose(
                                     world.events[ev_idx + 1],
                                     world.noise_threshold,
                                     world=world,
+                                    checker_profile=checker_profile,
                                 )
                                 for i in range(0, search_start)
                             )
@@ -8309,6 +9561,7 @@ def diagnose_rendered_prose(
                                 world.events[ev_idx + 1],
                                 world.noise_threshold,
                                 world=world,
+                                checker_profile=checker_profile,
                             )
                         )
                     )
@@ -8321,7 +9574,13 @@ def diagnose_rendered_prose(
                     i
                     for i in range(0, search_start)
                     if i not in matched_sentence_indices
-                    and _sentence_matches_event(event_sentences[i], ev, world.noise_threshold, world=world)
+                    and _sentence_matches_event(
+                        event_sentences[i],
+                        ev,
+                        world.noise_threshold,
+                        world=world,
+                        checker_profile=checker_profile,
+                    )
                 ),
                 None,
             )
@@ -8341,6 +9600,7 @@ def diagnose_rendered_prose(
                     world.events[ev_idx + 1],
                     world.noise_threshold,
                     world=world,
+                    checker_profile=checker_profile,
                 )
             )
             missing_ev_kind = (
@@ -8388,7 +9648,12 @@ def diagnose_rendered_prose(
                     b_has_db = db_str in s_b_low and utt_core not in s_b_low
                     if (a_has_db and b_has_utt) or (a_has_utt and b_has_db):
                         combined = f"{s_a} {s_b}"
-                        comb_sub = evaluate_event_subrules(combined, ev, world)
+                        comb_sub = evaluate_event_subrules(
+                            combined,
+                            ev,
+                            world,
+                            checker_profile=checker_profile,
+                        )
                         if all(
                             (not comb_sub[k] if k == "pronoun_before_verb" else comb_sub[k])
                             for k in DIAGNOSTIC_SUBRULE_NAMES
@@ -8460,6 +9725,7 @@ def diagnose_rendered_prose(
                     world=world,
                     prev_sentence=effective_prev_sent,
                     prev_event=prev_ev,
+                    checker_profile=checker_profile,
                 ):
                     aligned_indices[ev_idx] = s_cursor
                     consumed.add(s_cursor)
@@ -8471,6 +9737,7 @@ def diagnose_rendered_prose(
                     ev,
                     world.noise_threshold,
                     world=world,
+                    checker_profile=checker_profile,
                 ):
                     aligned_indices[ev_idx] = s_prev
                     continue
@@ -8502,6 +9769,7 @@ def diagnose_rendered_prose(
                 prev_event=prev_ev if prev_sent_for_enter is not None else None,
                 next_sentence=next_sent if ev.kind == "leave" else None,
                 next_event=next_ev if ev.kind == "leave" else None,
+                checker_profile=checker_profile,
             ):
                 aligned_indices[ev_idx] = s_cursor
                 consumed.add(s_cursor)
@@ -8523,6 +9791,7 @@ def diagnose_rendered_prose(
                     world,
                     prev_sentence=prev_sent_for_enter,
                     prev_event=prev_ev if prev_sent_for_enter is not None else None,
+                    checker_profile=checker_profile,
                 )
                 sub_b = evaluate_event_subrules(
                     s_b,
@@ -8530,6 +9799,7 @@ def diagnose_rendered_prose(
                     world,
                     prev_sentence=prev_sent_for_enter,
                     prev_event=prev_ev if prev_sent_for_enter is not None else None,
+                    checker_profile=checker_profile,
                 )
                 a_passes_alone = all(
                     (not sub_a[k] if k == "pronoun_before_verb" else sub_a[k])
@@ -8546,6 +9816,7 @@ def diagnose_rendered_prose(
                         world,
                         prev_sentence=prev_sent_for_enter,
                         prev_event=prev_ev if prev_sent_for_enter is not None else None,
+                        checker_profile=checker_profile,
                     )
                     comb_passes = all(
                         (not comb_sub[k] if k == "pronoun_before_verb" else comb_sub[k])
@@ -8568,6 +9839,7 @@ def diagnose_rendered_prose(
                             world,
                             prev_sentence=s_a,
                             prev_event=ev,
+                            checker_profile=checker_profile,
                         )
                         if (
                             _sentence_matches_event(
@@ -8577,6 +9849,7 @@ def diagnose_rendered_prose(
                                 world=world,
                                 prev_sentence=s_a,
                                 prev_event=ev,
+                                checker_profile=checker_profile,
                             )
                             or (sub_b_next["allowed_verb_present"] and sub_b_next["destination_room"])
                         ):
@@ -8597,6 +9870,7 @@ def diagnose_rendered_prose(
                     next_ev,
                     world.noise_threshold,
                     world=world,
+                    checker_profile=checker_profile,
                 ):
                     aligned_indices[ev_idx] = None
                     continue
@@ -8609,6 +9883,7 @@ def diagnose_rendered_prose(
                     next_ev,
                     world.noise_threshold,
                     world=world,
+                    checker_profile=checker_profile,
                 )
             ):
                 aligned_indices[ev_idx] = None
@@ -8665,6 +9940,7 @@ def diagnose_rendered_prose(
                 world,
                 prev_sentence=prev_sent if ev.kind == "enter" else None,
                 prev_event=prev_ev if ev.kind == "enter" else None,
+                checker_profile=checker_profile,
             )
             failed_subrules = tuple(
                 name
@@ -8808,8 +10084,13 @@ def diagnose_paired_run(
     sealed_responses_path: Path | None = None,
     sealed_diagnostics_path: Path | None = None,
     public_summary_out: Path | None = None,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> dict[str, object]:
     """Run the diagnostic alignment pass offline (CPU only, no model) over a sealed paired run."""
+    if checker_profile not in VALID_CHECKER_PROFILES:
+        raise ValueError(
+            f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
+        )
     if isinstance(paired_run, Path):
         if paired_run.is_dir():
             run_dir = paired_run
@@ -8877,6 +10158,7 @@ def diagnose_paired_run(
             world,
             rendering_index=r_idx,
             focal_agent=focal_ag,
+            checker_profile=checker_profile,
         )
         all_records.extend(recs)
 
@@ -8932,6 +10214,8 @@ def run_paired_seed_bank(
     seed_bank: Path | Sequence[int],
     goal_mode: str = DEFAULT_GOAL_MODE,
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
+    accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
     output_path: Path | None = None,
     sealed_responses_path: Path | None = None,
     sealed_diagnostics_path: Path | None = None,
@@ -8960,6 +10244,14 @@ def run_paired_seed_bank(
     if constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
         raise ValueError(
             f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
+        )
+    if checker_profile not in VALID_CHECKER_PROFILES:
+        raise ValueError(
+            f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}"
+        )
+    if accepted_forms_line not in VALID_ACCEPTED_FORMS_LINES:
+        raise ValueError(
+            f"accepted_forms_line must be one of {sorted(VALID_ACCEPTED_FORMS_LINES)}, got {accepted_forms_line!r}"
         )
     seeds = _load_seed_bank_seeds(seed_bank)
     resolved_commit = commit_sha if commit_sha is not None else _resolve_git_commit_sha()
@@ -9001,6 +10293,8 @@ def run_paired_seed_bank(
         short_circuit_dead_scenarios=False,
         goal_mode=goal_mode,
         constraint_layout=constraint_layout,
+        checker_profile=checker_profile,
+        accepted_forms_line=accepted_forms_line,
         start_owned_server=False if (http_transport is not None and popen_factory is None) else True if popen_factory is not None else None,
         popen_factory=popen_factory,
         server_port=server_port,
@@ -9021,6 +10315,7 @@ def run_paired_seed_bank(
                     writer._prompt_template,
                     goal_mode=goal_mode,
                     constraint_layout=constraint_layout,
+                    accepted_forms_line=accepted_forms_line,
                 )
                 prev_len = len(writer.call_records)
                 prev_sealed_len = len(writer.sealed_responses)
@@ -9051,6 +10346,7 @@ def run_paired_seed_bank(
                                 world,
                                 rendering_index=r_idx,
                                 focal_agent=focal_agent,
+                                checker_profile=checker_profile,
                             )
                         )
                     except Exception as diag_exc:
@@ -9129,6 +10425,7 @@ def run_paired_seed_bank(
     hard_constraints_sha256 = compute_hard_constraints_sha256(
         goal_mode=goal_mode,
         constraint_layout=constraint_layout,
+        accepted_forms_line=accepted_forms_line,
     )
 
     report: dict[str, object] = {
@@ -9467,6 +10764,7 @@ def rescore_prose_records(
     records: Sequence[Mapping[str, Any] | RenderedScenario],
     *,
     checker_version: str,
+    checker_profile: str = DEFAULT_CHECKER_PROFILE,
     **kwargs: Any,
 ) -> list[dict[str, object]]:
     """Re-score already-generated rendering records (world + prose) and return pass/fail and reason codes only.
@@ -9475,6 +10773,8 @@ def rescore_prose_records(
     """
     if not isinstance(checker_version, str) or not checker_version.strip():
         raise ValueError("checker_version must be a non-empty string.")
+    if checker_profile not in VALID_CHECKER_PROFILES:
+        raise ValueError(f"Invalid checker_profile {checker_profile!r}; expected one of {sorted(VALID_CHECKER_PROFILES)}")
     if kwargs:
         bad_keys = sorted(kwargs.keys())
         raise ValueError(
@@ -9545,12 +10845,16 @@ def rescore_prose_records(
             world,
             focal_agent=focal_agent,
             goal_mode=goal_mode,
+            checker_profile=checker_profile,
         )
         passed = len(faults) == 0
         fault_check_ids = [f.check_id for f in faults]
+        fault_rule_ids = [f.rule_id for f in faults]
         primary_check_id = faults[0].check_id if faults else None
+        primary_rule_id = faults[0].rule_id if faults else None
         reason_code = primary_check_id if primary_check_id is not None else "PASS"
         failure_kind = faults[0].failure_kind if faults else None
+        rule_id_counts = dict(sorted(Counter(fault_rule_ids).items()))
 
         checked_prose = (
             splice_goal_tokens(prose, world).expanded_prose
@@ -9564,6 +10868,7 @@ def rescore_prose_records(
                 rendering_index=rendering_index,
                 focal_agent=focal_agent,
                 goal_mode=goal_mode,
+                checker_profile=checker_profile,
             )
             if world is not None
             else ()
@@ -9601,12 +10906,16 @@ def rescore_prose_records(
                 "scenario_id": str(scenario_id),
                 "rendering_index": int(rendering_index),
                 "checker_version": str(checker_version),
+                "checker_profile": str(checker_profile),
                 "passed": bool(passed),
                 "checks_passed": bool(passed),
                 "reason_code": str(reason_code),
                 "primary_check_id": primary_check_id,
+                "primary_rule_id": primary_rule_id,
                 "failure_kind": failure_kind,
                 "fault_check_ids": list(fault_check_ids),
+                "fault_rule_ids": list(fault_rule_ids),
+                "rule_id_counts": dict(rule_id_counts),
                 "event_kind_passed": dict(event_kind_passed),
                 "by_event_kind": dict(by_event_kind),
             }
