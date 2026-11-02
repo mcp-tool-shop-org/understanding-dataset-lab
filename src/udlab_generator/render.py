@@ -6804,7 +6804,8 @@ def match_rendering_event_forms(
     focal_agent: str | None = None,
     goal_mode: str = DEFAULT_GOAL_MODE,
     checker_profile: str = DEFAULT_CHECKER_PROFILE,
-) -> list[dict[str, object]]:
+    return_sentence_count: bool = False,
+) -> list[dict[str, object]] | tuple[list[dict[str, object]], int]:
     """Run the sequential event-order matching pass over `prose` for `world` and return per-event realized form outcomes (no text)."""
     _ = focal_agent
     if goal_mode not in VALID_GOAL_MODES:
@@ -6825,9 +6826,12 @@ def match_rendering_event_forms(
     if len(paragraphs) >= 2:
         for ev_para in paragraphs[1:]:
             event_sentences.extend(_split_prose_sentences(ev_para))
+    event_sentence_count = len(event_sentences)
 
     n_events = len(world.events)
     if n_events == 0:
+        if return_sentence_count:
+            return [], event_sentence_count
         return []
 
     matched_sentence_indices: list[int] = []
@@ -6986,6 +6990,7 @@ def match_rendering_event_forms(
                         "realized_form_id": None,
                         "outcome": "other_fault",
                         "rule_id": "c_fidelity_event_order",
+                        "sentence_index": earlier_idx,
                     }
                 )
                 continue
@@ -7040,7 +7045,9 @@ def match_rendering_event_forms(
                     world=world,
                     checker_profile=checker_profile,
                 )
+            consumed_sentence_idx: int | None = None
             if missing_ev_kind == "altered" and search_start < len(event_sentences):
+                consumed_sentence_idx = search_start
                 matched_sentence_indices.append(search_start)
                 search_start += 1
 
@@ -7061,6 +7068,7 @@ def match_rendering_event_forms(
                     "realized_form_id": None,
                     "outcome": outcome_bucket,
                     "rule_id": ev_rule_id,
+                    "sentence_index": consumed_sentence_idx,
                 }
             )
             continue
@@ -7079,8 +7087,11 @@ def match_rendering_event_forms(
                 "realized_form_id": realized_form_id,
                 "outcome": realized_form_id,
                 "rule_id": None,
+                "sentence_index": found_idx,
             }
         )
+    if return_sentence_count:
+        return results, event_sentence_count
     return results
 
 
