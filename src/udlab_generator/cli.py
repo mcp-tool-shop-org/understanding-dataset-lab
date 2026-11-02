@@ -1335,7 +1335,7 @@ def main(
         choices=tuple(sorted(VALID_ACCEPTED_FORMS_LINES)),
         default=DEFAULT_ACCEPTED_FORMS_LINE,
         help=(
-            f"Append two accepted-forms lines for move and see (occluded) to the writer prompt "
+            f"Append four accepted-forms lines for say, move, see (occluded), and actor phrase to the writer prompt "
             f"(default: {DEFAULT_ACCEPTED_FORMS_LINE})."
         ),
     )

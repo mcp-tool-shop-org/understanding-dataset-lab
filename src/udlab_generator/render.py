@@ -2670,17 +2670,18 @@ def _extract_quoted_spans(s_low: str) -> list[str]:
 
 
 def _normalize_utterance_or_quote(s: str) -> str:
-    """Lowercase, strip outer whitespace, strip at most one trailing punctuation mark from `,.;:!?`, and collapse internal whitespace runs to a single space."""
+    """Lowercase, trim outer whitespace, and strip at most one trailing punctuation mark from `.,!?`."""
     cleaned = s.strip().lower()
-    if cleaned and cleaned[-1] in ",.;:!?":
-        cleaned = cleaned[:-1].rstrip()
-    return re.sub(r"\s+", " ", cleaned)
+    if cleaned and cleaned[-1] in ".,!?":
+        cleaned = cleaned[:-1]
+    return cleaned
 
 
 def _quote_matches_utterance_exactly(quoted_spans: Sequence[str], utterance: str) -> bool:
-    """Return True iff at least one quoted span equals `utterance` after `_normalize_utterance_or_quote`."""
-    norm_utt = _normalize_utterance_or_quote(utterance)
-    return any(_normalize_utterance_or_quote(q) == norm_utt for q in quoted_spans)
+    """Return True iff `quoted_spans` has exactly one quoted span and it equals `utterance` after `_normalize_utterance_or_quote`."""
+    if len(quoted_spans) != 1:
+        return False
+    return _normalize_utterance_or_quote(quoted_spans[0]) == _normalize_utterance_or_quote(utterance)
 
 
 def _has_fronted_bystander_in_prefix(
@@ -2756,6 +2757,32 @@ _P1_EXTRA_EVENT_VERB_WORDS: frozenset[str] = frozenset(
 )
 
 
+_P1_HEDGE_AND_MODAL_WORDS: frozenset[str] = frozenset(
+    {
+        "perhaps",
+        "maybe",
+        "might",
+        "may",
+        "could",
+        "would",
+        "should",
+        "likely",
+        "probably",
+        "possibly",
+        "apparently",
+        "seemingly",
+        "supposedly",
+    }
+)
+_P1_HEDGE_PHRASES: tuple[str, ...] = (
+    "it seems",
+    "it seemed",
+    "i think",
+    "i believe",
+    "i guess",
+)
+
+
 def _actor_to_verb_matches_p1_phrase(
     between: str,
     ev: Event | None,
@@ -2763,7 +2790,7 @@ def _actor_to_verb_matches_p1_phrase(
     world: World | None = None,
 ) -> bool:
     """Widening P1 (Profile D): return True if `between` is a single comma-delimited descriptive phrase (`<= 6` words)
-    with no party name, room or container name, object/occluder/fixture, event verb, or negation/hedge word."""
+    with no party name, room or container name, object/occluder/fixture, event verb, or negation/hedge/modal word."""
     if ev is None:
         return False
     m = _P1_COMMA_PHRASE_RE.match(between)
@@ -2780,6 +2807,12 @@ def _actor_to_verb_matches_p1_phrase(
     word_set = {w.strip("'") for w in words}
     if word_set & _NON_FACTIVE_OR_HEDGE_WORDS:
         return False
+    if word_set & _P1_HEDGE_AND_MODAL_WORDS:
+        return False
+    norm_phrase_words = " ".join(w.strip("'") for w in words)
+    for hp in _P1_HEDGE_PHRASES:
+        if re.search(rf"\b{re.escape(hp)}\b", norm_phrase_words) is not None:
+            return False
     if word_set & _P1_FORBIDDEN_CLAUSE_WORDS:
         return False
 
@@ -3729,6 +3762,14 @@ def _sentence_matches_v2_occluded_see_hid(
         after_v2 = frame_low[m_v2.end() :]
         if re.search(r"\b(?:while|whereas|although|though)\b", after_v2) is not None:
             continue
+        if (
+            re.search(
+                rf",\s*who\s+(?:then\s+)?(?:{'|'.join(re.escape(v) for v in OCCLUDED_SEE_REFUSED_SIGHTING_VERBS)})\b",
+                after_v2,
+            )
+            is not None
+        ):
+            continue
         if any(
             p.lower() != ev.actor.lower()
             and re.search(rf"\b{re.escape(p.lower())}\b", after_v2) is not None
@@ -4324,13 +4365,40 @@ def _sentence_matches_event(
     if ev.kind == "message":
         if not ev.recipient:
             return False
+        if _has_bundled_or_reordered_clause(frame_low, ev.actor):
+            return False
         recip_esc = re.escape(ev.recipient.lower())
         if not re.search(rf"\b(?:to|for|messaged|texted|notified)\s+{recip_esc}\b", frame_low):
             return False
+        quoted_spans = _extract_quoted_spans(s_low)
+        if len(quoted_spans) > 1:
+            return False
         if ev.utterance:
-            quoted_spans = _extract_quoted_spans(s_low)
             if quoted_spans:
                 if not _quote_matches_utterance_exactly(quoted_spans, ev.utterance):
+                    return False
+                subj_matches = _find_actor_subject_verb_matches(
+                    frame_low,
+                    ev.actor,
+                    _ACTION_VERBS_BY_KIND["message"],
+                    all_parties,
+                    ev=ev,
+                    world=world,
+                    checker_profile=checker_profile,
+                )
+                msg_quote_bound = False
+                for m_act, m_verb in subj_matches:
+                    verb_end = m_act.end() + m_verb.end()
+                    after_verb = frame_low[verb_end:]
+                    before_actor = frame_low[: m_act.start()]
+                    clause_after_verb = re.split(
+                        r"[;]|,\s*(?:and|but|yet|while|whereas|although|though)\b|\b(?:while|whereas|although|though)\b",
+                        after_verb,
+                    )[0]
+                    if '""' in clause_after_verb or re.search(r'^\s*""\s*[,.;:]?\s*$', before_actor) is not None:
+                        msg_quote_bound = True
+                        break
+                if not msg_quote_bound:
                     return False
             else:
                 utt_core = ev.utterance.rstrip(".!?").lower()
