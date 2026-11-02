@@ -997,29 +997,41 @@ def build_and_probe_dataset(
         modelfile_parameters = None
         server_info = None
 
-    worlds_by_sid = {w.scenario_id: w for w in worlds}
-    diag_records: list[EventDiagnosticRecord] = []
-    if sealed_responses_path.is_file():
-        final_sealed_by_rend: dict[tuple[str, int], dict[str, Any]] = {}
-        for sr_line in sealed_responses_path.read_text(encoding="utf-8").splitlines():
-            if sr_line.strip():
-                sr_obj = json.loads(sr_line)
-                if isinstance(sr_obj, dict):
-                    final_sealed_by_rend[(str(sr_obj["scenario_id"]), int(sr_obj["rendering_index"]))] = sr_obj
-        for (sid, r_idx), sr_obj in final_sealed_by_rend.items():
-            if sid in worlds_by_sid:
-                diag_records.extend(
-                    diagnose_rendered_prose(
-                        str(sr_obj.get("response_text") or ""),
-                        worlds_by_sid[sid],
-                        rendering_index=r_idx,
-                        focal_agent=str(sr_obj.get("focal_agent") or ""),
-                        goal_mode=str(sr_obj.get("goal_mode") or resolved_goal_mode),
+    diagnostics_error: str | None = None
+    diagnostics_summary: dict[str, object] | None = None
+    diagnostics_sealed_sha256: str | None = None
+    try:
+        worlds_by_sid = {w.scenario_id: w for w in worlds}
+        diag_records: list[EventDiagnosticRecord] = []
+        if sealed_responses_path.is_file():
+            final_sealed_by_rend: dict[tuple[str, int], dict[str, Any]] = {}
+            for sr_line in sealed_responses_path.read_text(encoding="utf-8").splitlines():
+                if sr_line.strip():
+                    sr_obj = json.loads(sr_line)
+                    if isinstance(sr_obj, dict):
+                        final_sealed_by_rend[(str(sr_obj["scenario_id"]), int(sr_obj["rendering_index"]))] = sr_obj
+            for (sid, r_idx), sr_obj in final_sealed_by_rend.items():
+                if sid in worlds_by_sid:
+                    diag_records.extend(
+                        diagnose_rendered_prose(
+                            str(sr_obj.get("response_text") or ""),
+                            worlds_by_sid[sid],
+                            rendering_index=r_idx,
+                            focal_agent=str(sr_obj.get("focal_agent") or ""),
+                            goal_mode=str(sr_obj.get("goal_mode") or resolved_goal_mode),
+                        )
                     )
-                )
-    sealed_diagnostics_path = sealed_dir / SEALED_DIAGNOSTICS_FILENAME
-    write_sealed_diagnostics(sealed_diagnostics_path, diag_records)
-    diagnostics_summary = summarize_diagnostics_public(diag_records)
+        sealed_diagnostics_path = sealed_dir / SEALED_DIAGNOSTICS_FILENAME
+        write_sealed_diagnostics(sealed_diagnostics_path, diag_records)
+        diagnostics_bytes = (
+            sealed_diagnostics_path.read_bytes() if sealed_diagnostics_path.is_file() else b""
+        )
+        diagnostics_sealed_sha256 = hashlib.sha256(diagnostics_bytes).hexdigest()
+        diagnostics_summary = summarize_diagnostics_public(diag_records)
+    except Exception as diag_exc:
+        diagnostics_error = type(diag_exc).__name__
+        diagnostics_summary = None
+        diagnostics_sealed_sha256 = None
 
     generations_bytes = generations_path.read_bytes() if generations_path.is_file() else b""
     generations_sha256 = hashlib.sha256(generations_bytes).hexdigest()
@@ -1048,6 +1060,9 @@ def build_and_probe_dataset(
         "generations_sha256": generations_sha256,
         "responses_sealed_file": SEALED_RESPONSES_FILENAME,
         "responses_sealed_sha256": responses_sealed_sha256,
+        "diagnostics_sealed_file": SEALED_DIAGNOSTICS_FILENAME,
+        "diagnostics_sealed_sha256": diagnostics_sealed_sha256,
+        "diagnostics_error": diagnostics_error,
         "checkpoint_chain_head_sha256": checkpoint.chain_head_sha256,
     }
 
@@ -1103,6 +1118,8 @@ def build_and_probe_dataset(
         "responses_sealed_file": SEALED_RESPONSES_FILENAME,
         "responses_sealed_sha256": responses_sealed_sha256,
         "diagnostics_sealed_file": SEALED_DIAGNOSTICS_FILENAME,
+        "diagnostics_sealed_sha256": diagnostics_sealed_sha256,
+        "diagnostics_error": diagnostics_error,
         "diagnostics_summary": diagnostics_summary,
         "checkpoint_chain_head_sha256": checkpoint.chain_head_sha256,
         "recount_verification": recount_verification,

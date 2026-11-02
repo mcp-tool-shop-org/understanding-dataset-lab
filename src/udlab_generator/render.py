@@ -152,6 +152,15 @@ SEALED_RESPONSES_FILENAME: str = "responses.sealed.jsonl"
 SEALED_DIAGNOSTICS_FILENAME: str = "diagnostics.sealed.jsonl"
 CHECKPOINT_GENESIS_HASH: str = "0" * 64
 GENERATIONS_FILENAME: str = "generations.jsonl"
+PAIRED_SEED_BANK_SCHEMA_V1: str = "paired_seed_bank_run_v1"
+PAIRED_SEED_BANK_SCHEMA_V2: str = "paired_seed_bank_run_v2"
+PAIRED_SEED_BANK_SCHEMA_VERSION: str = PAIRED_SEED_BANK_SCHEMA_V2
+VALID_PAIRED_SEED_BANK_SCHEMA_VERSIONS: frozenset[str] = frozenset(
+    {
+        PAIRED_SEED_BANK_SCHEMA_V1,
+        PAIRED_SEED_BANK_SCHEMA_V2,
+    }
+)
 
 VALID_DIAGNOSTIC_CLASSES: frozenset[str] = frozenset(
     {
@@ -5758,9 +5767,11 @@ class WriterCheckpointManager:
             or sealed_header.get("writer_manifest_digest") != self.writer_pin.manifest_digest
             or pub_header.get("goal_mode", DEFAULT_GOAL_MODE) != self.goal_mode
             or sealed_header.get("goal_mode", DEFAULT_GOAL_MODE) != self.goal_mode
+            or pub_header.get("presence_penalty") != self.presence_penalty
+            or sealed_header.get("presence_penalty") != self.presence_penalty
         ):
             raise ValueError(
-                "Cannot --resume: checkpoint header (count, seed, writer_kind, goal_mode, or writer_manifest_digest) mismatches requested run."
+                "Cannot --resume: checkpoint header (count, seed, writer_kind, goal_mode, presence_penalty, or writer_manifest_digest) mismatches requested run."
             )
 
         restored_private_seed = str(sealed_header.get("private_seed_hex") or "")
@@ -7660,23 +7671,34 @@ def diagnose_rendered_prose(
             prev_ev = world.events[ev_idx - 1] if ev_idx > 0 else None
             next_ev = world.events[ev_idx + 1] if ev_idx + 1 < n_events else None
             s_prev = aligned_indices[ev_idx - 1] if ev_idx > 0 else None
+            prev_was_split = (
+                ev_idx > 0
+                and (ev_idx - 1) in split_events
+                and s_prev is not None
+                and s_prev + 1 < len(event_sentences)
+            )
+            effective_prev_sent = (
+                f"{event_sentences[s_prev]} {event_sentences[s_prev + 1]}"  # type: ignore[index]
+                if prev_was_split
+                else (event_sentences[s_prev] if s_prev is not None and 0 <= s_prev < len(event_sentences) else None)
+            )
 
             # Check folded leave+enter or arrival-half enter
-            if ev.kind == "enter" and prev_ev is not None and s_prev is not None:
+            if ev.kind == "enter" and prev_ev is not None and s_prev is not None and effective_prev_sent is not None:
                 if s_cursor < len(event_sentences) and _sentence_matches_event(
                     event_sentences[s_cursor],
                     ev,
                     world.noise_threshold,
                     world=world,
-                    prev_sentence=event_sentences[s_prev],
+                    prev_sentence=effective_prev_sent,
                     prev_event=prev_ev,
                 ):
                     aligned_indices[ev_idx] = s_cursor
                     consumed.add(s_cursor)
                     s_cursor += 1
                     continue
-                if _sentence_matches_folded_leave_enter(
-                    event_sentences[s_prev],
+                if not prev_was_split and _sentence_matches_folded_leave_enter(
+                    effective_prev_sent,
                     prev_ev,
                     ev,
                     world.noise_threshold,
@@ -7695,8 +7717,12 @@ def diagnose_rendered_prose(
                 else None
             )
             prev_sent_for_enter = (
-                event_sentences[s_prev]
-                if (ev.kind == "enter" and s_prev is not None and s_prev == s_cursor - 1)
+                effective_prev_sent
+                if (
+                    ev.kind == "enter"
+                    and s_prev is not None
+                    and (s_prev == s_cursor - 1 or (prev_was_split and s_prev == s_cursor - 2))
+                )
                 else None
             )
             if _sentence_matches_event(
@@ -7713,6 +7739,87 @@ def diagnose_rendered_prose(
                 consumed.add(s_cursor)
                 s_cursor += 1
                 continue
+
+            # Check if a leave or enter event is split across two consecutive sentences (s_cursor, s_cursor + 1):
+            # required parts (actor + verb, source room, destination room) satisfied across the pair but not within one.
+            if (
+                ev.kind in ("leave", "enter")
+                and s_cursor + 1 < len(event_sentences)
+                and (s_cursor + 1) not in consumed
+            ):
+                s_a = event_sentences[s_cursor]
+                s_b = event_sentences[s_cursor + 1]
+                sub_a = evaluate_event_subrules(
+                    s_a,
+                    ev,
+                    world,
+                    prev_sentence=prev_sent_for_enter,
+                    prev_event=prev_ev if prev_sent_for_enter is not None else None,
+                )
+                sub_b = evaluate_event_subrules(
+                    s_b,
+                    ev,
+                    world,
+                    prev_sentence=prev_sent_for_enter,
+                    prev_event=prev_ev if prev_sent_for_enter is not None else None,
+                )
+                a_passes_alone = all(
+                    (not sub_a[k] if k == "pronoun_before_verb" else sub_a[k])
+                    for k in DIAGNOSTIC_SUBRULE_NAMES
+                )
+                b_passes_alone = all(
+                    (not sub_b[k] if k == "pronoun_before_verb" else sub_b[k])
+                    for k in DIAGNOSTIC_SUBRULE_NAMES
+                )
+                if not a_passes_alone and not b_passes_alone:
+                    comb_sub = evaluate_event_subrules(
+                        f"{s_a} {s_b}",
+                        ev,
+                        world,
+                        prev_sentence=prev_sent_for_enter,
+                        prev_event=prev_ev if prev_sent_for_enter is not None else None,
+                    )
+                    comb_passes = all(
+                        (not comb_sub[k] if k == "pronoun_before_verb" else comb_sub[k])
+                        for k in DIAGNOSTIC_SUBRULE_NAMES
+                    )
+                    b_is_arrival_only_for_leave = bool(
+                        ev.kind == "leave"
+                        and re.search(r"\b(?:entered|arrived\s+in)\b", s_b.lower())
+                        and not sub_b["allowed_verb_present"]
+                    )
+                    b_needed_for_next = b_is_arrival_only_for_leave
+                    if (
+                        not b_needed_for_next
+                        and next_ev is not None
+                        and (len(event_sentences) - (s_cursor + 2)) < (n_events - (ev_idx + 1))
+                    ):
+                        sub_b_next = evaluate_event_subrules(
+                            s_b,
+                            next_ev,
+                            world,
+                            prev_sentence=s_a,
+                            prev_event=ev,
+                        )
+                        if (
+                            _sentence_matches_event(
+                                s_b,
+                                next_ev,
+                                world.noise_threshold,
+                                world=world,
+                                prev_sentence=s_a,
+                                prev_event=ev,
+                            )
+                            or (sub_b_next["allowed_verb_present"] and sub_b_next["destination_room"])
+                        ):
+                            b_needed_for_next = True
+                    if comb_passes and not b_needed_for_next:
+                        aligned_indices[ev_idx] = s_cursor
+                        split_events.add(ev_idx)
+                        consumed.add(s_cursor)
+                        consumed.add(s_cursor + 1)
+                        s_cursor += 2
+                        continue
 
             # If current sentence does not match `ev`, check whether `ev` was omitted and `s_cursor` matches a subsequent event
             if ev.kind in ("say", "message"):
@@ -7761,11 +7868,19 @@ def diagnose_rendered_prose(
         s_idx = aligned_indices[ev_idx]
         prev_ev = world.events[ev_idx - 1] if ev_idx > 0 else None
         s_prev = aligned_indices[ev_idx - 1] if ev_idx > 0 else None
-        prev_sent = (
-            event_sentences[s_prev]
-            if (s_prev is not None and 0 <= s_prev < len(event_sentences))
-            else None
-        )
+        if (
+            ev_idx > 0
+            and (ev_idx - 1) in split_events
+            and s_prev is not None
+            and 0 <= s_prev < len(event_sentences) - 1
+        ):
+            prev_sent: str | None = f"{event_sentences[s_prev]} {event_sentences[s_prev + 1]}"
+        else:
+            prev_sent = (
+                event_sentences[s_prev]
+                if (s_prev is not None and 0 <= s_prev < len(event_sentences))
+                else None
+            )
 
         if s_idx is None or s_idx < 0 or s_idx >= len(event_sentences):
             subrules = {name: False for name in DIAGNOSTIC_SUBRULE_NAMES}
@@ -8120,6 +8235,7 @@ def run_paired_seed_bank(
     )
     renderings_out: list[dict[str, object]] = []
     all_diag_records: list[EventDiagnosticRecord] = []
+    diagnostics_error: str | None = None
     try:
         for idx, scen_seed in enumerate(seeds):
             world = world_from_scenario_seed(scen_seed, index=idx)
@@ -8152,14 +8268,18 @@ def run_paired_seed_bank(
                     if sealed_rec is not None
                     else (prose_out or "")
                 )
-                all_diag_records.extend(
-                    diagnose_rendered_prose(
-                        raw_draft,
-                        world,
-                        rendering_index=r_idx,
-                        focal_agent=focal_agent,
-                    )
-                )
+                if diagnostics_error is None:
+                    try:
+                        all_diag_records.extend(
+                            diagnose_rendered_prose(
+                                raw_draft,
+                                world,
+                                rendering_index=r_idx,
+                                focal_agent=focal_agent,
+                            )
+                        )
+                    except Exception as diag_exc:
+                        diagnostics_error = type(diag_exc).__name__
                 call_seed = (
                     rec.seed
                     if rec is not None
@@ -8198,9 +8318,23 @@ def run_paired_seed_bank(
     finally:
         writer.close()
 
-    if resolved_sealed_diagnostics_path is not None:
-        write_sealed_diagnostics(resolved_sealed_diagnostics_path, all_diag_records)
-    diag_summary = summarize_diagnostics_public(all_diag_records)
+    diag_summary: dict[str, object] | None = None
+    diagnostics_sealed_sha256: str | None = None
+    if diagnostics_error is None:
+        try:
+            if resolved_sealed_diagnostics_path is not None:
+                write_sealed_diagnostics(resolved_sealed_diagnostics_path, all_diag_records)
+                diag_bytes = (
+                    resolved_sealed_diagnostics_path.read_bytes()
+                    if resolved_sealed_diagnostics_path.is_file()
+                    else b""
+                )
+                diagnostics_sealed_sha256 = _sha256_bytes(diag_bytes)
+            diag_summary = summarize_diagnostics_public(all_diag_records)
+        except Exception as diag_exc:
+            diagnostics_error = type(diag_exc).__name__
+            diag_summary = None
+            diagnostics_sealed_sha256 = None
 
     total_renderings = len(renderings_out)
     passed_renderings = sum(1 for r in renderings_out if r["checks_passed"])
@@ -8217,7 +8351,7 @@ def run_paired_seed_bank(
             fault_counts[str(cid)] += 1
 
     report: dict[str, object] = {
-        "schema_version": "paired_seed_bank_run_v1",
+        "schema_version": PAIRED_SEED_BANK_SCHEMA_VERSION,
         "goal_mode": goal_mode,
         "commit": resolved_commit,
         "model": writer.ollama_tag,
@@ -8233,6 +8367,11 @@ def run_paired_seed_bank(
         "passed_scenarios": passed_scenarios,
         "scenario_pass_rate": round(passed_scenarios / total_scenarios, 6) if total_scenarios > 0 else 0.0,
         "fault_counts": dict(sorted(fault_counts.items())),
+        "diagnostics_sealed_file": (
+            SEALED_DIAGNOSTICS_FILENAME if resolved_sealed_diagnostics_path is not None else None
+        ),
+        "diagnostics_sealed_sha256": diagnostics_sealed_sha256,
+        "diagnostics_error": diagnostics_error,
         "diagnostics_summary": diag_summary,
         "renderings": renderings_out,
     }
@@ -8263,6 +8402,20 @@ def compare_paired_runs(
     data_b: Mapping[str, Any] = (
         json.loads(run_b.read_text(encoding="utf-8")) if isinstance(run_b, Path) else run_b
     )
+    ver_a = str(data_a.get("schema_version") or PAIRED_SEED_BANK_SCHEMA_V1)
+    ver_b = str(data_b.get("schema_version") or PAIRED_SEED_BANK_SCHEMA_V1)
+    if (
+        ver_a not in VALID_PAIRED_SEED_BANK_SCHEMA_VERSIONS
+        or ver_b not in VALID_PAIRED_SEED_BANK_SCHEMA_VERSIONS
+    ):
+        raise ValueError(
+            f"Unsupported paired run schema_version: run_a={ver_a!r}, run_b={ver_b!r}; "
+            f"expected one of {sorted(VALID_PAIRED_SEED_BANK_SCHEMA_VERSIONS)}."
+        )
+    if ver_a != ver_b:
+        raise ValueError(
+            f"Paired run schema_version mismatch: cannot pair {ver_a!r} with {ver_b!r}."
+        )
     mode_a = str(data_a.get("goal_mode") or "mode_a")
     mode_b = str(data_b.get("goal_mode") or "mode_b")
     if mode_a == mode_b:
@@ -8389,6 +8542,7 @@ def compare_paired_runs(
 
     comparison: dict[str, object] = {
         "schema_version": "paired_seed_bank_comparison_v1",
+        "paired_run_schema_version": ver_a,
         "modes": {
             "a": label_a,
             "b": label_b,
