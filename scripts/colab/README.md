@@ -28,4 +28,7 @@ Per-window Google Colab launcher (`launch.sh`) and VM runner (`vm_udlab.py`) for
 - **(c)** The log check matches prompt lines of 40 or more characters, after whitespace is collapsed. Shorter lines, and a prompt line split across two log lines, are not detected.
 - **(d)** The prompts tar is on the VM's local disk from upload until the exact-count gate. If the wall timeout hard-kills the job in that span, the tar stays on the VM until the session is stopped, which the trap and watchdog always do.
 - **(e)** Stub-rung disk behaviour: the CPU stub pulls the full model, and below 40 GiB free it refuses with `DISK_TOO_SMALL` and records the free bytes in the receipt (`free_disk_bytes` in `vm_receipt.json`).
-- **(f)** Name-reuse guard and session listing: the real `colab sessions` row format has not been checked yet. The `[<name>]` match is left in place and unverified until the first-rung CPU `--session-smoke` run checks it and records the real output's shape (no tokens or ids) in its receipt (`vm_receipt.json` and `outcome.draft.json`).
+- **(f)** Name-reuse guard and session listing: verified on 2026-11-02 (CPU session-smoke `smoke-01`). Real `colab sessions` row shapes (placeholders only, no real values):
+  - a live session row: `[<SESSION>] <TOKEN> | <TOKEN>: <TOKEN> | <TOKEN>: <TOKEN> | <TOKEN>: <TOKEN>`
+  - the empty list: `[colab] No active sessions found on server.`
+  The launcher's `[$SESSION_NAME]` and `^\[$S\]` checks match the live session row, and `[colab] ...` CLI message lines are never read as a session.

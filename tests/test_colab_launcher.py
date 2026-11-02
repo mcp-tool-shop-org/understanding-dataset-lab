@@ -521,6 +521,16 @@ if subcmd == "sessions":
     if positionals:
         sys.stderr.write(f"Got unexpected extra arguments ({{' '.join(positionals)}})\\n")
         raise SystemExit(2)
+    override_out = os.environ.get("FAKE_COLAB_SESSIONS_OVERRIDE")
+    if override_out is not None:
+        print(override_out)
+        raise SystemExit(0)
+    prefix_line = os.environ.get("FAKE_COLAB_SESSIONS_PREFIX_LINE")
+    if not sessions:
+        print(prefix_line if prefix_line is not None else "[colab] No active sessions found on server.")
+        raise SystemExit(0)
+    if prefix_line is not None:
+        print(prefix_line)
     row_tpl = os.environ.get("FAKE_COLAB_SESSIONS_TEMPLATE", "[{{sid}}] m-s-fake-{{sid}} | {{gpu}}")
     for s in sessions:
         sid = s.get("session_id", "?")
@@ -689,14 +699,15 @@ raise SystemExit(2)
 
     fake_colab_sh = fake_bin / "colab"
     fake_colab_sh.write_text(
-        f"#!/usr/bin/env bash\nexec python3 '{_to_wsl_path(fake_driver_py)}' \"$@\"\n",
+        f"#!/usr/bin/env bash\nexport UDLAB_COLAB_IS_FAKE=1\nexec python3 '{_to_wsl_path(fake_driver_py)}' \"$@\"\n",
         encoding="utf-8",
         newline="\n",
     )
     fake_colab_sh.chmod(fake_colab_sh.stat().st_mode | stat.S_IEXEC)
 
     os.environ["COLAB_RECONCILE_SH"] = _to_wsl_path(state_dir / "nonexistent_reconcile.sh")
-    os.environ["WSLENV"] = "COLAB_RECONCILE_SH/u"
+    os.environ["UDLAB_COLAB_IS_FAKE"] = "1"
+    os.environ["WSLENV"] = "COLAB_RECONCILE_SH/u:UDLAB_COLAB_IS_FAKE"
 
     return {
         "fake_bin": fake_bin,
@@ -2488,11 +2499,11 @@ def test_fix6_4_unverified_sessions_format_documented_and_smoke_receipt_records_
     launch_text = LAUNCH_SH.read_text(encoding="utf-8")
     readme_text = readme_path.read_text(encoding="utf-8")
 
-    # 1. Verify comment in launch.sh and line in README.md state that the real `colab sessions` row format
-    # has not been checked yet, while leaving the `[name]` match in place.
+    # 1. Verify comment in launch.sh and line in README.md document the verified `colab sessions` row shapes
+    # while leaving the `[name]` match in place.
     assert 'grep -Fq "[$SESSION_NAME]"' in launch_text
-    assert "colab sessions" in launch_text and "row format has not been checked yet" in launch_text
-    assert "colab sessions" in readme_text and "row format has not been checked yet" in readme_text
+    assert "colab sessions" in launch_text
+    assert "colab sessions" in readme_text
 
     # 2. Run CPU `--session-smoke` and verify its receipt records the real output's shape with no tokens or ids.
     env_paths = _setup_fake_colab_env(tmp_path / "smoke_ok")
@@ -2584,6 +2595,230 @@ def test_fix6_4_unverified_sessions_format_documented_and_smoke_receipt_records_
     assert "m-s-secret" not in json.dumps(shape_alt)
     assert "sess-neighbour-keep" not in json.dumps(shape_alt)
     assert "udlab-smoke-alt-01" not in json.dumps(shape_alt)
+
+
+def _load_launch_sh_smoke_helpers() -> dict[str, object]:
+    """Extract and execute the helper functions from write_outcome_draft's embedded Python block in launch.sh."""
+    script_text = LAUNCH_SH.read_text(encoding="utf-8")
+    marker = '"$PYTHON_BIN" - "$OUTCOME_FILE" "$RUN_ID" "$CARD" "$CAP_UNITS" "$RATE_UNITS_PER_HOUR" "$runtime_s" "$RUN_OUTCOME" "$RUN_WHY" <<\'PY\'\n'
+    start = script_text.index(marker) + len(marker)
+    end = script_text.index("\nPY\n", start)
+    py_block = script_text[start:end]
+    defs_start = py_block.index("def _mask_line_shape")
+    defs_end = py_block.index("\nreceipt_path =")
+    defs_src = "from __future__ import annotations\nimport re\n\n" + py_block[defs_start:defs_end]
+    ns: dict[str, object] = {}
+    exec(defs_src, ns)
+    return ns
+
+
+def test_fix7_1_smoke_receipt_format_verified_flag_and_decision_function(
+    tmp_path: Path,
+) -> None:
+    launch_text = LAUNCH_SH.read_text(encoding="utf-8")
+    # launch.sh must never set UDLAB_COLAB_IS_FAKE=1 itself
+    assert "UDLAB_COLAB_IS_FAKE=1" not in launch_text
+
+    # 1. Direct unit test of the decision function with both inputs (since a fake-free CLI run cannot run in tests)
+    helpers = _load_launch_sh_smoke_helpers()
+    assert "_is_format_verified_on_real_cli" in helpers, (
+        "Expected _is_format_verified_on_real_cli decision function in launch.sh embedded Python"
+    )
+    decide = helpers["_is_format_verified_on_real_cli"]
+    assert callable(decide)
+    assert decide(True, False) is True
+    assert decide(True, True) is False
+    assert decide(False, False) is False
+    assert decide(False, True) is False
+
+    assert "_build_smoke_shape" in helpers, (
+        "Expected _build_smoke_shape helper in launch.sh embedded Python"
+    )
+    build_shape = helpers["_build_smoke_shape"]
+    assert callable(build_shape)
+    real_mid_line = "[udlab-smoke-01] m-s-123 | backend: CPU | status: READY | age: 0m"
+    empty_line = "[colab] No active sessions found on server."
+    shape_real = build_shape(empty_line, real_mid_line, empty_line, "udlab-smoke-01", False)
+    assert shape_real["format_verified_on_real_cli"] is True
+    assert shape_real["mid_sessions"]["matches_bracket_prefix"] is True
+
+    shape_fake = build_shape(empty_line, real_mid_line, empty_line, "udlab-smoke-01", True)
+    assert shape_fake["format_verified_on_real_cli"] is False
+    assert shape_fake["mid_sessions"]["matches_bracket_prefix"] is True
+
+    shape_missing_row = build_shape(empty_line, empty_line, empty_line, "udlab-smoke-01", False)
+    assert shape_missing_row["format_verified_on_real_cli"] is False
+    assert shape_missing_row["mid_sessions"]["matches_bracket_prefix"] is False
+
+    # 2. Fake CLI run (UDLAB_COLAB_IS_FAKE=1 set by test harness) whose mid listing matches gives False
+    env_fake = _setup_fake_colab_env(tmp_path / "fake_run")
+    out_fake = tmp_path / "fake_run_out"
+    lock_fake = tmp_path / "fake_run.lock"
+    cmd_fake = (
+        f"export PATH='{_to_wsl_path(env_fake['fake_bin'])}:{_to_wsl_path(env_fake['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_fake['state_dir'])}'; "
+        f"export UDLAB_COLAB_IS_FAKE=1; "
+        f"export COLAB_LOCK_DIR='{_to_wsl_path(env_fake['colab_locks_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_fake)}'; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --session-smoke --out-dir '{_to_wsl_path(out_fake)}' --run-id fix7-fake-01"
+    )
+    proc_fake = subprocess.run(
+        ["bash", "-c", cmd_fake],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc_fake.returncode == 0, f"stdout={proc_fake.stdout}\nstderr={proc_fake.stderr}"
+    receipt_fake = json.loads((out_fake / "vm_receipt.json").read_text(encoding="utf-8"))
+    assert receipt_fake["sessions_output_shape"]["mid_sessions"]["matches_bracket_prefix"] is True
+    assert receipt_fake["sessions_output_shape"]["format_verified_on_real_cli"] is False
+
+    # 3. A run whose mid listing lacks the session row gives False
+    env_lack = _setup_fake_colab_env(tmp_path / "lack_run")
+    out_lack = tmp_path / "lack_run_out"
+    lock_lack = tmp_path / "lack_run.lock"
+    cmd_lack = (
+        f"export PATH='{_to_wsl_path(env_lack['fake_bin'])}:{_to_wsl_path(env_lack['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_lack['state_dir'])}'; "
+        f"export UDLAB_COLAB_IS_FAKE=1; "
+        f"export FAKE_COLAB_SESSIONS_OVERRIDE='[colab] No active sessions found on server.'; "
+        f"export COLAB_LOCK_DIR='{_to_wsl_path(env_lack['colab_locks_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_lack)}'; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --session-smoke --out-dir '{_to_wsl_path(out_lack)}' --run-id fix7-lack-01"
+    )
+    proc_lack = subprocess.run(
+        ["bash", "-c", cmd_lack],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc_lack.returncode != 0
+    receipt_lack = json.loads((out_lack / "vm_receipt.json").read_text(encoding="utf-8"))
+    assert receipt_lack["sessions_output_shape"]["mid_sessions"]["matches_bracket_prefix"] is False
+    assert receipt_lack["sessions_output_shape"]["format_verified_on_real_cli"] is False
+
+
+def test_fix7_2_colab_message_line_never_treated_as_session(
+    tmp_path: Path,
+) -> None:
+    empty_msg_line = "[colab] No active sessions found on server."
+    live_row_shape = "[<SESSION>] <TOKEN> | <TOKEN>: <TOKEN> | <TOKEN>: <TOKEN> | <TOKEN>: <TOKEN>"
+
+    # Verify the launcher's pre-check and mid-check expressions remain in launch.sh
+    launch_text = LAUNCH_SH.read_text(encoding="utf-8")
+    assert 'if printf \'%s\\n\' "$PRE_SESSIONS" | grep -Fq "[$SESSION_NAME]"; then' in launch_text
+    assert 'if ! printf \'%s\\n\' "$MID_SESSIONS" | grep -q "^\\[$S\\]"; then' in launch_text
+
+    # (a) `[colab] No active sessions found on server.` alone:
+    #     pre-check passes (no reuse) and mid-check fails (session not listed).
+    env_a = _setup_fake_colab_env(tmp_path / "case_a")
+    out_a = tmp_path / "case_a_out"
+    lock_a = tmp_path / "case_a.lock"
+    cmd_a = (
+        f"export PATH='{_to_wsl_path(env_a['fake_bin'])}:{_to_wsl_path(env_a['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_a['state_dir'])}'; "
+        f"export UDLAB_COLAB_IS_FAKE=1; "
+        f"export FAKE_COLAB_SESSIONS_OVERRIDE='{empty_msg_line}'; "
+        f"export COLAB_LOCK_DIR='{_to_wsl_path(env_a['colab_locks_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_a)}'; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --session-smoke --out-dir '{_to_wsl_path(out_a)}' --run-id smoke-msg-a"
+    )
+    proc_a = subprocess.run(
+        ["bash", "-c", cmd_a],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc_a.returncode != 0
+    assert "SESSION_NAME_IN_USE" not in proc_a.stderr
+    calls_a = [
+        json.loads(ln)
+        for ln in env_a["calls_log"].read_text(encoding="utf-8").splitlines()
+    ]
+    # Pre-check passed (so `new` was called), then mid-check failed (so `stop` was called by trap)
+    assert [c["subcmd"] for c in calls_a] == ["sessions", "new", "sessions", "stop", "sessions"]
+    outcome_a = json.loads((out_a / "outcome.draft.json").read_text(encoding="utf-8"))
+    assert outcome_a["outcome"] == "fail"
+    assert outcome_a["why"] == "colab sessions did not list [udlab-smoke-msg-a] after colab new"
+    shape_a = outcome_a["sessions_output_shape"]
+    assert shape_a["pre_sessions"]["contains_bracketed_session"] is False
+    assert shape_a["mid_sessions"]["matches_bracket_prefix"] is False
+
+    # (b) `[colab] No active sessions found on server.` followed by a live-row line for the session
+    #     in the same listing: mid-check passes.
+    env_b = _setup_fake_colab_env(tmp_path / "case_b")
+    # Start with empty sessions so pre-sessions is `[colab] No active sessions found on server.`
+    env_b["sessions_file"].write_text("[]\n", encoding="utf-8", newline="\n")
+    out_b = tmp_path / "case_b_out"
+    lock_b = tmp_path / "case_b.lock"
+    cmd_b = (
+        f"export PATH='{_to_wsl_path(env_b['fake_bin'])}:{_to_wsl_path(env_b['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_b['state_dir'])}'; "
+        f"export UDLAB_COLAB_IS_FAKE=1; "
+        f"export FAKE_COLAB_SESSIONS_PREFIX_LINE='{empty_msg_line}'; "
+        f"export FAKE_COLAB_SESSIONS_TEMPLATE='[{{sid}}] m-s-tok1 | hw: {{gpu}} | status: READY | age: 1m'; "
+        f"export COLAB_LOCK_DIR='{_to_wsl_path(env_b['colab_locks_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_b)}'; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --session-smoke --out-dir '{_to_wsl_path(out_b)}' --run-id smoke-msg-b"
+    )
+    proc_b = subprocess.run(
+        ["bash", "-c", cmd_b],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc_b.returncode == 0, f"stdout={proc_b.stdout}\nstderr={proc_b.stderr}"
+    outcome_b = json.loads((out_b / "outcome.draft.json").read_text(encoding="utf-8"))
+    assert outcome_b["outcome"] == "ok"
+    shape_b = outcome_b["sessions_output_shape"]
+    assert shape_b["pre_sessions"]["line_shapes"] == [
+        "[<TOKEN>] <TOKEN> <TOKEN> <TOKEN> <TOKEN> <TOKEN> <TOKEN>"
+    ]
+    assert shape_b["mid_sessions"]["line_shapes"] == [
+        "[<TOKEN>] <TOKEN> <TOKEN> <TOKEN> <TOKEN> <TOKEN> <TOKEN>",
+        live_row_shape,
+    ]
+    assert shape_b["mid_sessions"]["matches_bracket_prefix"] is True
+
+    # (c) Launcher name rules (`launch.sh:143-147`) force `udlab-` prefix on SESSION_NAME, so a session
+    #     literally named `colab` is not allowed; even `--run-id colab` resolves to `udlab-colab`.
+    assert 'if [[ "$RUN_ID" == udlab-* ]]; then\n  SESSION_NAME="$RUN_ID"\nelse\n  SESSION_NAME="udlab-$RUN_ID"\nfi' in launch_text
+    proc_c = subprocess.run(
+        ["bash", "-c", f"bash '{_to_wsl_path(LAUNCH_SH)}' --session-smoke --dry --run-id colab"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc_c.returncode == 0
+    assert "colab new -s udlab-colab" in proc_c.stdout
+    assert "colab new -s colab\n" not in proc_c.stdout
+
+
+def test_fix7_3_readme_and_launch_sh_record_verified_real_session_shapes() -> None:
+    readme_text = (SCRIPTS_COLAB_DIR / "README.md").read_text(encoding="utf-8")
+    launch_text = LAUNCH_SH.read_text(encoding="utf-8")
+
+    live_row_shape = "[<SESSION>] <TOKEN> | <TOKEN>: <TOKEN> | <TOKEN>: <TOKEN> | <TOKEN>: <TOKEN>"
+    empty_list_shape = "[colab] No active sessions found on server."
+
+    for text_name, text in (("README.md", readme_text), ("launch.sh", launch_text)):
+        assert "row format has not been checked yet" not in text, f"{text_name} still has unverified note"
+        assert "row format not checked yet" not in text, f"{text_name} still has unverified note"
+        assert live_row_shape in text, f"{text_name} missing live session row shape"
+        assert empty_list_shape in text, f"{text_name} missing empty list shape"
+        assert "2026-11-02" in text, f"{text_name} missing verification date 2026-11-02"
+        assert "smoke-01" in text, f"{text_name} missing smoke-01 reference"
+
 
 
 
