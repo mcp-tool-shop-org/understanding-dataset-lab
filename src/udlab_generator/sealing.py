@@ -376,6 +376,8 @@ def _render_public_from_sealed(
             else None
         )
         item_seed = int(s_row.get("seed", 0))
+        item_goal_mode = str(s_row.get("goal_mode", "copy"))
+        item_goal_source = dict(s_row.get("goal_source") or {})
         pub_row: dict[str, Any] = {
             "item_id": str(s_row["item_id"]),
             "pass_index": int(s_row["pass_index"]),
@@ -383,6 +385,8 @@ def _render_public_from_sealed(
             "rendering_handle": str(s_row["rendering_handle"]),
             "focal_agent": str(s_row["focal_agent"]),
             "prose": str(s_row["prose"]),
+            "goal_mode": item_goal_mode,
+            "goal_source": item_goal_source,
             "attempt": item_attempt,
             "temperature": item_temp,
             "min_p": item_min_p,
@@ -602,6 +606,14 @@ def write_sealed_dataset(
             for ag, pr in sorted(rend.keys.perceptual_records.items())
         }
 
+        resolved_goal_source = (
+            dict(rend.goal_source)
+            if rend.goal_source is not None
+            else {
+                ag: "model_text"
+                for ag in (rend.world.agents if rend.world is not None else ())
+            }
+        )
         sealed_rows.append(
             {
                 "item_id": item_id,
@@ -612,6 +624,8 @@ def write_sealed_dataset(
                 "rendering_handle": rend_handle,
                 "focal_agent": rend.focal_agent,
                 "prose": rend.prose,
+                "goal_mode": rend.goal_mode,
+                "goal_source": resolved_goal_source,
                 "attempt": rend.attempt,
                 "temperature": rend.temperature,
                 "min_p": rend.min_p,

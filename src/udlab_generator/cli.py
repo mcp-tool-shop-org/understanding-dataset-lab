@@ -23,6 +23,7 @@ from udlab_generator.probe import (
 )
 from udlab_generator.render import (
     ATTEMPT_0_TEMPERATURE,
+    DEFAULT_GOAL_MODE,
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_RETRY_FORM,
     DEFAULT_VRAM_HALT_MIB,
@@ -34,9 +35,8 @@ from udlab_generator.render import (
     GENERATIONS_FILENAME,
     NUM_CTX_MARGIN_TOKENS,
     NUM_CTX_STEP_TOKENS,
-    RETRY_MIN_P,
-    RETRY_TEMPERATURE,
     SEALED_RESPONSES_FILENAME,
+    VALID_GOAL_MODES,
     VALID_RETRY_FORMS,
     GenerationCallRecord,
     LlamaTokenizeCounter,
@@ -50,9 +50,11 @@ from udlab_generator.render import (
     RenderedScenario,
     SealedResponseEntry,
     WriterCheckpointManager,
+    _resolve_failing_sentence_in_raw_response,
     append_sealed_response,
     check_rendered_prose,
     collect_prose_faults,
+    compare_paired_runs,
     compute_sealed_response_digests,
     count_duplicate_stake_statements,
     count_prompt_tokens_exact,
@@ -64,12 +66,12 @@ from udlab_generator.render import (
     locate_failing_sentence_in_response,
     parse_generation_refusal_metadata,
     resolve_sealed_failing_sentence,
+    run_paired_seed_bank,
     summarize_fault_vector_counts,
 )
 from udlab_generator.sealing import (
     SealingError,
     _deserialize_world,
-    verify_sealed_part,
     verify_written_dataset_recounts_and_prose,
     write_sealed_dataset,
 )
@@ -261,8 +263,18 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
             seen_set.add(scen_id)
             scenarios_seen.append(scen_id)
 
+        entry_goal_mode = str(
+            entry.get("goal_mode")
+            or (gen_row.get("goal_mode") if gen_row is not None else None)
+            or DEFAULT_GOAL_MODE
+        )
         try:
-            check_rendered_prose(response_text, world, focal_agent=focal_agent)
+            check_rendered_prose(
+                response_text,
+                world,
+                focal_agent=focal_agent,
+                goal_mode=entry_goal_mode,
+            )
             passed = True
             check_id: str | None = None
             event_index: int | None = None
@@ -279,9 +291,18 @@ def recheck_saved_responses(output_dir: Path) -> dict[str, object]:
             check_id = exc.check_id
             event_index = exc.event_index
             event_kind = exc.event_kind
-            failing_sentence = exc.failing_sentence
+            failing_sentence = _resolve_failing_sentence_in_raw_response(
+                response_text,
+                exc.failing_sentence,
+                world=world,
+            )
             reason = str(exc)
-            faults = collect_prose_faults(response_text, world, focal_agent=focal_agent)
+            faults = collect_prose_faults(
+                response_text,
+                world,
+                focal_agent=focal_agent,
+                goal_mode=entry_goal_mode,
+            )
             fault_check_ids = list(dict.fromkeys(f.check_id for f in faults)) or (
                 [exc.check_id] if exc.check_id else []
             )
@@ -684,6 +705,7 @@ def build_and_probe_dataset(
     retry_form: str = DEFAULT_RETRY_FORM,
     multi_turn_retries: bool = False,
     short_circuit_dead_scenarios: bool = False,
+    goal_mode: str = DEFAULT_GOAL_MODE,
     grant_id: str | None = None,
     resume: bool = False,
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
@@ -708,6 +730,11 @@ def build_and_probe_dataset(
         raise ValueError(
             f"retry_form must be one of {sorted(VALID_RETRY_FORMS)}, got {resolved_retry_form!r}."
         )
+    if goal_mode not in VALID_GOAL_MODES:
+        raise ValueError(
+            f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}."
+        )
+    resolved_goal_mode = str(goal_mode)
     resolved_short_circuit = bool(short_circuit_dead_scenarios)
     dead_scenario_mode = (
         "short_circuit" if resolved_short_circuit else "continue_other_rendering"
@@ -753,6 +780,7 @@ def build_and_probe_dataset(
         writer_pin=effective_writer_pin,
         short_circuit_dead_scenarios=resolved_short_circuit,
         retry_form=resolved_retry_form,
+        goal_mode=resolved_goal_mode,
     )
 
     if resume:
@@ -799,6 +827,7 @@ def build_and_probe_dataset(
             max_retries=max_retries,
             retry_form=resolved_retry_form,
             short_circuit_dead_scenarios=resolved_short_circuit,
+            goal_mode=resolved_goal_mode,
             start_owned_server=should_own_server,
             popen_factory=popen_factory,
             prompt_token_counter=prompt_token_counter,
@@ -834,7 +863,7 @@ def build_and_probe_dataset(
             else None
         )
     else:
-        mock_writer = MockWriter()
+        mock_writer = MockWriter(goal_mode=resolved_goal_mode)
         all_mock_calls: list[GenerationCallRecord] = list(restored_calls)
         if resume and generations_path is not None:
             lines = "".join(
@@ -857,7 +886,8 @@ def build_and_probe_dataset(
                 prompt_sha = hashlib.sha256(
                     json.dumps(messages, sort_keys=True, separators=(",", ":")).encode("utf-8")
                 ).hexdigest()
-                resp_sha, think_sha = compute_sealed_response_digests(rend.prose, "")
+                raw_mock_response = mock_writer.render_raw_response(w, rend.focal_agent)
+                resp_sha, think_sha = compute_sealed_response_digests(raw_mock_response, "")
                 p_est = estimate_prompt_tokens(messages)
                 # Card ul: the exact count decides num_ctx when a tokenizer is configured; the estimate otherwise.
                 p_exact = (
@@ -887,7 +917,7 @@ def build_and_probe_dataset(
                     prompt_tokens_estimate=p_est,
                     prompt_tokens_exact=p_exact,
                     prompt_eval_count=p_exact if p_exact is not None else p_est,
-                    eval_count=len(rend.prose.split()),
+                    eval_count=len(raw_mock_response.split()),
                     thinking_words=0,
                     num_predict=resolved_num_predict,
                     num_ctx=n_ctx,
@@ -906,6 +936,7 @@ def build_and_probe_dataset(
                     seed=call_seed,
                     response_sha256=resp_sha,
                     thinking_sha256=think_sha,
+                    goal_mode=resolved_goal_mode,
                 )
                 all_mock_calls.append(rec)
                 scen_calls.append(rec)
@@ -924,10 +955,11 @@ def build_and_probe_dataset(
                         temperature=ATTEMPT_0_TEMPERATURE,
                         min_p=None,
                         retry_form="",
-                        response_text=rend.prose,
+                        response_text=raw_mock_response,
                         thinking_text="",
                         response_sha256=resp_sha,
                         thinking_sha256=think_sha,
+                        goal_mode=resolved_goal_mode,
                     ),
                 )
 
@@ -953,6 +985,7 @@ def build_and_probe_dataset(
     writer_provenance: dict[str, Any] = {
         "writer": writer_kind,
         "writer_pin": effective_writer_pin.to_dict(),
+        "goal_mode": resolved_goal_mode,
         "think": resolved_think,
         "num_predict": resolved_num_predict,
         "max_num_ctx": max_num_ctx,
@@ -998,6 +1031,7 @@ def build_and_probe_dataset(
     summary: dict[str, object] = {
         "writer": writer_kind,
         "writer_pin": effective_writer_pin.to_dict(),
+        "goal_mode": resolved_goal_mode,
         "max_retries": max_retries,
         "retry_form": resolved_retry_form,
         "short_circuit_dead_scenarios": resolved_short_circuit,
@@ -1035,7 +1069,11 @@ def build_and_probe_dataset(
     return summary
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    http_transport: OllamaHttpTransport | None = None,
+) -> int:
     parser = argparse.ArgumentParser(
         prog="udlab-gen",
         description="Generate, write, seal, verify, and probe udlab release-1 cognitive-empathy scenarios.",
@@ -1117,6 +1155,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--goal-mode",
+        choices=("copy", "splice"),
+        default=DEFAULT_GOAL_MODE,
+        help=f"Writer goal mode: 'copy' (default) or 'splice' ([[GOAL:<agent>]] tokens expanded before checks).",
+    )
+    parser.add_argument(
         "--grant-id",
         type=str,
         default=None,
@@ -1163,9 +1207,58 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="Run the shortcut probe directly on an existing sealed JSONL file and exit.",
     )
+    parser.add_argument(
+        "--paired-seed-bank",
+        type=Path,
+        default=None,
+        help="Run attempt-0 only (max_retries=0) on a fixed JSON list of scenario seeds in --goal-mode copy|splice.",
+    )
+    parser.add_argument(
+        "--paired-compare",
+        nargs=2,
+        type=Path,
+        default=None,
+        metavar=("RUN_A", "RUN_B"),
+        help="Pair two --paired-seed-bank outputs by (scenario_seed, rendering_index) and report McNemar stats.",
+    )
+    parser.add_argument(
+        "--paired-out",
+        type=Path,
+        default=None,
+        help="Optional output JSON path for --paired-seed-bank or --paired-compare.",
+    )
     args = parser.parse_args(argv)
 
     try:
+        if args.paired_compare is not None:
+            comp = compare_paired_runs(
+                args.paired_compare[0],
+                args.paired_compare[1],
+                output_path=args.paired_out,
+            )
+            print(json.dumps(comp, indent=2, sort_keys=True))
+            return 0
+
+        if args.paired_seed_bank is not None:
+            try:
+                prompt_token_counter = resolve_prompt_token_counter(args.llama_tokenize, args.writer_gguf)
+            except (ValueError, FileNotFoundError) as exc:
+                parser.error(str(exc))
+            paired_res = run_paired_seed_bank(
+                seed_bank=args.paired_seed_bank,
+                goal_mode=args.goal_mode,
+                output_path=args.paired_out,
+                num_predict=args.num_predict,
+                max_num_ctx=args.max_num_ctx,
+                think=bool(args.think),
+                vram_halt_mib=args.vram_halt_mib,
+                grant_id=args.grant_id,
+                http_transport=http_transport,
+                prompt_token_counter=prompt_token_counter,
+            )
+            print(json.dumps(paired_res, indent=2, sort_keys=True))
+            return 0
+
         if args.recheck is not None:
             recheck_res = recheck_saved_responses(args.recheck)
             for call_info in recheck_res["calls"]:  # type: ignore[union-attr]
@@ -1212,6 +1305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             retry_form=args.retry_form,
             multi_turn_retries=bool(args.multi_turn_retries),
             short_circuit_dead_scenarios=bool(args.short_circuit_dead_scenarios),
+            goal_mode=args.goal_mode,
             grant_id=args.grant_id,
             resume=args.resume,
             prompt_token_counter=prompt_token_counter,
