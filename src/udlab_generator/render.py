@@ -111,6 +111,8 @@ DEFAULT_RETRY_FORM: str = "single_turn"
 VALID_RETRY_FORMS: frozenset[str] = frozenset({"single_turn", "multi_turn"})
 DEFAULT_GOAL_MODE: str = "copy"
 VALID_GOAL_MODES: frozenset[str] = frozenset({"copy", "splice"})
+DEFAULT_CONSTRAINT_LAYOUT: str = "line"
+VALID_CONSTRAINT_LAYOUTS: frozenset[str] = frozenset({"line", "table"})
 VALID_GOAL_SOURCES: frozenset[str] = frozenset({"model_text", "token"})
 GOAL_TOKEN_PREFIX: str = "[[GOAL:"
 GOAL_TOKEN_SUFFIX: str = "]]"
@@ -351,10 +353,15 @@ class RenderedScenario:
     goal_mode: str = DEFAULT_GOAL_MODE
     goal_source: dict[str, str] | None = None
     presence_penalty: float | None = None
+    constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT
 
     def __post_init__(self) -> None:
         if self.goal_mode not in VALID_GOAL_MODES:
             raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {self.goal_mode!r}")
+        if self.constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
+            raise ValueError(
+                f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {self.constraint_layout!r}"
+            )
         if self.seed == 0 and self.world is not None:
             object.__setattr__(
                 self,
@@ -1243,22 +1250,184 @@ WRITER_PROSE_REQUIREMENTS_BY_ID: dict[str, ProseRequirementSpec] = {
 
 _PROMPT_REQ_LINE_RE = re.compile(r"^-\s+\(([a-z0-9_]+)\)\s+(.+)$")
 
+EVENT_ORDER_TABLE_ROW_KINDS: tuple[str, ...] = (
+    "enter",
+    "leave",
+    "move (normal)",
+    "move (station change)",
+    "see (unoccluded)",
+    "see (occluded)",
+    "say",
+    "message",
+)
+
+
+def format_event_order_table_header() -> str:
+    """Format the header line of `c_fidelity_event_order` for `constraint_layout='table'`."""
+    return (
+        "Write one sentence per logged event, in log order; "
+        "never put two events in one sentence, and never split one event across two sentences "
+        "(exception: consecutive same-actor leave+enter across a doorway may fold into one sentence "
+        "naming from_location and to_location); "
+        f"no negation ({format_negation_phrases_summary()}); "
+        "actor (no pronouns) precedes verb (no intervening party); "
+        "name room ('in/from/inside/at/of [the] <room>', no other room on intra-room):"
+    )
+
+
+def get_event_order_table_rows() -> dict[str, str]:
+    """Return the ordered per-kind table rows for `c_fidelity_event_order` under `constraint_layout='table'`."""
+    blocking_summary = format_blocking_phrases_summary()
+    enter_verbs = ", ".join(_ACTION_VERBS_BY_KIND["enter"])
+    leave_verbs = ", ".join(_ACTION_VERBS_BY_KIND["leave"])
+    move_verbs = ", ".join(_ACTION_VERBS_BY_KIND["move"])
+    station_verbs = ", ".join(STATION_CHANGE_PERSON_VERBS)
+    see_verbs = ", ".join(_ACTION_VERBS_BY_KIND["see"])
+    say_verbs = ", ".join(_ACTION_VERBS_BY_KIND["say"])
+    msg_verbs = ", ".join(_ACTION_VERBS_BY_KIND["message"])
+    return {
+        "enter": (
+            f"| enter | <actor> <verb> from the <from_location> into the <to_location>. | "
+            f"verbs: {enter_verbs}; name both from_location ('from'/'out of') "
+            "and to_location ('to'/'into'/'toward'/'at'/'in'/'onto'; no bare 'entered <to>' without 'from <from>'); "
+            "from_location precedes to_location (or '<verb> into/to <to> ... from <from>'). |"
+        ),
+        "leave": (
+            f"| leave | <actor> <verb> the <from_location> toward the <to_location>. | "
+            f"verbs: {leave_verbs}; name both from_location and to_location "
+            "('to'/'into'/'toward'/'at'/'in'/'onto'); from_location precedes to_location "
+            "(or '<verb> into/to <to> ... from <from>'). |"
+        ),
+        "move (normal)": (
+            f"| move (normal) | <actor> <verb> the <target_object> from the <from_location> to the <to_location> in the <room>. | "
+            f"verbs: {move_verbs}; name room, target_object, "
+            "from_location ('from'/'out of') before to_location ('to'/'into'/'toward'/'at'/'in'/'onto'); "
+            f"on unoccluded, no blocking phrases ({blocking_summary}; 'in open view' optional); "
+            "on occluded, state occluder + 'blocked'/'blocking sight'. |"
+        ),
+        "move (station change)": (
+            f"| move (station change) | <actor> {STATION_MOVE_VERB} {STATION_MOVE_DIRECTION_WORDS[0]} <occluder> "
+            f"to {FAR_SIDE_ALCOVE_STATION} in the <room>. | "
+            f"verbs: {station_verbs}; {format_station_change_clause()}. |"
+        ),
+        "see (unoccluded)": (
+            f"| see (unoccluded) | <actor> <verb> the <target_object> in the <to_location> in the <room>. | "
+            f"verbs: {see_verbs}; name target_object; "
+            "at container: place at to_location ('container bay' optional); "
+            f"no blocking phrases ('{BLOCKING_PHRASES[0]}', etc.; 'in open view' optional). |"
+        ),
+        "see (occluded)": (
+            f"| see (occluded) | The <occluder> {OCCLUDED_SEE_BLOCKED_PHRASES[0]} <actor>'s "
+            f"{OCCLUDED_SEE_SIGHT_NOUNS[0]} of <target_object> from {FAR_SIDE_ALCOVE_STATION} in the <room>. | "
+            f"target_object, occluder + '{OCCLUDED_SEE_BLOCKED_PHRASES[1]}'; "
+            f"{format_occluded_see_clause()}. |"
+        ),
+        "say": (
+            f'| say | <actor> <verb> at <noise_level> dB in the <room>, "<utterance>." | '
+            f"verbs: {say_verbs}; '<noise_level> dB' + verbatim quote. |"
+        ),
+        "message": (
+            f'| message | <actor> <verb> to <recipient> in the <room>, "<utterance>." | '
+            f"verbs: {msg_verbs}; "
+            "'to/for/messaged/texted/notified <recipient>' + verbatim quote. |"
+        ),
+    }
+
+
+def format_event_order_table_rule_text() -> str:
+    """Render the full `c_fidelity_event_order` `rule_text` for `constraint_layout='table'`."""
+    rows = get_event_order_table_rows()
+    lines = [format_event_order_table_header()]
+    for kind in EVENT_ORDER_TABLE_ROW_KINDS:
+        lines.append(f"  {rows[kind]}")
+    return "\n".join(lines)
+
+
+def verify_event_order_table_coverage() -> None:
+    """Verify that every per-kind row in `get_event_order_table_rows()` carries all required fragments from `367f11a`."""
+    rows = get_event_order_table_rows()
+    if tuple(rows.keys()) != EVENT_ORDER_TABLE_ROW_KINDS:
+        raise ValueError(
+            f"Event order table row keys {tuple(rows.keys())} do not match {EVENT_ORDER_TABLE_ROW_KINDS}."
+        )
+    required_fragments_by_kind: dict[str, tuple[str, ...]] = {
+        "enter": (
+            ", ".join(_ACTION_VERBS_BY_KIND["enter"]),
+            "no bare 'entered <to>' without 'from <from>'",
+            "from_location precedes to_location (or '<verb> into/to <to> ... from <from>')",
+            "'from'/'out of'",
+            "'to'/'into'/'toward'/'at'/'in'/'onto'",
+        ),
+        "leave": (
+            ", ".join(_ACTION_VERBS_BY_KIND["leave"]),
+            "name both from_location and to_location",
+            "from_location precedes to_location (or '<verb> into/to <to> ... from <from>')",
+            "'to'/'into'/'toward'/'at'/'in'/'onto'",
+        ),
+        "move (normal)": (
+            "in the <room>",
+            ", ".join(_ACTION_VERBS_BY_KIND["move"]),
+            "name room, target_object",
+            "from_location ('from'/'out of') before to_location ('to'/'into'/'toward'/'at'/'in'/'onto')",
+            f"no blocking phrases ({format_blocking_phrases_summary()}; 'in open view' optional)",
+            "state occluder + 'blocked'/'blocking sight'",
+        ),
+        "move (station change)": (
+            "in the <room>",
+            ", ".join(STATION_CHANGE_PERSON_VERBS),
+            format_station_change_clause(),
+        ),
+        "see (unoccluded)": (
+            "in the <room>",
+            ", ".join(_ACTION_VERBS_BY_KIND["see"]),
+            "name target_object",
+            "at container: place at to_location ('container bay' optional)",
+            f"no blocking phrases ('{BLOCKING_PHRASES[0]}', etc.; 'in open view' optional)",
+        ),
+        "see (occluded)": (
+            "in the <room>",
+            "target_object, occluder",
+            OCCLUDED_SEE_BLOCKED_PHRASES[1],
+            format_occluded_see_clause(),
+        ),
+        "say": (
+            "in the <room>",
+            ", ".join(_ACTION_VERBS_BY_KIND["say"]),
+            "'<noise_level> dB' + verbatim quote",
+        ),
+        "message": (
+            "in the <room>",
+            ", ".join(_ACTION_VERBS_BY_KIND["message"]),
+            "'to/for/messaged/texted/notified <recipient>' + verbatim quote",
+        ),
+    }
+    for kind, fragments in required_fragments_by_kind.items():
+        row_text = rows.get(kind, "")
+        for frag in fragments:
+            if frag not in row_text:
+                raise ValueError(f"c_fidelity_event_order table row {kind!r} missing required fragment: {frag!r}")
+
 
 def get_writer_prose_requirements(
     goal_mode: str = DEFAULT_GOAL_MODE,
     *,
+    constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     agents: Sequence[str] | None = None,
 ) -> tuple[ProseRequirementSpec, ...]:
-    """Return the writer prose requirement specs for `goal_mode` (`'copy'` or `'splice'`)."""
+    """Return the writer prose requirement specs for `goal_mode` (`'copy'` or `'splice'`) and `constraint_layout` (`'line'` or `'table'`)."""
     if goal_mode not in VALID_GOAL_MODES:
         raise ValueError(
             f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}"
         )
-    if goal_mode == "copy":
+    if constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
+        raise ValueError(
+            f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
+        )
+    if goal_mode == "copy" and constraint_layout == "line":
         return WRITER_PROSE_REQUIREMENTS
     out: list[ProseRequirementSpec] = []
     for req in WRITER_PROSE_REQUIREMENTS:
-        if req.check_id == "c_fidelity_goal":
+        if req.check_id == "c_fidelity_goal" and goal_mode == "splice":
             out.append(
                 ProseRequirementSpec(
                     req.check_id,
@@ -1266,11 +1435,19 @@ def get_writer_prose_requirements(
                     required_in_setup=req.required_in_setup,
                 )
             )
-        elif req.check_id == "a_no_markers_bracket":
+        elif req.check_id == "a_no_markers_bracket" and goal_mode == "splice":
             out.append(
                 ProseRequirementSpec(
                     req.check_id,
                     format_splice_bracket_rule_text(agents),
+                    required_in_setup=req.required_in_setup,
+                )
+            )
+        elif req.check_id == "c_fidelity_event_order" and constraint_layout == "table":
+            out.append(
+                ProseRequirementSpec(
+                    req.check_id,
+                    format_event_order_table_rule_text(),
                     required_in_setup=req.required_in_setup,
                 )
             )
@@ -1283,28 +1460,53 @@ def render_writer_prompt_constraints(
     requirements: Sequence[ProseRequirementSpec] | None = None,
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     agents: Sequence[str] | None = None,
 ) -> str:
     """Render the `HARD CONSTRAINTS (MANDATORY):` bullet lines from `WRITER_PROSE_REQUIREMENTS`."""
     resolved_reqs = (
         requirements
         if requirements is not None
-        else get_writer_prose_requirements(goal_mode, agents=agents)
+        else get_writer_prose_requirements(goal_mode, constraint_layout=constraint_layout, agents=agents)
     )
     return "\n".join(f"- ({req.check_id}) {req.rule_text}" for req in resolved_reqs)
+
+
+def compute_hard_constraints_sha256(
+    goal_mode: str = DEFAULT_GOAL_MODE,
+    constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
+    *,
+    agents: Sequence[str] | None = None,
+) -> str:
+    """Return the SHA-256 hex digest of the UTF-8 rendered `HARD CONSTRAINTS` block for `(goal_mode, constraint_layout)`."""
+    block = render_writer_prompt_constraints(
+        goal_mode=goal_mode,
+        constraint_layout=constraint_layout,
+        agents=agents,
+    )
+    return _sha256_bytes(block.encode("utf-8"))
 
 
 def parse_writer_prompt_requirements(
     prompt_text: str,
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     agents: Sequence[str] | None = None,
 ) -> tuple[ProseRequirementSpec, ...]:
     """Parse the mandatory requirement list from `prompt_text` (expanding `{hard_constraints_block}` if unformatted) and reject any untracked requirement lines."""
+    if constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
+        raise ValueError(
+            f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
+        )
     expanded_text = (
         prompt_text.replace(
             HARD_CONSTRAINTS_PLACEHOLDER,
-            render_writer_prompt_constraints(goal_mode=goal_mode, agents=agents),
+            render_writer_prompt_constraints(
+                goal_mode=goal_mode,
+                constraint_layout=constraint_layout,
+                agents=agents,
+            ),
         )
         if HARD_CONSTRAINTS_PLACEHOLDER in prompt_text
         else prompt_text
@@ -1316,6 +1518,9 @@ def parse_writer_prompt_requirements(
     if start_idx < 0 or end_idx < 0 or end_idx <= start_idx:
         raise ValueError("Writer prompt is missing HARD CONSTRAINTS (MANDATORY) or INPUT SPECIFICATION section.")
     section = expanded_text[start_idx + len(start_marker) : end_idx]
+    expected_table_rows = tuple(get_event_order_table_rows()[k] for k in EVENT_ORDER_TABLE_ROW_KINDS)
+    expected_table_header = format_event_order_table_header()
+    table_row_idx: int | None = None
     parsed: list[ProseRequirementSpec] = []
     for raw_line in section.splitlines():
         line = raw_line.strip()
@@ -1323,10 +1528,34 @@ def parse_writer_prompt_requirements(
             continue
         m = _PROMPT_REQ_LINE_RE.match(line)
         if m is None:
+            if (
+                table_row_idx is not None
+                and table_row_idx < len(expected_table_rows)
+                and parsed
+                and parsed[-1].check_id == "c_fidelity_event_order"
+                and line == expected_table_rows[table_row_idx]
+            ):
+                prev_spec = parsed[-1]
+                parsed[-1] = ProseRequirementSpec(
+                    check_id=prev_spec.check_id,
+                    rule_text=f"{prev_spec.rule_text}\n  {line}",
+                    required_in_setup=prev_spec.required_in_setup,
+                )
+                table_row_idx += 1
+                continue
             raise ValueError(
                 f"Unrecognized or untracked requirement line in writer prompt HARD CONSTRAINTS: {line!r}"
             )
+        if table_row_idx is not None and table_row_idx != len(expected_table_rows):
+            raise ValueError(
+                f"Incomplete c_fidelity_event_order table in writer prompt HARD CONSTRAINTS "
+                f"(got {table_row_idx} of {len(expected_table_rows)} rows)."
+            )
+        table_row_idx = None
         cid = m.group(1)
+        rule_body = m.group(2)
+        if cid == "c_fidelity_event_order" and rule_body == expected_table_header:
+            table_row_idx = 0
         req_in_setup = (
             WRITER_PROSE_REQUIREMENTS_BY_ID[cid].required_in_setup
             if cid in WRITER_PROSE_REQUIREMENTS_BY_ID
@@ -1335,9 +1564,14 @@ def parse_writer_prompt_requirements(
         parsed.append(
             ProseRequirementSpec(
                 check_id=cid,
-                rule_text=m.group(2),
+                rule_text=rule_body,
                 required_in_setup=req_in_setup,
             )
+        )
+    if table_row_idx is not None and table_row_idx != len(expected_table_rows):
+        raise ValueError(
+            f"Incomplete c_fidelity_event_order table in writer prompt HARD CONSTRAINTS "
+            f"(got {table_row_idx} of {len(expected_table_rows)} rows)."
         )
     if not parsed:
         raise ValueError("No structural requirements parsed from writer prompt.")
@@ -1383,10 +1617,15 @@ def verify_prompt_and_checker_requirements_aligned(
     prompt_text: str | None = None,
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     agents: Sequence[str] | None = None,
 ) -> tuple[ProseRequirementSpec, ...]:
     """Verify that the writer prompt's parsed requirements, `WRITER_PROSE_REQUIREMENTS`, and the checker's enforced `check_id`s are identical."""
-    expected_reqs = get_writer_prose_requirements(goal_mode, agents=agents)
+    expected_reqs = get_writer_prose_requirements(
+        goal_mode,
+        constraint_layout=constraint_layout,
+        agents=agents,
+    )
     if prompt_text is None:
         disk_raw = WRITER_PROMPT_PATH.read_text(encoding="utf-8")
         if HARD_CONSTRAINTS_PLACEHOLDER not in disk_raw:
@@ -1400,23 +1639,36 @@ def verify_prompt_and_checker_requirements_aligned(
                 )
         raw_text = disk_raw.replace(
             HARD_CONSTRAINTS_PLACEHOLDER,
-            render_writer_prompt_constraints(goal_mode=goal_mode, agents=agents),
+            render_writer_prompt_constraints(
+                goal_mode=goal_mode,
+                constraint_layout=constraint_layout,
+                agents=agents,
+            ),
         )
     else:
         raw_text = (
             prompt_text.replace(
                 HARD_CONSTRAINTS_PLACEHOLDER,
-                render_writer_prompt_constraints(goal_mode=goal_mode, agents=agents),
+                render_writer_prompt_constraints(
+                    goal_mode=goal_mode,
+                    constraint_layout=constraint_layout,
+                    agents=agents,
+                ),
             )
             if HARD_CONSTRAINTS_PLACEHOLDER in prompt_text
             else prompt_text
         )
-    parsed_prompt_reqs = parse_writer_prompt_requirements(raw_text, goal_mode=goal_mode, agents=agents)
+    parsed_prompt_reqs = parse_writer_prompt_requirements(
+        raw_text,
+        goal_mode=goal_mode,
+        constraint_layout=constraint_layout,
+        agents=agents,
+    )
     if parsed_prompt_reqs != expected_reqs:
         prompt_ids = [r.check_id for r in parsed_prompt_reqs]
         shared_ids = [r.check_id for r in expected_reqs]
         raise ValueError(
-            f"Writer prompt requirements diverge from WRITER_PROSE_REQUIREMENTS ({goal_mode}): prompt_ids={prompt_ids}, shared_ids={shared_ids}"
+            f"Writer prompt requirements diverge from WRITER_PROSE_REQUIREMENTS ({goal_mode}, {constraint_layout}): prompt_ids={prompt_ids}, shared_ids={shared_ids}"
         )
     enforced_ids = set(get_checker_enforced_check_ids())
     shared_id_set = {r.check_id for r in expected_reqs}
@@ -1432,11 +1684,14 @@ def verify_prompt_and_checker_requirements_aligned(
     # the checker's constants, and every form the checker accepts or requires must appear in that rule.
     verify_station_and_occlusion_constants()
     event_order_text = next(r.rule_text for r in parsed_prompt_reqs if r.check_id == "c_fidelity_event_order")
-    for clause in (format_station_change_clause(), format_occluded_see_clause()):
-        if clause not in event_order_text:
-            raise ValueError(
-                f"Writer prompt c_fidelity_event_order rule lacks the checker-derived clause: {clause!r}"
-            )
+    if constraint_layout == "table":
+        verify_event_order_table_coverage()
+    else:
+        for clause in (format_station_change_clause(), format_occluded_see_clause()):
+            if clause not in event_order_text:
+                raise ValueError(
+                    f"Writer prompt c_fidelity_event_order rule lacks the checker-derived clause: {clause!r}"
+                )
     for form in get_station_and_occlusion_checker_forms():
         if form not in event_order_text:
             raise ValueError(
@@ -1805,11 +2060,16 @@ def load_writer_prompt_template(
     path: Path | None = None,
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     agents: Sequence[str] | None = None,
 ) -> str:
     """Load the `qwen3.6:35b` writer prompt text file, expand `{hard_constraints_block}` from `WRITER_PROSE_REQUIREMENTS`, and verify alignment."""
     if goal_mode not in VALID_GOAL_MODES:
         raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
+    if constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
+        raise ValueError(
+            f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
+        )
     target = path or WRITER_PROMPT_PATH
     raw_disk_text = target.read_text(encoding="utf-8")
     if target == WRITER_PROMPT_PATH:
@@ -1825,7 +2085,11 @@ def load_writer_prompt_template(
     text = (
         raw_disk_text.replace(
             HARD_CONSTRAINTS_PLACEHOLDER,
-            render_writer_prompt_constraints(goal_mode=goal_mode, agents=agents),
+            render_writer_prompt_constraints(
+                goal_mode=goal_mode,
+                constraint_layout=constraint_layout,
+                agents=agents,
+            ),
         )
         if HARD_CONSTRAINTS_PLACEHOLDER in raw_disk_text
         else raw_disk_text
@@ -1841,7 +2105,12 @@ def load_writer_prompt_template(
             f"Writer prompt template must contain BELIEF_PERSISTENCE_RULE byte-identically exactly once; found {rule_count}."
         )
     if target == WRITER_PROMPT_PATH:
-        verify_prompt_and_checker_requirements_aligned(text, goal_mode=goal_mode, agents=agents)
+        verify_prompt_and_checker_requirements_aligned(
+            text,
+            goal_mode=goal_mode,
+            constraint_layout=constraint_layout,
+            agents=agents,
+        )
     return text
 
 
@@ -1915,6 +2184,7 @@ def format_writer_prompt(
     template: str | None = None,
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
 ) -> str:
     """Format the `qwen3.6:35b` writer prompt for `world` and `focal_agent`.
 
@@ -1924,10 +2194,18 @@ def format_writer_prompt(
     """
     if goal_mode not in VALID_GOAL_MODES:
         raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
+    if constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
+        raise ValueError(
+            f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
+        )
     raw_template = (
         template
         if template is not None
-        else load_writer_prompt_template(goal_mode=goal_mode, agents=world.agents)
+        else load_writer_prompt_template(
+            goal_mode=goal_mode,
+            constraint_layout=constraint_layout,
+            agents=world.agents,
+        )
     )
     world_setup = {
         "scenario_id": world.scenario_id,
@@ -1954,10 +2232,19 @@ def format_writer_prompt(
     }
     event_log = project_events_for_writer(world.events, world=world)
 
+    line_event_order_bullet = (
+        f"- (c_fidelity_event_order) {WRITER_PROSE_REQUIREMENTS_BY_ID['c_fidelity_event_order'].rule_text}"
+    )
+    table_event_order_bullet = f"- (c_fidelity_event_order) {format_event_order_table_rule_text()}"
+
     if HARD_CONSTRAINTS_PLACEHOLDER in raw_template:
         expanded_template = raw_template.replace(
             HARD_CONSTRAINTS_PLACEHOLDER,
-            render_writer_prompt_constraints(goal_mode=goal_mode, agents=world.agents),
+            render_writer_prompt_constraints(
+                goal_mode=goal_mode,
+                constraint_layout=constraint_layout,
+                agents=world.agents,
+            ),
         )
         if goal_mode == "splice":
             expanded_template = expanded_template.replace(
@@ -1987,6 +2274,10 @@ def format_writer_prompt(
                 format_splice_output_format_line(world.agents),
             )
         )
+        if constraint_layout == "table":
+            expanded_template = expanded_template.replace(line_event_order_bullet, table_event_order_bullet)
+        else:
+            expanded_template = expanded_template.replace(table_event_order_bullet, line_event_order_bullet)
     else:
         expanded_template = (
             raw_template.replace(
@@ -2010,6 +2301,10 @@ def format_writer_prompt(
                 COPY_OUTPUT_FORMAT_LINE,
             )
         )
+        if constraint_layout == "table":
+            expanded_template = expanded_template.replace(line_event_order_bullet, table_event_order_bullet)
+        else:
+            expanded_template = expanded_template.replace(table_event_order_bullet, line_event_order_bullet)
     formatted = (
         expanded_template.replace("{focal_agent}", focal_agent)
         .replace("{noise_threshold}", str(world.noise_threshold))
@@ -4138,17 +4433,30 @@ class MockWriter:
         custom_renderer: Callable[[World, str], str] | None = None,
         *,
         goal_mode: str = DEFAULT_GOAL_MODE,
+        constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     ) -> None:
         if goal_mode not in VALID_GOAL_MODES:
             raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
+        if constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
+            raise ValueError(
+                f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
+            )
         self._custom_renderer = custom_renderer
         self._goal_mode = str(goal_mode)
-        self._prompt_template = load_writer_prompt_template(goal_mode=self._goal_mode)
+        self._constraint_layout = str(constraint_layout)
+        self._prompt_template = load_writer_prompt_template(
+            goal_mode=self._goal_mode,
+            constraint_layout=self._constraint_layout,
+        )
         self._refusals: list[ProseRefusalRecord] = []
 
     @property
     def goal_mode(self) -> str:
         return self._goal_mode
+
+    @property
+    def constraint_layout(self) -> str:
+        return self._constraint_layout
 
     @property
     def refusals(self) -> tuple[ProseRefusalRecord, ...]:
@@ -4175,8 +4483,20 @@ class MockWriter:
         focal_0 = world.agents[0]
         focal_1 = world.agents[1]
 
-        prompt_0 = format_writer_prompt(world, focal_0, self._prompt_template, goal_mode=self._goal_mode)
-        prompt_1 = format_writer_prompt(world, focal_1, self._prompt_template, goal_mode=self._goal_mode)
+        prompt_0 = format_writer_prompt(
+            world,
+            focal_0,
+            self._prompt_template,
+            goal_mode=self._goal_mode,
+            constraint_layout=self._constraint_layout,
+        )
+        prompt_1 = format_writer_prompt(
+            world,
+            focal_1,
+            self._prompt_template,
+            goal_mode=self._goal_mode,
+            constraint_layout=self._constraint_layout,
+        )
 
         rendered_texts: list[str] = []
         goal_sources: list[dict[str, str]] = []
@@ -4239,6 +4559,7 @@ class MockWriter:
                 seed=derive_call_seed(int(world.seed), 0, 0),
                 goal_mode=self._goal_mode,
                 goal_source=goal_sources[0],
+                constraint_layout=self._constraint_layout,
             ),
             RenderedScenario(
                 scenario_id=world.scenario_id,
@@ -4254,6 +4575,7 @@ class MockWriter:
                 seed=derive_call_seed(int(world.seed), 1, 0),
                 goal_mode=self._goal_mode,
                 goal_source=goal_sources[1],
+                constraint_layout=self._constraint_layout,
             ),
         )
 
@@ -4888,6 +5210,7 @@ class SealedResponseEntry:
     retry_form: str = ""
     goal_mode: str = DEFAULT_GOAL_MODE
     presence_penalty: float | None = None
+    constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -4903,6 +5226,7 @@ class SealedResponseEntry:
             "presence_penalty": self.presence_penalty,
             "retry_form": self.retry_form,
             "goal_mode": self.goal_mode,
+            "constraint_layout": self.constraint_layout,
             "response_text": self.response_text,
             "thinking_text": self.thinking_text,
             "response_sha256": self.response_sha256,
@@ -5227,11 +5551,16 @@ class GenerationCallRecord:
     fault_check_ids: tuple[str, ...] = ()
     goal_mode: str = DEFAULT_GOAL_MODE
     presence_penalty: float | None = None
+    constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT
 
     def __post_init__(self) -> None:
         if self.goal_mode not in VALID_GOAL_MODES:
             raise ValueError(
                 f"GenerationCallRecord.goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {self.goal_mode!r}."
+            )
+        if self.constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
+            raise ValueError(
+                f"GenerationCallRecord.constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {self.constraint_layout!r}."
             )
         for cid in self.fault_check_ids:
             if not isinstance(cid, str) or cid not in VALID_FAULT_CHECK_IDS:
@@ -5249,6 +5578,7 @@ class GenerationCallRecord:
             "attempt": self.attempt,
             "seed": self.seed,
             "goal_mode": self.goal_mode,
+            "constraint_layout": self.constraint_layout,
             "operation": self.operation,
             "model": self.model,
             "manifest_digest": self.manifest_digest,
@@ -5479,11 +5809,16 @@ class WriterCheckpointManager:
         short_circuit_dead_scenarios: bool = False,
         retry_form: str = DEFAULT_RETRY_FORM,
         goal_mode: str = DEFAULT_GOAL_MODE,
+        constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
         presence_penalty: float | None = None,
         modelfile_parameters: Mapping[str, object] | None = None,
     ) -> None:
         if goal_mode not in VALID_GOAL_MODES:
             raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
+        if constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
+            raise ValueError(
+                f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
+            )
         self.output_dir = output_dir
         self.public_path = output_dir / CHECKPOINT_FILENAME
         self.sealed_path = output_dir / "sealed_store" / SEALED_CHECKPOINT_FILENAME
@@ -5495,6 +5830,11 @@ class WriterCheckpointManager:
         self.short_circuit_dead_scenarios = bool(short_circuit_dead_scenarios)
         self.retry_form = str(retry_form)
         self.goal_mode = str(goal_mode)
+        self.constraint_layout = str(constraint_layout)
+        self.hard_constraints_sha256 = compute_hard_constraints_sha256(
+            goal_mode=self.goal_mode,
+            constraint_layout=self.constraint_layout,
+        )
         self.presence_penalty = float(presence_penalty) if presence_penalty is not None else None
         self.modelfile_parameters: dict[str, object] = (
             dict(modelfile_parameters) if modelfile_parameters is not None else {}
@@ -5531,6 +5871,8 @@ class WriterCheckpointManager:
             ),
             "retry_form": self.retry_form,
             "goal_mode": self.goal_mode,
+            "constraint_layout": self.constraint_layout,
+            "hard_constraints_sha256": self.hard_constraints_sha256,
             "presence_penalty": self.presence_penalty,
             "modelfile_parameters": dict(self.modelfile_parameters),
         }
@@ -5612,6 +5954,7 @@ class WriterCheckpointManager:
                 "presence_penalty": r0.presence_penalty,
                 "seed": r0.seed,
                 "goal_mode": r0.goal_mode,
+                "constraint_layout": r0.constraint_layout,
                 "goal_source": r0_goal_source,
                 "sampling": {
                     "attempt": r0.attempt,
@@ -5630,6 +5973,7 @@ class WriterCheckpointManager:
                 "presence_penalty": r1.presence_penalty,
                 "seed": r1.seed,
                 "goal_mode": r1.goal_mode,
+                "constraint_layout": r1.constraint_layout,
                 "goal_source": r1_goal_source,
                 "sampling": {
                     "attempt": r1.attempt,
@@ -5647,6 +5991,7 @@ class WriterCheckpointManager:
                     "presence_penalty": r0.presence_penalty,
                     "seed": r0.seed,
                     "goal_mode": r0.goal_mode,
+                    "constraint_layout": r0.constraint_layout,
                     "goal_source": r0_goal_source,
                 },
                 {
@@ -5657,6 +6002,7 @@ class WriterCheckpointManager:
                     "presence_penalty": r1.presence_penalty,
                     "seed": r1.seed,
                     "goal_mode": r1.goal_mode,
+                    "constraint_layout": r1.constraint_layout,
                     "goal_source": r1_goal_source,
                 },
             ]
@@ -5678,6 +6024,7 @@ class WriterCheckpointManager:
             "scenario_id": scen_id,
             "kept": kept,
             "goal_mode": self.goal_mode,
+            "constraint_layout": self.constraint_layout,
             "rendering_0": rendering_0_dict,
             "rendering_1": rendering_1_dict,
             "call_records": [rec.to_dict() for rec in call_records],
@@ -5689,6 +6036,7 @@ class WriterCheckpointManager:
             "scenario_index": scenario_index,
             "kept": kept,
             "goal_mode": self.goal_mode,
+            "constraint_layout": self.constraint_layout,
             "focal_agents": focal_agents,
             "prose_sha256": prose_sha256,
             "kept_renderings": kept_renderings_pub,
@@ -5703,6 +6051,7 @@ class WriterCheckpointManager:
                     "presence_penalty": rec.presence_penalty,
                     "seed": rec.seed,
                     "goal_mode": rec.goal_mode,
+                    "constraint_layout": rec.constraint_layout,
                     "retry_form": rec.retry_form,
                     "checks_passed": rec.checks_passed,
                     "eval_count": rec.eval_count,
@@ -5767,11 +6116,15 @@ class WriterCheckpointManager:
             or sealed_header.get("writer_manifest_digest") != self.writer_pin.manifest_digest
             or pub_header.get("goal_mode", DEFAULT_GOAL_MODE) != self.goal_mode
             or sealed_header.get("goal_mode", DEFAULT_GOAL_MODE) != self.goal_mode
+            or pub_header.get("constraint_layout", DEFAULT_CONSTRAINT_LAYOUT) != self.constraint_layout
+            or sealed_header.get("constraint_layout", DEFAULT_CONSTRAINT_LAYOUT) != self.constraint_layout
+            or pub_header.get("hard_constraints_sha256", self.hard_constraints_sha256) != self.hard_constraints_sha256
+            or sealed_header.get("hard_constraints_sha256", self.hard_constraints_sha256) != self.hard_constraints_sha256
             or pub_header.get("presence_penalty") != self.presence_penalty
             or sealed_header.get("presence_penalty") != self.presence_penalty
         ):
             raise ValueError(
-                "Cannot --resume: checkpoint header (count, seed, writer_kind, goal_mode, presence_penalty, or writer_manifest_digest) mismatches requested run."
+                "Cannot --resume: checkpoint header (count, seed, writer_kind, goal_mode, constraint_layout, hard_constraints_sha256, presence_penalty, or writer_manifest_digest) mismatches requested run."
             )
 
         restored_private_seed = str(sealed_header.get("private_seed_hex") or "")
@@ -5839,15 +6192,27 @@ class WriterCheckpointManager:
                 focal_1 = str(r1_dict["focal_agent"])
                 r0_goal_mode = str(r0_dict.get("goal_mode", self.goal_mode))
                 r1_goal_mode = str(r1_dict.get("goal_mode", self.goal_mode))
+                r0_constraint_layout = str(r0_dict.get("constraint_layout", self.constraint_layout))
+                r1_constraint_layout = str(r1_dict.get("constraint_layout", self.constraint_layout))
                 prompt_0 = (
                     str(r0_dict["writer_prompt"])
                     if "writer_prompt" in r0_dict
-                    else format_writer_prompt(world, focal_0, goal_mode=r0_goal_mode)
+                    else format_writer_prompt(
+                        world,
+                        focal_0,
+                        goal_mode=r0_goal_mode,
+                        constraint_layout=r0_constraint_layout,
+                    )
                 )
                 prompt_1 = (
                     str(r1_dict["writer_prompt"])
                     if "writer_prompt" in r1_dict
-                    else format_writer_prompt(world, focal_1, goal_mode=r1_goal_mode)
+                    else format_writer_prompt(
+                        world,
+                        focal_1,
+                        goal_mode=r1_goal_mode,
+                        constraint_layout=r1_constraint_layout,
+                    )
                 )
 
                 try:
@@ -5925,6 +6290,7 @@ class WriterCheckpointManager:
                                 if r0_dict.get("presence_penalty") is not None
                                 else self.presence_penalty
                             ),
+                            constraint_layout=r0_constraint_layout,
                         ),
                         RenderedScenario(
                             scenario_id=world.scenario_id,
@@ -5945,6 +6311,7 @@ class WriterCheckpointManager:
                                 if r1_dict.get("presence_penalty") is not None
                                 else self.presence_penalty
                             ),
+                            constraint_layout=r1_constraint_layout,
                         ),
                     )
                 )
@@ -6043,6 +6410,7 @@ class WriterCheckpointManager:
                             if c_dict.get("presence_penalty") is not None
                             else self.presence_penalty
                         ),
+                        constraint_layout=str(c_dict.get("constraint_layout", self.constraint_layout)),
                     )
                 )
 
@@ -6093,6 +6461,7 @@ class OllamaWriter:
         multi_turn_retries: bool = False,
         short_circuit_dead_scenarios: bool = False,
         goal_mode: str = DEFAULT_GOAL_MODE,
+        constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
         start_owned_server: bool | None = None,
         popen_factory: Callable[..., Any] | None = None,
         server_port: int | None = None,
@@ -6115,9 +6484,14 @@ class OllamaWriter:
             raise ValueError(
                 f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}"
             )
+        if constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
+            raise ValueError(
+                f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
+            )
         self._retry_form: str = resolved_retry_form
         self._short_circuit_dead_scenarios: bool = bool(short_circuit_dead_scenarios)
         self._goal_mode: str = str(goal_mode)
+        self._constraint_layout: str = str(constraint_layout)
         self._presence_penalty: float | None = (
             float(presence_penalty) if presence_penalty is not None else None
         )
@@ -6150,7 +6524,10 @@ class OllamaWriter:
         self._num_predict = resolved_num_predict
         self._max_num_ctx = int(max_num_ctx)
         self._think = resolved_think
-        self._prompt_template = load_writer_prompt_template(goal_mode=self._goal_mode)
+        self._prompt_template = load_writer_prompt_template(
+            goal_mode=self._goal_mode,
+            constraint_layout=self._constraint_layout,
+        )
 
         is_real_transport = http_transport is None or http_transport is default_ollama_http_transport
         resolved_grant = (grant_id or os.environ.get("UDLAB_GPU_GRANT_ID") or "").strip()
@@ -6290,6 +6667,10 @@ class OllamaWriter:
         return self._goal_mode
 
     @property
+    def constraint_layout(self) -> str:
+        return self._constraint_layout
+
+    @property
     def presence_penalty(self) -> float | None:
         return self._presence_penalty
 
@@ -6380,6 +6761,7 @@ class OllamaWriter:
                 refusal_reasons=self._pending_sealed_refusal_reasons,
                 goal_mode=rec.goal_mode,
                 presence_penalty=rec.presence_penalty,
+                constraint_layout=rec.constraint_layout,
             )
             self._pending_sealed_failing_sentence = None
             self._pending_sealed_refusal_reasons = ()
@@ -6487,6 +6869,7 @@ class OllamaWriter:
                 fault_check_ids=(CTX_OVER_CAP_CHECK_ID,),
                 goal_mode=self._goal_mode,
                 presence_penalty=self._presence_penalty,
+                constraint_layout=self._constraint_layout,
             )
             self._append_generation_record(rec)
             self._refusals.append(
@@ -6769,6 +7152,7 @@ class OllamaWriter:
                     fault_check_ids=("length_stop",),
                     goal_mode=self._goal_mode,
                     presence_penalty=self._presence_penalty,
+                    constraint_layout=self._constraint_layout,
                 )
                 self._pending_sealed_failing_sentence = None
                 self._pending_sealed_refusal_reasons = (f"length_stop: {reason_msg}",)
@@ -6873,6 +7257,7 @@ class OllamaWriter:
                     fault_check_ids=fault_ids,
                     goal_mode=self._goal_mode,
                     presence_penalty=self._presence_penalty,
+                    constraint_layout=self._constraint_layout,
                 )
                 self._pending_sealed_failing_sentence = raw_fail_sent
                 self._pending_sealed_refusal_reasons = (full_sealed_reason,)
@@ -6953,6 +7338,7 @@ class OllamaWriter:
                 retry_attempt0_sentences=retry_attempt0_total,
                 goal_mode=self._goal_mode,
                 presence_penalty=self._presence_penalty,
+                constraint_layout=self._constraint_layout,
             )
             self._append_generation_record(rec, response_text=content, thinking_text=thinking_text)
             return stored_prose
@@ -6978,8 +7364,20 @@ class OllamaWriter:
         focal_0 = world.agents[0]
         focal_1 = world.agents[1]
 
-        prompt_0 = format_writer_prompt(world, focal_0, self._prompt_template, goal_mode=self._goal_mode)
-        prompt_1 = format_writer_prompt(world, focal_1, self._prompt_template, goal_mode=self._goal_mode)
+        prompt_0 = format_writer_prompt(
+            world,
+            focal_0,
+            self._prompt_template,
+            goal_mode=self._goal_mode,
+            constraint_layout=self._constraint_layout,
+        )
+        prompt_1 = format_writer_prompt(
+            world,
+            focal_1,
+            self._prompt_template,
+            goal_mode=self._goal_mode,
+            constraint_layout=self._constraint_layout,
+        )
 
         prose_0 = self._chat_render(
             world=world,
@@ -7028,6 +7426,7 @@ class OllamaWriter:
                 goal_mode=self._goal_mode,
                 goal_source=goal_source_0,
                 presence_penalty=self._presence_penalty,
+                constraint_layout=self._constraint_layout,
             ),
             RenderedScenario(
                 scenario_id=world.scenario_id,
@@ -7044,6 +7443,7 @@ class OllamaWriter:
                 goal_mode=self._goal_mode,
                 goal_source=goal_source_1,
                 presence_penalty=self._presence_penalty,
+                constraint_layout=self._constraint_layout,
             ),
         )
 
@@ -8163,6 +8563,7 @@ def run_paired_seed_bank(
     *,
     seed_bank: Path | Sequence[int],
     goal_mode: str = DEFAULT_GOAL_MODE,
+    constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     output_path: Path | None = None,
     sealed_responses_path: Path | None = None,
     sealed_diagnostics_path: Path | None = None,
@@ -8188,6 +8589,10 @@ def run_paired_seed_bank(
     """
     if goal_mode not in VALID_GOAL_MODES:
         raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
+    if constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
+        raise ValueError(
+            f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}"
+        )
     seeds = _load_seed_bank_seeds(seed_bank)
     resolved_commit = commit_sha if commit_sha is not None else _resolve_git_commit_sha()
 
@@ -8227,6 +8632,7 @@ def run_paired_seed_bank(
         max_retries=0,
         short_circuit_dead_scenarios=False,
         goal_mode=goal_mode,
+        constraint_layout=constraint_layout,
         start_owned_server=False if (http_transport is not None and popen_factory is None) else True if popen_factory is not None else None,
         popen_factory=popen_factory,
         server_port=server_port,
@@ -8246,6 +8652,7 @@ def run_paired_seed_bank(
                     focal_agent,
                     writer._prompt_template,
                     goal_mode=goal_mode,
+                    constraint_layout=constraint_layout,
                 )
                 prev_len = len(writer.call_records)
                 prev_sealed_len = len(writer.sealed_responses)
@@ -8300,6 +8707,7 @@ def run_paired_seed_bank(
                         "rendering_index": r_idx,
                         "focal_agent": focal_agent,
                         "goal_mode": goal_mode,
+                        "constraint_layout": constraint_layout,
                         "commit": resolved_commit,
                         "model": writer.ollama_tag,
                         "manifest_digest": writer.manifest_digest,
@@ -8350,9 +8758,16 @@ def run_paired_seed_bank(
         for cid in r["fault_check_ids"]:  # type: ignore[union-attr]
             fault_counts[str(cid)] += 1
 
+    hard_constraints_sha256 = compute_hard_constraints_sha256(
+        goal_mode=goal_mode,
+        constraint_layout=constraint_layout,
+    )
+
     report: dict[str, object] = {
         "schema_version": PAIRED_SEED_BANK_SCHEMA_VERSION,
         "goal_mode": goal_mode,
+        "constraint_layout": constraint_layout,
+        "hard_constraints_sha256": hard_constraints_sha256,
         "commit": resolved_commit,
         "model": writer.ollama_tag,
         "manifest_digest": writer.manifest_digest,
@@ -8416,14 +8831,58 @@ def compare_paired_runs(
         raise ValueError(
             f"Paired run schema_version mismatch: cannot pair {ver_a!r} with {ver_b!r}."
         )
+    commit_a = str(data_a.get("commit") or "unknown")
+    commit_b = str(data_b.get("commit") or "unknown")
+    if commit_a != commit_b:
+        raise ValueError(
+            f"Paired run commit mismatch: cannot pair commit {commit_a!r} with {commit_b!r}."
+        )
+    digest_a = str(data_a.get("manifest_digest") or "")
+    digest_b = str(data_b.get("manifest_digest") or "")
+    if digest_a != digest_b:
+        raise ValueError(
+            f"Paired run manifest_digest mismatch: cannot pair {digest_a!r} with {digest_b!r}."
+        )
+    pp_a = data_a.get("presence_penalty")
+    pp_b = data_b.get("presence_penalty")
+    if pp_a != pp_b:
+        raise ValueError(
+            f"Paired run presence_penalty mismatch: cannot pair {pp_a!r} with {pp_b!r}."
+        )
     mode_a = str(data_a.get("goal_mode") or "mode_a")
     mode_b = str(data_b.get("goal_mode") or "mode_b")
+    layout_a = str(data_a.get("constraint_layout") or DEFAULT_CONSTRAINT_LAYOUT)
+    layout_b = str(data_b.get("constraint_layout") or DEFAULT_CONSTRAINT_LAYOUT)
+    if mode_a != mode_b and layout_a != layout_b:
+        raise ValueError(
+            f"Paired runs cannot differ in both goal_mode ({mode_a!r} vs {mode_b!r}) "
+            f"and constraint_layout ({layout_a!r} vs {layout_b!r})."
+        )
     if mode_a == mode_b:
-        label_a = f"{mode_a}_a"
-        label_b = f"{mode_b}_b"
+        if layout_a != layout_b:
+            label_a = layout_a
+            label_b = layout_b
+        else:
+            label_a = f"{mode_a}_a"
+            label_b = f"{mode_b}_b"
     else:
         label_a = mode_a
         label_b = mode_b
+
+    hc_sha_a = str(
+        data_a.get("hard_constraints_sha256")
+        or compute_hard_constraints_sha256(
+            goal_mode=mode_a if mode_a in VALID_GOAL_MODES else DEFAULT_GOAL_MODE,
+            constraint_layout=layout_a if layout_a in VALID_CONSTRAINT_LAYOUTS else DEFAULT_CONSTRAINT_LAYOUT,
+        )
+    )
+    hc_sha_b = str(
+        data_b.get("hard_constraints_sha256")
+        or compute_hard_constraints_sha256(
+            goal_mode=mode_b if mode_b in VALID_GOAL_MODES else DEFAULT_GOAL_MODE,
+            constraint_layout=layout_b if layout_b in VALID_CONSTRAINT_LAYOUTS else DEFAULT_CONSTRAINT_LAYOUT,
+        )
+    )
 
     rows_a = data_a.get("renderings")
     rows_b = data_b.get("renderings")
@@ -8546,6 +9005,14 @@ def compare_paired_runs(
         "modes": {
             "a": label_a,
             "b": label_b,
+        },
+        "constraint_layout": {
+            label_a: layout_a,
+            label_b: layout_b,
+        },
+        "hard_constraints_sha256": {
+            label_a: hc_sha_a,
+            label_b: hc_sha_b,
         },
         "commits": {
             label_a: str(data_a.get("commit") or "unknown"),

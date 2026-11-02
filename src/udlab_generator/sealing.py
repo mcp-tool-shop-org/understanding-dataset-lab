@@ -382,6 +382,7 @@ def _render_public_from_sealed(
         )
         item_seed = int(s_row.get("seed", 0))
         item_goal_mode = str(s_row.get("goal_mode", "copy"))
+        item_constraint_layout = str(s_row.get("constraint_layout", "line"))
         item_goal_source = dict(s_row.get("goal_source") or {})
         pub_row: dict[str, Any] = {
             "item_id": str(s_row["item_id"]),
@@ -391,6 +392,7 @@ def _render_public_from_sealed(
             "focal_agent": str(s_row["focal_agent"]),
             "prose": str(s_row["prose"]),
             "goal_mode": item_goal_mode,
+            "constraint_layout": item_constraint_layout,
             "goal_source": item_goal_source,
             "attempt": item_attempt,
             "temperature": item_temp,
@@ -631,6 +633,7 @@ def write_sealed_dataset(
                 "focal_agent": rend.focal_agent,
                 "prose": rend.prose,
                 "goal_mode": rend.goal_mode,
+                "constraint_layout": rend.constraint_layout,
                 "goal_source": resolved_goal_source,
                 "attempt": rend.attempt,
                 "temperature": rend.temperature,
