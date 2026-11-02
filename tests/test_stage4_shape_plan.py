@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import replace
+import ast
 import hashlib
+import inspect
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import pytest
@@ -15,6 +18,7 @@ from udlab_generator.cli import (
     main,
     resolve_prompt_token_counter,
 )
+from udlab_generator.diversity import count_template_diversity
 from udlab_generator.render import (
     ACCEPTED_FORMS_LINE_TEXT,
     BELIEF_PERSISTENCE_RULE,
@@ -22,12 +26,16 @@ from udlab_generator.render import (
     SHAPE_PLAN_ALL_ASSIGNED_FORMS,
     SHAPE_PLAN_BLOCK_SIZE,
     SHAPE_PLAN_DESIGN_CHOICES,
+    SHAPE_PLAN_JSON_CONTEXT_TEMPLATES,
     SHAPE_PLAN_TAG_PAIRS,
     SHAPE_PLAN_VARIANT_FORMS,
     STAGE4_LEGEND_V1_PATH,
     STAGE4_LEGEND_V1_RAW_TEXT,
     STAGE4_LEGEND_V1_SHA256,
     STAGE4_LEGEND_V1_TEXT,
+    TAG_ECHO_TOKENS,
+    _TAG_ECHO_RE,
+    _has_tag_echo,
     LlamaTokenizeCounter,
     MockWriter,
     RenderCheckError,
@@ -40,10 +48,12 @@ from udlab_generator.render import (
     generate_shape_plan,
     match_rendering_event_forms,
     matched_event_form_id,
+    project_event_for_writer,
     project_events_for_writer,
     render_world_template,
     render_writer_prompt_constraints,
     verify_prompt_and_checker_requirements_aligned,
+    verify_shape_plan_json_context_token_parity,
     verify_shape_plan_prompt_token_parity,
     verify_shape_plan_tag_pairs_token_parity,
     wildcard_form_id_for_event,
@@ -54,10 +64,12 @@ from udlab_generator.world import (
     Event,
     StakeEdge,
     World,
+    generate_world,
+    make_balanced_configs,
 )
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "stage4" / "stage4_shape_plan_fixtures.json"
-EXPECTED_FIXTURE_SHA256 = "f394d3c9a88ad1450c9a29fa69b75e60cdce8215e85012c75968a5035f99e8da"
+EXPECTED_FIXTURE_SHA256 = "3c427e7d3b28e9d09b306d0cf6a8f67f26dede7265ce7841e55bf46882f896af"
 EXPECTED_LEGEND_SHA256 = "fb073147abacfd536a2ba7931cb4e178903a7fb33c3b0427b3d983985895564d"
 
 PINNED_OFF_HARD_CONSTRAINTS_SHA256 = {
@@ -186,6 +198,58 @@ def test_stage4_copied_files_sha256() -> None:
     fixture_data = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     assert fixture_data["legend_sha256"] == EXPECTED_LEGEND_SHA256
     assert fixture_data["legend_text"] == STAGE4_LEGEND_V1_RAW_TEXT
+    assert (
+        fixture_data["plan_properties"]["two_form_switch_rate_band"]
+        == SHAPE_PLAN_DESIGN_CHOICES["two_form_switch_rate_band"]
+    )
+
+
+def test_tag_echo_tokens_and_regex_agree() -> None:
+    """Card 2b item 1: TAG_ECHO_TOKENS and _TAG_ECHO_RE agree 1-to-1 and the legend phrase has a word boundary at its end."""
+    expected_tokens = (
+        *(f"SAY_{n}" for n in range(10)),
+        *(f"MOVE_{n}" for n in range(10)),
+        *(f"SEE_{n}" for n in range(10)),
+        "ENTER_0",
+        "LEAVE_0",
+        "MESSAGE_0",
+        "[Actor]",
+        "[Room]",
+        "[Object]",
+        "[Occluder]",
+        "Shape key for the tag on each event row",
+    )
+    assert TAG_ECHO_TOKENS == expected_tokens
+
+    # Every token in the tuple must match the regex
+    for token in TAG_ECHO_TOKENS:
+        assert _TAG_ECHO_RE.search(token) is not None, f"Token {token!r} in TAG_ECHO_TOKENS did not match _TAG_ECHO_RE"
+        assert _has_tag_echo(f"In the amber room, {token} happened.")
+
+    # Every alternative in the regex must be in the tuple
+    pattern = _TAG_ECHO_RE.pattern
+    assert pattern.startswith("(?:") and pattern.endswith(")")
+    raw_alternatives = pattern[3:-1].split("|")
+    decoded_alternatives: list[str] = []
+    for alt in raw_alternatives:
+        if alt.startswith(r"(?<!\w)") and alt.endswith(r"(?!\w)"):
+            inner = alt[len(r"(?<!\w)") : -len(r"(?!\w)")]
+        elif alt.startswith(r"\b") and alt.endswith(r"\b"):
+            inner = alt[len(r"\b") : -len(r"\b")]
+        else:
+            pytest.fail(f"Alternative {alt!r} lacks expected word or bracket boundary wrapper")
+        unescaped = re.sub(r"\\(.)", r"\1", inner)
+        assert unescaped in TAG_ECHO_TOKENS, f"Regex alternative {unescaped!r} not in TAG_ECHO_TOKENS"
+        decoded_alternatives.append(unescaped)
+    assert tuple(decoded_alternatives) == TAG_ECHO_TOKENS
+
+    # Word boundary at the end of the legend phrase and no unlisted ENTER_1/LEAVE_1/MESSAGE_1
+    assert _has_tag_echo("Shape key for the tag on each event row.")
+    assert not _has_tag_echo("Shape key for the tag on each event rows.")
+    assert not _has_tag_echo("Shape key for the tag on each event rowboat.")
+    for non_token in ("ENTER_1", "LEAVE_1", "MESSAGE_1"):
+        assert non_token not in TAG_ECHO_TOKENS
+        assert not _has_tag_echo(f"Mira walked ({non_token}) into the room.")
 
 
 def test_shape_plan_off_byte_identical_across_all_8_combinations() -> None:
@@ -332,6 +396,10 @@ def test_per_row_shape_tags_and_token_parity() -> None:
     assert len(inproc_tag_rows) == 14
     assert all(r["equal"] is True for r in inproc_tag_rows)
 
+    inproc_json_rows = verify_shape_plan_json_context_token_parity(inproc_counter)
+    assert len(inproc_json_rows) == 14 * len(SHAPE_PLAN_JSON_CONTEXT_TEMPLATES)
+    assert all(r["equal"] is True for r in inproc_json_rows)
+
     inproc_prompt_parity = verify_shape_plan_prompt_token_parity(
         worlds[0],
         worlds[0].agents[0],
@@ -349,6 +417,8 @@ def test_per_row_shape_tags_and_token_parity() -> None:
     skewed_counter = lambda _text: next(call_seq)
     with pytest.raises(ValueError, match="STOPPED: tag pair"):
         verify_shape_plan_tag_pairs_token_parity(skewed_counter)
+    with pytest.raises(ValueError, match="STOPPED: JSON context"):
+        verify_shape_plan_json_context_token_parity(skewed_counter)
     with pytest.raises(ValueError, match="STOPPED: prompt token parity mismatch"):
         verify_shape_plan_prompt_token_parity(
             worlds[0],
@@ -357,6 +427,48 @@ def test_per_row_shape_tags_and_token_parity() -> None:
             scenario_shape_plan=plan_by_sid[worlds[0].scenario_id],
             shape_plan_seed=20261030,
         )
+
+
+def test_json_context_token_parity_on_tag_pairs() -> None:
+    """Card 2b item 2: CPU llama-tokenize token parity (tolerance 0) for all 14 (assigned, wildcard) pairs in real JSON event-log contexts across >=3 key-order prefixes and all emitted following-key suffixes."""
+    assert len(SHAPE_PLAN_JSON_CONTEXT_TEMPLATES) >= 5
+    # Verify the templates cover at least 3 distinct key-order prefixes and the following-key suffixes
+    prefixes = {tmpl.split('"shape_tag":"<TAG>"', 1)[0] for tmpl in SHAPE_PLAN_JSON_CONTEXT_TEMPLATES.values()}
+    suffixes = {tmpl.split('"shape_tag":"<TAG>"', 1)[1] for tmpl in SHAPE_PLAN_JSON_CONTEXT_TEMPLATES.values()}
+    assert len(prefixes) >= 3
+    assert ',"target_object":"copper token","to_location":"tin locker"}' in suffixes
+    assert ',"target_object":"copper token"}' in suffixes
+    assert ',"utterance":"The copper token is stored in the tin locker."}' in suffixes
+    assert ',"stated_reason":"audit check","utterance":"The copper token is stored in the tin locker."}' in suffixes
+    assert "}" in suffixes
+
+    counter = _resolve_gguf_counter_or_skip()
+    json_parity_rows = verify_shape_plan_json_context_token_parity(counter)
+    assert len(json_parity_rows) == 14 * len(SHAPE_PLAN_JSON_CONTEXT_TEMPLATES)
+    for row in json_parity_rows:
+        assert row["equal"] is True
+        assert row["assigned_tokens"] == row["wildcard_tokens"]
+
+    # Also verify real project_event_for_writer output on fixture events under sort_keys=True and sort_keys=False
+    fixture_data = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    fixture_world, events_map = _build_fixture_world_and_events(fixture_data)
+    for ev_key, variant_key, wildcard_tag in (
+        ("move", "move_normal", "MOVE_0"),
+        ("move_occ", "move_occluded", "MOVE_0"),
+        ("see_clear", "see_unoccluded", "SEE_0"),
+        ("see_occ", "see_occluded", "SEE_0"),
+        ("say", "say", "SAY_0"),
+    ):
+        ev = events_map[ev_key]
+        for sort_keys in (True, False):
+            w_proj = project_event_for_writer(ev, order_index=1, world=fixture_world, shape_tag=wildcard_tag)
+            w_json = json.dumps(w_proj, separators=(",", ":"), sort_keys=sort_keys)
+            w_tok = counter(w_json)
+            for assigned_tag in SHAPE_PLAN_VARIANT_FORMS[variant_key]:
+                a_proj = project_event_for_writer(ev, order_index=1, world=fixture_world, shape_tag=assigned_tag)
+                a_json = json.dumps(a_proj, separators=(",", ":"), sort_keys=sort_keys)
+                a_tok = counter(a_json)
+                assert a_tok == w_tok, f"JSON parity mismatch for {ev_key} sort_keys={sort_keys}: {assigned_tag}={a_tok} vs {wildcard_tag}={w_tok}"
 
 
 def test_gguf_token_parity_on_tag_pairs_and_prompts() -> None:
@@ -393,23 +505,37 @@ def test_gguf_token_parity_on_tag_pairs_and_prompts() -> None:
 
 
 def test_seeded_shape_plan_properties_on_200_scenario_synthetic_bank() -> None:
-    """Gate 0 & Build 5: 200-scenario synthetic bank plan properties (no 3-in-a-row, block-of-20 spread <= 1, switch rate 0.62-0.71, position independence)."""
+    """Gate 0 & Build 5 & Card 2b items 3, 4, 7: 200-scenario bank of distinct worlds, plan properties, 0.60-0.71 switch band, step-relabel invariance, and sequence-dependent run-length draw with flat tercile marginals."""
     fixture_data = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     plan_props = fixture_data["plan_properties"]
     expected_fields = tuple(plan_props["plan_record_fields"])
 
-    # Synthetic bank from world_from_scenario_seed(seed, index=i) for i in 0..199, seed 20261103
-    bank_worlds = [world_from_scenario_seed(20261103, index=i) for i in range(200)]
+    # Card 2b item 3: 200 distinct worlds built with make_balanced_configs and generate_world
+    bank_configs = make_balanced_configs(200, base_seed=20261103)
+    bank_worlds = [generate_world(cfg) for cfg in bank_configs]
+    div_report = count_template_diversity(bank_worlds)
+    distinct_variant_sigs = len({tuple(event_shape_plan_variant(ev, w) for ev in w.events) for w in bank_worlds})
+    distinct_event_tuples = len({tuple(w.events) for w in bank_worlds})
+    assert div_report.distinct_event_skeletons == 186
+    assert div_report.distinct_domain_skeletons == 195
+    assert distinct_variant_sigs == 102
+    assert distinct_event_tuples == 200
+
     plan_a = generate_shape_plan(bank_worlds, seed=20261103, block_size=SHAPE_PLAN_BLOCK_SIZE)
     plan_b = generate_shape_plan(bank_worlds, seed=20261103, block_size=SHAPE_PLAN_BLOCK_SIZE)
     assert plan_a == plan_b
 
-    # Design choice labels present
+    # Design choice labels present (Card 2b item 7: band 0.60-0.71 with basis)
     assert plan_a["block_balance_max_spread"]["value"] == 1
     assert plan_a["block_balance_max_spread"]["design_choice"] is True
-    assert plan_a["two_form_switch_rate_band"]["low"] == 0.62
+    assert plan_a["two_form_switch_rate_band"]["low"] == 0.6
     assert plan_a["two_form_switch_rate_band"]["high"] == 0.71
+    assert plan_a["two_form_switch_rate_band"]["expected"] == 0.6667
     assert plan_a["two_form_switch_rate_band"]["design_choice"] is True
+    assert (
+        plan_a["two_form_switch_rate_band"]["basis"]
+        == "widened 2026-11-02 before freeze; 60 seeds on the 80-scenario dev bank gave mean 0.647, min 0.6227"
+    )
 
     # Plan record fields
     for rec in plan_a["plan_records"]:
@@ -443,9 +569,9 @@ def test_seeded_shape_plan_properties_on_200_scenario_synthetic_bank() -> None:
                 spread = max(form_counts) - min(form_counts)
                 assert spread <= 1, f"Block {b_start // 20} variant {v} spread {spread} > 1: {counts_by_variant[v]}"
 
-    # Two-form switch rate within [0.62, 0.71]
+    # Two-form switch rate within [0.60, 0.71]
     two_form_switch = float(plan_a["two_form_switch_rate"])
-    assert 0.62 <= two_form_switch <= 0.71, f"two_form_switch_rate={two_form_switch} outside [0.62, 0.71]"
+    assert 0.60 <= two_form_switch <= 0.71, f"two_form_switch_rate={two_form_switch} outside [0.60, 0.71]"
 
     # One plan per scenario shared across both renderings r0 and r1
     w0 = bank_worlds[0]
@@ -472,10 +598,63 @@ def test_seeded_shape_plan_properties_on_200_scenario_synthetic_bank() -> None:
     e_r1 = json.loads(p_r1.split("Complete Event Log:\n", 1)[1].split("\n\nOUTPUT FORMAT:", 1)[0])
     assert [item["shape_tag"] for item in e_r0] == [item["shape_tag"] for item in e_r1]
 
-    # Position independence: permuting event step numbers / relative positions across different variants
-    # does not change the sequence of forms drawn for each variant.
+    # Card 2b item 4: Position & step tests.
+    # Note: generate_shape_plan never reads ev.step or event_index when drawing forms,
+    # while the draw is sequence-dependent through the 3-in-a-row run-length rejection rule
+    # and per-variant stream order (not order-independent).
+    for fn in (generate_shape_plan, event_shape_plan_variant):
+        assert not any(
+            isinstance(node, ast.Attribute) and node.attr == "step"
+            for node in ast.walk(ast.parse(inspect.getsource(fn)))
+        )
+
+    # Relabelling ev.step leaves the plan identical across the entire 200-scenario bank
+    relabeled_worlds = [
+        replace(w, events=tuple(replace(ev, step=1000 + idx * 13) for idx, ev in enumerate(w.events)))
+        for w in bank_worlds
+    ]
+    plan_relabeled = generate_shape_plan(relabeled_worlds, seed=20261103, block_size=SHAPE_PLAN_BLOCK_SIZE)
+    assert plan_relabeled == plan_a
+
+    # Reordering assigned events in their slots across the 200-scenario bank preserves flat form marginals by tercile
+    reordered_assigned_worlds: list[World] = []
+    for w in bank_worlds:
+        assigned_evs = [ev for ev in w.events if event_shape_plan_variant(ev, w) in SHAPE_PLAN_VARIANT_FORMS]
+        reversed_assigned = iter(reversed(assigned_evs))
+        new_events = tuple(
+            next(reversed_assigned) if event_shape_plan_variant(ev, w) in SHAPE_PLAN_VARIANT_FORMS else ev
+            for ev in w.events
+        )
+        reordered_assigned_worlds.append(replace(w, events=new_events))
+
+    plan_reordered = generate_shape_plan(reordered_assigned_worlds, seed=20261103, block_size=SHAPE_PLAN_BLOCK_SIZE)
+    for ws, p_bundle in ((bank_worlds, plan_a), (reordered_assigned_worlds, plan_reordered)):
+        by_sid = p_bundle["plan_by_scenario_id"]
+        tercile_counts: dict[str, dict[str, Counter[str]]] = {
+            v: {t: Counter() for t in ("T1", "T2", "T3")}
+            for v in SHAPE_PLAN_VARIANT_FORMS
+        }
+        for w in ws:
+            n_ev = len(w.events)
+            for rec in by_sid[w.scenario_id]:
+                v = str(rec["variant"])
+                if v in SHAPE_PLAN_VARIANT_FORMS:
+                    ev_idx = int(rec["event_index"]) - 1
+                    t_label = f"T{min(2, (ev_idx * 3) // max(1, n_ev)) + 1}"
+                    tercile_counts[v][t_label][str(rec["form_id"])] += 1
+        for v, forms in SHAPE_PLAN_VARIANT_FORMS.items():
+            expected_share = 1.0 / len(forms)
+            for t_label in ("T1", "T2", "T3"):
+                tot = sum(tercile_counts[v][t_label].values())
+                if tot >= 100:
+                    for f in forms:
+                        share = tercile_counts[v][t_label][f] / tot
+                        assert abs(share - expected_share) <= 0.08, (
+                            f"Non-flat marginal for {v} {t_label} {f}: {share:.3f} vs {expected_share:.3f}"
+                        )
+
+    # Moving non-assigned events (enter, leave, message) and renumbering steps leaves per-variant draws unchanged
     permuted_events = list(w0.events)
-    # Move all non-assigned events (enter, leave, message) to the front and renumber steps
     non_assigned = [ev for ev in permuted_events if event_shape_plan_variant(ev, w0) not in SHAPE_PLAN_VARIANT_FORMS]
     assigned_only = [ev for ev in permuted_events if event_shape_plan_variant(ev, w0) in SHAPE_PLAN_VARIANT_FORMS]
     reordered_events = tuple(
@@ -489,6 +668,53 @@ def test_seeded_shape_plan_properties_on_200_scenario_synthetic_bank() -> None:
         forms_orig = [r["form_id"] for r in plan_orig_1["plan_records"] if r["variant"] == v]
         forms_perm = [r["form_id"] for r in plan_perm_1["plan_records"] if r["variant"] == v]
         assert forms_orig == forms_perm
+
+
+def test_shape_plan_block_size_rule_full_and_partial_blocks() -> None:
+    """Card 2b item 5: Blocks of 20 scenarios in bank order; 80 and 120 give full blocks, 335 gives 16 full + 1 of 15, and 230 works (11 full + 1 of 10), each block balanced with spread <= 1."""
+    expected_block_sizes_by_count = {
+        80: [20] * 4,
+        120: [20] * 6,
+        335: [20] * 16 + [15],
+        230: [20] * 11 + [10],
+    }
+    for count, expected_block_sizes in expected_block_sizes_by_count.items():
+        worlds = [generate_world(cfg) for cfg in make_balanced_configs(count, base_seed=20261103)]
+        plan = generate_shape_plan(worlds, seed=20261103)
+        assert plan["block_size"] == SHAPE_PLAN_BLOCK_SIZE == 20
+        assert plan["block_sizes"] == expected_block_sizes
+        plan_by_sid = plan["plan_by_scenario_id"]
+
+        for b_idx, b_start in enumerate(range(0, len(worlds), SHAPE_PLAN_BLOCK_SIZE)):
+            block_worlds = worlds[b_start : b_start + SHAPE_PLAN_BLOCK_SIZE]
+            assert len(block_worlds) == expected_block_sizes[b_idx]
+            counts_by_variant: dict[str, Counter[str]] = {v: Counter() for v in SHAPE_PLAN_VARIANT_FORMS}
+            for w in block_worlds:
+                last_by_kind: dict[str, list[str]] = {}
+                for rec in plan_by_sid[w.scenario_id]:
+                    v = str(rec["variant"])
+                    k = str(rec["kind"])
+                    fid = str(rec["form_id"])
+                    if v in SHAPE_PLAN_VARIANT_FORMS:
+                        counts_by_variant[v][fid] += 1
+                        hist = last_by_kind.setdefault(k, [])
+                        hist.append(fid)
+                        if len(hist) >= 3:
+                            assert not (hist[-1] == hist[-2] == hist[-3])
+                    elif v == "move_station_change":
+                        last_by_kind.setdefault("move", []).append("MOVE_0")
+            for v, forms in SHAPE_PLAN_VARIANT_FORMS.items():
+                if sum(counts_by_variant[v].values()) > 0:
+                    form_counts = [counts_by_variant[v][f] for f in forms]
+                    assert max(form_counts) - min(form_counts) <= 1, (
+                        f"count={count} block={b_idx} (len={len(block_worlds)}) variant={v} spread > 1: {counts_by_variant[v]}"
+                    )
+
+    # Also verify compute_shape_plan_run_telemetry uses block_size=20 on a non-multiple bank when plan_bundle is omitted
+    worlds_25 = [generate_world(cfg) for cfg in make_balanced_configs(25, base_seed=20261103)]
+    tel_25 = compute_shape_plan_run_telemetry(worlds_25, shape_plan="assigned", shape_plan_seed=20261103)
+    assert tel_25["block_size"] == 20
+    assert tel_25["block_sizes"] == [20, 5]
 
 
 def test_realized_form_exposure_on_all_18_fixture_legend_rows() -> None:
@@ -593,11 +819,26 @@ def test_shape_plan_telemetry_and_confusion_matrix(tmp_path: Path) -> None:
         goal_mode="copy",
         checker_profile="d",
     )
+    assert tel_diag["baseline_only"] is False
     assert tel_diag["compliance_by_kind"]["overall"]["compliance_rate"] == 1.0
     assert tel_diag["confusion_matrix_by_kind"]["move"][assigned_move][assigned_move] == 2
     assert tel_diag["confusion_matrix_by_kind"]["see"][assigned_see][assigned_see] == 2
     assert tel_diag["confusion_matrix_by_kind"]["say"][assigned_say][assigned_say] == 2
     assert tel_diag["outcomes_by_assigned_form"][assigned_move]["first_attempt"]["compliant"] == 2
+
+    # Card 2b item 6: Off-mode telemetry carries "baseline_only": True
+    tel_off = compute_shape_plan_run_telemetry(
+        [w],
+        shape_plan="off",
+        shape_plan_seed=20261103,
+        plan_bundle=plan_bundle,
+        attempt0_prose_by_rendering=prose_Map_compliant,
+        final_prose_by_rendering=prose_Map_compliant,
+        goal_mode="copy",
+        checker_profile="d",
+    )
+    assert tel_off["baseline_only"] is True
+    assert tel_off["shape_plan"] == "off"
 
     # 2. Non-compliant / faulted prose:
     # - move uses a different valid form (e.g. MOVE_1 if assigned != MOVE_1 else MOVE_2) -> off-diagonal realized form
@@ -637,7 +878,7 @@ def test_shape_plan_telemetry_and_confusion_matrix(tmp_path: Path) -> None:
     assert tel_mixed["confusion_matrix_by_kind"]["see"][assigned_see]["form_not_accepted"] == 1
     assert tel_mixed["confusion_matrix_by_kind"]["say"][assigned_say]["tag_echo"] == 1
 
-    # 3. End-to-end CLI build_and_probe_dataset with --shape-plan assigned
+    # 3. End-to-end CLI build_and_probe_dataset with --shape-plan assigned and --shape-plan off
     out_dir = tmp_path / "assigned_build"
     rc = main(
         [
@@ -664,6 +905,10 @@ def test_shape_plan_telemetry_and_confusion_matrix(tmp_path: Path) -> None:
     assert summary["shape_plan"] == "assigned"
     assert summary["shape_plan_seed"] == 20261103
     assert "shape_plan_telemetry" in summary
+    assert summary["shape_plan_telemetry"]["baseline_only"] is False
+    assert summary["shape_plan_telemetry"]["block_size"] == 20
+    assert summary["shape_plan_telemetry"]["block_sizes"] == [6]
+    assert summary["two_form_switch_rate_band"] == SHAPE_PLAN_DESIGN_CHOICES["two_form_switch_rate_band"]
     assert "plan_records" in summary
     assert "lag1_persistence_by_kind" in summary
     assert "compliance_by_kind" in summary
@@ -671,3 +916,59 @@ def test_shape_plan_telemetry_and_confusion_matrix(tmp_path: Path) -> None:
     assert "confusion_matrix_by_kind" in summary
     assert "outcomes_by_assigned_form" in summary
     assert summary["recount_verification"]["prose_checks_passed"] is True
+
+    out_dir_off = tmp_path / "off_build"
+    rc_off = main(
+        [
+            "--count",
+            "4",
+            "--seed",
+            "20261103",
+            "--out-dir",
+            str(out_dir_off),
+            "--writer",
+            "mock",
+            "--checker-profile",
+            "d",
+            "--constraint-layout",
+            "table",
+            "--shape-plan",
+            "off",
+        ]
+    )
+    assert rc_off == 0
+    summary_off = json.loads((out_dir_off / "build_summary.json").read_text(encoding="utf-8"))
+    assert summary_off["shape_plan"] == "off"
+    assert summary_off["shape_plan_telemetry"]["baseline_only"] is True
+
+
+def test_80_scenario_prompts_byte_identical_to_40c7dc5e() -> None:
+    """Card 2b proof: across the 80 dev-bank-shaped synthetic scenarios, rendered prompts under off, assigned, and wildcard are byte-identical to 40c7dc5e."""
+    expected_80_bank_prompt_sha256_at_40c7dc5e = {
+        "off": "08085c820abc297d2cd6f6be53888b1f466ba44188f9d68c524a2d7672e0673c",
+        "assigned": "efdfc43b88b937ce293994bdc0ff327adc873562cfaa2730205764806d4ae246",
+        "wildcard": "7c117487729fa576f37beddcc38d0fd38946446000e3ee418e31d271aebac4b4",
+    }
+    worlds_80 = [generate_world(cfg) for cfg in make_balanced_configs(80, base_seed=20261103)]
+    plan_80 = generate_shape_plan(worlds_80, seed=20261103, block_size=SHAPE_PLAN_BLOCK_SIZE)
+    by_sid_80 = plan_80["plan_by_scenario_id"]
+
+    for mode, expected_digest in expected_80_bank_prompt_sha256_at_40c7dc5e.items():
+        h = hashlib.sha256()
+        for w in worlds_80:
+            sp = by_sid_80[w.scenario_id]
+            for focal in w.agents[:2]:
+                p = format_writer_prompt(
+                    w,
+                    focal,
+                    goal_mode="splice",
+                    constraint_layout="table",
+                    accepted_forms_line="off",
+                    shape_plan=mode,
+                    scenario_shape_plan=sp,
+                    shape_plan_seed=20261103,
+                )
+                h.update(p.encode("utf-8"))
+                h.update(b"\0")
+        assert h.hexdigest() == expected_digest, f"80-scenario bank digest mismatch for mode={mode}"
+

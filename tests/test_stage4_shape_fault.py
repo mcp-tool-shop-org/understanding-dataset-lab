@@ -453,10 +453,14 @@ def test_stage4_rule_ids_and_tag_echo_tokens_registered() -> None:
         *(f"SAY_{n}" for n in range(10)),
         *(f"MOVE_{n}" for n in range(10)),
         *(f"SEE_{n}" for n in range(10)),
+        "ENTER_0",
+        "LEAVE_0",
+        "MESSAGE_0",
         "[Actor]",
         "[Room]",
         "[Object]",
         "[Occluder]",
+        "Shape key for the tag on each event row",
     )
     assert TAG_ECHO_TOKENS == expected_tokens
 

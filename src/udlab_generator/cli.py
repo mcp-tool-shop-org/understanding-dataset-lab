@@ -839,15 +839,10 @@ def build_and_probe_dataset(
 
     configs = make_balanced_configs(count, base_seed=base_seed)
     worlds = [generate_world(cfg) for cfg in configs]
-    effective_block_size = (
-        SHAPE_PLAN_BLOCK_SIZE
-        if len(worlds) % SHAPE_PLAN_BLOCK_SIZE == 0
-        else max(1, len(worlds))
-    )
     plan_bundle = generate_shape_plan(
         worlds,
         seed=resolved_shape_plan_seed,
-        block_size=effective_block_size,
+        block_size=SHAPE_PLAN_BLOCK_SIZE,
     )
     plan_by_sid: dict[str, list[dict[str, object]]] = plan_bundle["plan_by_scenario_id"]  # type: ignore[assignment]
 
@@ -1247,6 +1242,8 @@ def build_and_probe_dataset(
         "shape_plan": resolved_shape_plan,
         "shape_plan_seed": resolved_shape_plan_seed,
         "shape_plan_telemetry": shape_plan_telemetry,
+        "two_form_switch_rate_band": shape_plan_telemetry["two_form_switch_rate_band"],
+        "block_balance_max_spread": shape_plan_telemetry["block_balance_max_spread"],
         "plan_records": shape_plan_telemetry["plan_records"],
         "lag1_persistence_by_kind": shape_plan_telemetry["lag1_persistence_by_kind"],
         "compliance_by_kind": shape_plan_telemetry["compliance_by_kind"],
