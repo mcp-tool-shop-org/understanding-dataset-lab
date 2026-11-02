@@ -35,8 +35,6 @@ from udlab_generator.render import (
     GENERATIONS_FILENAME,
     NUM_CTX_MARGIN_TOKENS,
     NUM_CTX_STEP_TOKENS,
-    RETRY_MIN_P,
-    RETRY_TEMPERATURE,
     SEALED_RESPONSES_FILENAME,
     VALID_GOAL_MODES,
     VALID_RETRY_FORMS,
@@ -66,9 +64,7 @@ from udlab_generator.render import (
     format_non_sealed_refusal_reason,
     kill_pid_tree,
     locate_failing_sentence_in_response,
-    mcnemar_exact_p_value,
     parse_generation_refusal_metadata,
-    render_world_template_goal_tokens,
     resolve_sealed_failing_sentence,
     run_paired_seed_bank,
     summarize_fault_vector_counts,
@@ -76,7 +72,6 @@ from udlab_generator.render import (
 from udlab_generator.sealing import (
     SealingError,
     _deserialize_world,
-    verify_sealed_part,
     verify_written_dataset_recounts_and_prose,
     write_sealed_dataset,
 )
@@ -891,11 +886,7 @@ def build_and_probe_dataset(
                 prompt_sha = hashlib.sha256(
                     json.dumps(messages, sort_keys=True, separators=(",", ":")).encode("utf-8")
                 ).hexdigest()
-                raw_mock_response = (
-                    render_world_template_goal_tokens(w, rend.focal_agent)
-                    if resolved_goal_mode == "splice"
-                    else rend.prose
-                )
+                raw_mock_response = mock_writer.render_raw_response(w, rend.focal_agent)
                 resp_sha, think_sha = compute_sealed_response_digests(raw_mock_response, "")
                 p_est = estimate_prompt_tokens(messages)
                 # Card ul: the exact count decides num_ctx when a tokenizer is configured; the estimate otherwise.
@@ -1078,7 +1069,11 @@ def build_and_probe_dataset(
     return summary
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    http_transport: OllamaHttpTransport | None = None,
+) -> int:
     parser = argparse.ArgumentParser(
         prog="udlab-gen",
         description="Generate, write, seal, verify, and probe udlab release-1 cognitive-empathy scenarios.",
@@ -1258,6 +1253,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 think=bool(args.think),
                 vram_halt_mib=args.vram_halt_mib,
                 grant_id=args.grant_id,
+                http_transport=http_transport,
                 prompt_token_counter=prompt_token_counter,
             )
             print(json.dumps(paired_res, indent=2, sort_keys=True))

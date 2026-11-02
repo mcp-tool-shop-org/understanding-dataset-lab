@@ -10142,7 +10142,7 @@ def test_97_goal_mode_copy_attempt0_payload_hash_matches_29c6653_and_d_rule_sent
         for idx, (c_line, s_line) in enumerate(zip(copy_lines, splice_lines))
         if c_line != s_line
     ]
-    assert len(diffs) == 1
+    assert len(diffs) == 3
     _, copy_goal_line, splice_goal_line = diffs[0]
     assert copy_goal_line == (
         "- (c_fidelity_goal) Copy each agent's goal_text (goals[agent].goal_text) verbatim into setup (required)."
@@ -10150,6 +10150,23 @@ def test_97_goal_mode_copy_attempt0_payload_hash_matches_29c6653_and_d_rule_sent
     assert splice_goal_line == (
         "- (c_fidelity_goal) For each agent in agents, write the placeholder token [[GOAL:<agent>]] as its own "
         "sentence in setup instead of copying goal_text (required; code expands each [[GOAL:<agent>]] to goals[agent].goal_text)."
+    )
+    _, copy_bracket_line, splice_bracket_line = diffs[1]
+    assert copy_bracket_line == "- (a_no_markers_bracket) Do not emit bracket markers ('[...]')."
+    assert splice_bracket_line == (
+        "- (a_no_markers_bracket) Do not emit bracket markers ('[...]'), except the goal tokens "
+        "[[GOAL:Eva]], [[GOAL:Dan]], [[GOAL:Cara]] (one per agent in setup, exactly as written)."
+    )
+    _, copy_out_line, splice_out_line = diffs[2]
+    assert copy_out_line == (
+        "Return only the two third-person prose paragraphs separated by a blank line. "
+        "Do not emit headers, lists, bracket markers, fact IDs, step numbers, or commentary."
+    )
+    assert splice_out_line == (
+        "Return only the two third-person prose paragraphs separated by a blank line. "
+        "Do not emit headers, lists, bracket markers "
+        "(except the goal tokens [[GOAL:Eva]], [[GOAL:Dan]], [[GOAL:Cara]], one per agent in setup, exactly as written), "
+        "fact IDs, step numbers, or commentary."
     )
 
     # 2. Verify d_rule_sentence prompt line and behavior are unchanged in both modes:
@@ -10491,9 +10508,9 @@ def test_99_goal_mode_splice_token_faults_and_single_turn_repair_notes() -> None
     assert any(f.check_id == "c_fidelity_goal" and f.failure_kind == "false" for f in faults_dup)
     note_dup = format_repair_retry_line(exc_dup.value)
     assert note_dup == (
-        "Repair note (rule broken: check c_fidelity_goal, false): remove any false setup statement "
-        "(the setup agent goal text, check c_fidelity_goal) and follow: For each agent in agents, write the "
-        "placeholder token [[GOAL:<agent>]] as its own sentence in setup instead of copying goal_text "
+        "Repair note (rule broken: check c_fidelity_goal, false): write each agent's [[GOAL:<agent>]] token at most "
+        "once in setup (remove duplicate goal token, check c_fidelity_goal) and follow: For each agent in agents, "
+        "write the placeholder token [[GOAL:<agent>]] as its own sentence in setup instead of copying goal_text "
         "(required; code expands each [[GOAL:<agent>]] to goals[agent].goal_text)."
     )
     assert "[[GOAL:Eva]]" not in note_dup
@@ -10508,7 +10525,12 @@ def test_99_goal_mode_splice_token_faults_and_single_turn_repair_notes() -> None
     faults_unk = collect_prose_faults(unknown_tok_prose, w0, focal_agent="Eva", goal_mode="splice")
     assert any(f.check_id == "c_fidelity_goal" and f.failure_kind == "false" for f in faults_unk)
     note_unk = format_repair_retry_line(exc_unk.value)
-    assert note_unk == note_dup
+    assert note_unk == (
+        "Repair note (rule broken: check c_fidelity_goal, false): remove any [[GOAL:<agent>]] token for an "
+        "unknown agent not in agents (check c_fidelity_goal) and follow: "
+        "For each agent in agents, write the placeholder token [[GOAL:<agent>]] as its own sentence in setup "
+        "instead of copying goal_text (required; code expands each [[GOAL:<agent>]] to goals[agent].goal_text)."
+    )
     assert "Mallory" not in note_unk
 
     # 4. Token in paragraph 2 (event paragraph):
@@ -10521,7 +10543,12 @@ def test_99_goal_mode_splice_token_faults_and_single_turn_repair_notes() -> None
     faults_p2 = collect_prose_faults(para2_tok_prose, w0, focal_agent="Eva", goal_mode="splice")
     assert any(f.check_id == "c_fidelity_goal" and f.failure_kind == "false" for f in faults_p2)
     note_p2 = format_repair_retry_line(exc_p2.value)
-    assert note_p2 == note_dup
+    assert note_p2 == (
+        "Repair note (rule broken: check c_fidelity_goal, false): remove any [[GOAL:<agent>]] token from the "
+        "events paragraph and place goal tokens only in the setup paragraph (check c_fidelity_goal) and follow: "
+        "For each agent in agents, write the placeholder token [[GOAL:<agent>]] as its own sentence in setup "
+        "instead of copying goal_text (required; code expands each [[GOAL:<agent>]] to goals[agent].goal_text)."
+    )
 
 
 def test_100_paired_seed_bank_and_mcnemar_comparison_end_to_end(tmp_path: Path) -> None:
@@ -10762,6 +10789,328 @@ def test_100_paired_seed_bank_and_mcnemar_comparison_end_to_end(tmp_path: Path) 
     tampered_splice["renderings"][0]["call_seed"] += 1
     with pytest.raises(ValueError, match="Per-call seed mismatch"):
         compare_paired_runs(run_copy, tampered_splice)
+
+
+def test_101_splice_mode_narrow_bracket_exception_for_2_and_3_agents_and_copy_unchanged() -> None:
+    """Test 101 (Card udlab-goal-splice-fix1, Item 1):
+    - (a) In `splice` mode, both the `a_no_markers_bracket` bullet and the template output-format line
+      (`prompts/writer_qwen3_6_35b.txt:18`) carry a narrow exception naming only the exact token form
+      for the agents present in that scenario (`[[GOAL:<agent>]]`, one per agent in setup, exactly as written),
+      verified on both a 2-agent and a 3-agent scenario, and no rule in the rendered splice prompt unconditionally
+      forbids the goal tokens.
+    - (b) Prose with valid goal tokens plus any other bracket (`[note]`, `[[GOAL]]`, `[[GOAL:Unknown]]`, `[[goal:Eva]]`)
+      is refused with the right `check_id` (`a_no_markers_bracket`, or `c_fidelity_goal` for `[[GOAL:Unknown]]`).
+    - (c) `copy` mode remains byte-identical to `29c6653`.
+    """
+    from dataclasses import replace
+    from udlab_generator import (
+        RenderCheckError,
+        check_rendered_prose,
+        format_writer_prompt,
+        render_world_template_goal_tokens,
+    )
+
+    cfg3 = make_balanced_configs(1, base_seed=20261030)[0]
+    w3 = generate_world(cfg3)
+    assert w3.agents == ("Eva", "Dan", "Cara")
+
+    w2 = replace(
+        w3,
+        agents=("Ana", "Ben"),
+        initial_agent_rooms={"Ana": w3.rooms[0], "Ben": w3.rooms[1]},
+        goals={
+            "Ana": w3.goals["Eva"],
+            "Ben": w3.goals["Dan"],
+        },
+    )
+    assert w2.agents == ("Ana", "Ben")
+    ag2_0, ag2_1 = w2.agents
+
+    prompt_splice_2 = format_writer_prompt(w2, ag2_0, goal_mode="splice")
+    prompt_splice_3 = format_writer_prompt(w3, "Eva", goal_mode="splice")
+    prompt_copy_3 = format_writer_prompt(w3, "Eva", goal_mode="copy")
+
+    # (a) 2-agent and 3-agent splice prompts carry narrow agent-specific exceptions on both bracket rules:
+    expected_bullet_2 = (
+        f"- (a_no_markers_bracket) Do not emit bracket markers ('[...]'), except the goal tokens "
+        f"[[GOAL:{ag2_0}]], [[GOAL:{ag2_1}]] (one per agent in setup, exactly as written)."
+    )
+    expected_footer_2 = (
+        f"Return only the two third-person prose paragraphs separated by a blank line. Do not emit headers, lists, "
+        f"bracket markers (except the goal tokens [[GOAL:{ag2_0}]], [[GOAL:{ag2_1}]], one per agent in setup, "
+        f"exactly as written), fact IDs, step numbers, or commentary."
+    )
+    assert expected_bullet_2 in prompt_splice_2.splitlines()
+    assert expected_footer_2 in prompt_splice_2.splitlines()
+    assert "- (a_no_markers_bracket) Do not emit bracket markers ('[...]')." not in prompt_splice_2
+    assert "Do not emit headers, lists, bracket markers, fact IDs" not in prompt_splice_2
+
+    expected_bullet_3 = (
+        "- (a_no_markers_bracket) Do not emit bracket markers ('[...]'), except the goal tokens "
+        "[[GOAL:Eva]], [[GOAL:Dan]], [[GOAL:Cara]] (one per agent in setup, exactly as written)."
+    )
+    expected_footer_3 = (
+        "Return only the two third-person prose paragraphs separated by a blank line. Do not emit headers, lists, "
+        "bracket markers (except the goal tokens [[GOAL:Eva]], [[GOAL:Dan]], [[GOAL:Cara]], one per agent in setup, "
+        "exactly as written), fact IDs, step numbers, or commentary."
+    )
+    assert expected_bullet_3 in prompt_splice_3.splitlines()
+    assert expected_footer_3 in prompt_splice_3.splitlines()
+    assert "- (a_no_markers_bracket) Do not emit bracket markers ('[...]')." not in prompt_splice_3
+    assert "Do not emit headers, lists, bracket markers, fact IDs" not in prompt_splice_3
+
+    # (b) Valid tokens plus any other bracket (`[note]`, `[[GOAL]]`, `[[GOAL:Unknown]]`, `[[goal:Eva]]`) is refused:
+    base_3 = render_world_template_goal_tokens(w3, "Eva")
+    setup_3, events_3 = base_3.split("\n\n", 1)
+    assert check_rendered_prose(base_3, w3, focal_agent="Eva", goal_mode="splice") == ()
+
+    for bad_bracket, expected_cid in (
+        ("[note]", "a_no_markers_bracket"),
+        ("[[GOAL]]", "a_no_markers_bracket"),
+        ("[[GOAL:Unknown]]", "c_fidelity_goal"),
+        ("[[goal:Eva]]", "a_no_markers_bracket"),
+    ):
+        bad_prose = f"{setup_3} {bad_bracket}\n\n{events_3}"
+        with pytest.raises(RenderCheckError) as exc_info:
+            check_rendered_prose(bad_prose, w3, focal_agent="Eva", goal_mode="splice")
+        assert exc_info.value.check_id == expected_cid
+
+    # (c) Copy mode stays byte-identical to 29c6653:
+    assert (
+        hashlib.sha256(prompt_copy_3.encode("utf-8")).hexdigest()
+        == "f5007999c2903e9324d9f4cbcdbfebe8c8281bf88114ecad48625abdf93784ee"
+    )
+
+
+def test_102_splice_mode_trailing_punctuation_and_mid_sentence_fault() -> None:
+    """Test 102 (Card udlab-goal-splice-fix1, Item 2):
+    - A token followed by '.', '!' or '?' expands to exactly one sentence-final period (no '..', '.!' or '.?').
+    - A token in the middle of a sentence (not its own sentence) is a `c_fidelity_goal` fault (`failure_kind == 'altered'`)
+      with a token-specific repair note.
+    """
+    from udlab_generator import (
+        RenderCheckError,
+        check_rendered_prose,
+        collect_prose_faults,
+        format_repair_retry_line,
+        render_world_template_goal_tokens,
+        splice_goal_tokens,
+    )
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    assert w0.agents == ("Eva", "Dan", "Cara")
+    base_raw = render_world_template_goal_tokens(w0, "Eva")
+    expected_expanded = splice_goal_tokens(base_raw, w0).expanded_prose
+
+    # Cases 1-3: trailing '.', '!', '?' after [[GOAL:Eva]]:
+    for punct in (".", "!", "?"):
+        with_punct = base_raw.replace("[[GOAL:Eva]]", f"[[GOAL:Eva]]{punct}")
+        res = splice_goal_tokens(with_punct, w0)
+        assert res.expanded_prose == expected_expanded
+        assert "Eva plans to complete the quarterly audit packet." in res.expanded_prose
+        assert "Eva plans to complete the quarterly audit packet.." not in res.expanded_prose
+        assert "Eva plans to complete the quarterly audit packet.!" not in res.expanded_prose
+        assert "Eva plans to complete the quarterly audit packet.?" not in res.expanded_prose
+        assert check_rendered_prose(with_punct, w0, focal_agent="Eva", goal_mode="splice") == ()
+
+    # Case 4: token in the middle of a sentence (not its own sentence):
+    mid_sentence_prose = base_raw.replace("[[GOAL:Eva]]", "Stated goal: [[GOAL:Eva]]")
+    with pytest.raises(RenderCheckError) as exc_mid:
+        check_rendered_prose(mid_sentence_prose, w0, focal_agent="Eva", goal_mode="splice")
+    assert exc_mid.value.check_id == "c_fidelity_goal"
+    assert exc_mid.value.failure_kind == "altered"
+    assert exc_mid.value.goal_mode == "splice"
+
+    faults_mid = collect_prose_faults(mid_sentence_prose, w0, focal_agent="Eva", goal_mode="splice")
+    assert [f.check_id for f in faults_mid] == ["c_fidelity_goal"]
+    assert faults_mid[0].failure_kind == "altered"
+
+    note_mid = format_repair_retry_line(exc_mid.value)
+    assert note_mid == (
+        "Repair note (rule broken: check c_fidelity_goal, altered): place each [[GOAL:<agent>]] token as its own "
+        "standalone sentence in setup (not embedded inside another sentence, check c_fidelity_goal) and follow: "
+        "For each agent in agents, write the placeholder token [[GOAL:<agent>]] as its own sentence in setup "
+        "instead of copying goal_text (required; code expands each [[GOAL:<agent>]] to goals[agent].goal_text)."
+    )
+
+
+def test_103_splice_mode_token_specific_repair_notes_and_cli_unused_imports() -> None:
+    """Test 103 (Card udlab-goal-splice-fix1, Items 3 & 4):
+    - Duplicate token, unknown-agent token, and token in paragraph 2 produce distinct token-specific repair notes
+      built from check_id + failure_kind + code-made hint with no model text.
+    - `cli.py` has no unused imports (`mcnemar_exact_p_value`, `check_rendered_prose`, `locate_failing_sentence_in_response`, `verify_sealed_part`).
+    """
+    import ast
+    from udlab_generator import (
+        RenderCheckError,
+        check_rendered_prose,
+        format_repair_retry_line,
+        render_world_template_goal_tokens,
+    )
+    import udlab_generator.cli as cli_mod
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    base_splice = render_world_template_goal_tokens(w0, "Eva")
+    setup_p1, events_p2 = base_splice.split("\n\n", 1)
+
+    # 1. Duplicate token:
+    dup_prose = f"{setup_p1} [[GOAL:Eva]]\n\n{events_p2}"
+    with pytest.raises(RenderCheckError) as exc_dup:
+        check_rendered_prose(dup_prose, w0, focal_agent="Eva", goal_mode="splice")
+    note_dup = format_repair_retry_line(exc_dup.value)
+    assert note_dup == (
+        "Repair note (rule broken: check c_fidelity_goal, false): write each agent's [[GOAL:<agent>]] token "
+        "at most once in setup (remove duplicate goal token, check c_fidelity_goal) and follow: "
+        "For each agent in agents, write the placeholder token [[GOAL:<agent>]] as its own sentence in setup "
+        "instead of copying goal_text (required; code expands each [[GOAL:<agent>]] to goals[agent].goal_text)."
+    )
+
+    # 2. Unknown-agent token:
+    unk_prose = f"{setup_p1.replace('[[GOAL:Eva]]', '[[GOAL:Mallory]]')}\n\n{events_p2}"
+    with pytest.raises(RenderCheckError) as exc_unk:
+        check_rendered_prose(unk_prose, w0, focal_agent="Eva", goal_mode="splice")
+    note_unk = format_repair_retry_line(exc_unk.value)
+    assert note_unk == (
+        "Repair note (rule broken: check c_fidelity_goal, false): remove any [[GOAL:<agent>]] token for an "
+        "unknown agent not in agents (check c_fidelity_goal) and follow: "
+        "For each agent in agents, write the placeholder token [[GOAL:<agent>]] as its own sentence in setup "
+        "instead of copying goal_text (required; code expands each [[GOAL:<agent>]] to goals[agent].goal_text)."
+    )
+    assert "Mallory" not in note_unk
+
+    # 3. Token in paragraph 2:
+    p2_prose = f"{setup_p1}\n\n[[GOAL:Eva]] {events_p2}"
+    with pytest.raises(RenderCheckError) as exc_p2:
+        check_rendered_prose(p2_prose, w0, focal_agent="Eva", goal_mode="splice")
+    note_p2 = format_repair_retry_line(exc_p2.value)
+    assert note_p2 == (
+        "Repair note (rule broken: check c_fidelity_goal, false): remove any [[GOAL:<agent>]] token from the "
+        "events paragraph and place goal tokens only in the setup paragraph (check c_fidelity_goal) and follow: "
+        "For each agent in agents, write the placeholder token [[GOAL:<agent>]] as its own sentence in setup "
+        "instead of copying goal_text (required; code expands each [[GOAL:<agent>]] to goals[agent].goal_text)."
+    )
+    assert len({note_dup, note_unk, note_p2}) == 3
+
+    # 4. Verify cli.py has zero unused imports:
+    cli_source = Path(cli_mod.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(cli_source)
+    imported_names: dict[str, int] = {}
+    used_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            if getattr(node, "module", "") == "__future__":
+                continue
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                imported_names[bound] = node.lineno
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            used_names.add(node.id)
+    unused_in_cli = sorted(set(imported_names) - used_names)
+    assert unused_in_cli == []
+
+
+def test_104_cli_paired_seed_bank_with_fake_transport(tmp_path: Path) -> None:
+    """Test 104 (Card udlab-goal-splice-fix1, Item 5):
+    - CLI-level test of `--paired-seed-bank ... --paired-out ...` with the fake transport, asserting the
+      output file's fields (`goal_mode`, `commit`, `manifest_digest`, per-call seeds, `fault_check_ids`).
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+        derive_call_seed,
+        render_world_template_goal_tokens,
+        world_from_scenario_seed,
+    )
+    from udlab_generator.cli import main as cli_main
+
+    seeds = [20261110, 20261111]
+    seed_bank_file = tmp_path / "cli_seed_bank.json"
+    seed_bank_file.write_text(json.dumps(seeds), encoding="utf-8")
+    paired_out_file = tmp_path / "cli_paired_splice_out.json"
+
+    worlds = [world_from_scenario_seed(s, index=i) for i, s in enumerate(seeds)]
+    responses = [
+        render_world_template_goal_tokens(worlds[0], worlds[0].agents[0]),
+        render_world_template_goal_tokens(worlds[0], worlds[0].agents[1]),
+        # Scenario 1 r0: missing first agent's goal token -> c_fidelity_goal
+        render_world_template_goal_tokens(worlds[1], worlds[1].agents[0]).replace(
+            f"[[GOAL:{worlds[1].agents[0]}]]", ""
+        ),
+        render_world_template_goal_tokens(worlds[1], worlds[1].agents[1]),
+    ]
+    call_idx = 0
+
+    def _fake_cli_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal call_idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            txt = responses[call_idx]
+            call_idx += 1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3020,
+                "eval_count": 750,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    rc = cli_main(
+        [
+            "--paired-seed-bank",
+            str(seed_bank_file),
+            "--goal-mode",
+            "splice",
+            "--grant-id",
+            "test-cli-paired-grant",
+            "--paired-out",
+            str(paired_out_file),
+        ],
+        http_transport=_fake_cli_transport,
+    )
+    assert rc == 0
+    assert paired_out_file.is_file()
+    out_doc = json.loads(paired_out_file.read_text(encoding="utf-8"))
+    assert out_doc["schema_version"] == "paired_seed_bank_run_v1"
+    assert out_doc["goal_mode"] == "splice"
+    assert isinstance(out_doc["commit"], str) and len(out_doc["commit"]) >= 7
+    assert out_doc["manifest_digest"] == PINNED_WRITER_MANIFEST_DIGEST
+    assert out_doc["max_retries"] == 0
+    assert out_doc["num_scenarios"] == 2
+    assert out_doc["num_renderings"] == 4
+    assert out_doc["passed_renderings"] == 3
+    assert out_doc["passed_scenarios"] == 1
+    assert out_doc["fault_counts"] == {"c_fidelity_goal": 1}
+
+    renderings = out_doc["renderings"]
+    assert len(renderings) == 4
+    expected_faults = [[], [], ["c_fidelity_goal"], []]
+    for idx, row in enumerate(renderings):
+        scen_seed = seeds[idx // 2]
+        r_idx = idx % 2
+        assert row["scenario_seed"] == scen_seed
+        assert row["rendering_index"] == r_idx
+        assert row["goal_mode"] == "splice"
+        assert row["commit"] == out_doc["commit"]
+        assert row["manifest_digest"] == PINNED_WRITER_MANIFEST_DIGEST
+        assert row["call_seed"] == derive_call_seed(scen_seed, r_idx, 0)
+        assert row["fault_check_ids"] == expected_faults[idx]
+        assert row["checks_passed"] is (expected_faults[idx] == [])
+
 
 
 

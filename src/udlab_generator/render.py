@@ -1031,6 +1031,38 @@ SPLICE_GOAL_RULE_TEXT: str = (
     "For each agent in agents, write the placeholder token [[GOAL:<agent>]] as its own sentence in setup "
     "instead of copying goal_text (required; code expands each [[GOAL:<agent>]] to goals[agent].goal_text)."
 )
+COPY_BRACKET_RULE_TEXT: str = "Do not emit bracket markers ('[...]')."
+COPY_OUTPUT_FORMAT_LINE: str = (
+    "Return only the two third-person prose paragraphs separated by a blank line. "
+    "Do not emit headers, lists, bracket markers, fact IDs, step numbers, or commentary."
+)
+
+
+def format_splice_bracket_rule_text(agents: Sequence[str] | None = None) -> str:
+    """Format the narrow `a_no_markers_bracket` rule text for `splice` mode."""
+    token_list = (
+        ", ".join(format_goal_placeholder_token(ag) for ag in agents)
+        if agents
+        else "[[GOAL:<agent>]]"
+    )
+    return (
+        f"Do not emit bracket markers ('[...]'), except the goal tokens {token_list} "
+        "(one per agent in setup, exactly as written)."
+    )
+
+
+def format_splice_output_format_line(agents: Sequence[str] | None = None) -> str:
+    """Format the narrow output-format line (`prompts/writer_qwen3_6_35b.txt:18`) for `splice` mode."""
+    token_list = (
+        ", ".join(format_goal_placeholder_token(ag) for ag in agents)
+        if agents
+        else "[[GOAL:<agent>]]"
+    )
+    return (
+        "Return only the two third-person prose paragraphs separated by a blank line. "
+        f"Do not emit headers, lists, bracket markers (except the goal tokens {token_list}, "
+        "one per agent in setup, exactly as written), fact IDs, step numbers, or commentary."
+    )
 
 WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ProseRequirementSpec(
@@ -1144,7 +1176,7 @@ WRITER_PROSE_REQUIREMENTS: tuple[ProseRequirementSpec, ...] = (
     ),
     ProseRequirementSpec(
         "a_no_markers_bracket",
-        "Do not emit bracket markers ('[...]').",
+        COPY_BRACKET_RULE_TEXT,
     ),
     ProseRequirementSpec(
         "a_no_markers_fact_id",
@@ -1169,6 +1201,8 @@ _PROMPT_REQ_LINE_RE = re.compile(r"^-\s+\(([a-z0-9_]+)\)\s+(.+)$")
 
 def get_writer_prose_requirements(
     goal_mode: str = DEFAULT_GOAL_MODE,
+    *,
+    agents: Sequence[str] | None = None,
 ) -> tuple[ProseRequirementSpec, ...]:
     """Return the writer prose requirement specs for `goal_mode` (`'copy'` or `'splice'`)."""
     if goal_mode not in VALID_GOAL_MODES:
@@ -1177,28 +1211,40 @@ def get_writer_prose_requirements(
         )
     if goal_mode == "copy":
         return WRITER_PROSE_REQUIREMENTS
-    return tuple(
-        ProseRequirementSpec(
-            req.check_id,
-            SPLICE_GOAL_RULE_TEXT,
-            required_in_setup=req.required_in_setup,
-        )
-        if req.check_id == "c_fidelity_goal"
-        else req
-        for req in WRITER_PROSE_REQUIREMENTS
-    )
+    out: list[ProseRequirementSpec] = []
+    for req in WRITER_PROSE_REQUIREMENTS:
+        if req.check_id == "c_fidelity_goal":
+            out.append(
+                ProseRequirementSpec(
+                    req.check_id,
+                    SPLICE_GOAL_RULE_TEXT,
+                    required_in_setup=req.required_in_setup,
+                )
+            )
+        elif req.check_id == "a_no_markers_bracket":
+            out.append(
+                ProseRequirementSpec(
+                    req.check_id,
+                    format_splice_bracket_rule_text(agents),
+                    required_in_setup=req.required_in_setup,
+                )
+            )
+        else:
+            out.append(req)
+    return tuple(out)
 
 
 def render_writer_prompt_constraints(
     requirements: Sequence[ProseRequirementSpec] | None = None,
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    agents: Sequence[str] | None = None,
 ) -> str:
     """Render the `HARD CONSTRAINTS (MANDATORY):` bullet lines from `WRITER_PROSE_REQUIREMENTS`."""
     resolved_reqs = (
         requirements
         if requirements is not None
-        else get_writer_prose_requirements(goal_mode)
+        else get_writer_prose_requirements(goal_mode, agents=agents)
     )
     return "\n".join(f"- ({req.check_id}) {req.rule_text}" for req in resolved_reqs)
 
@@ -1207,12 +1253,13 @@ def parse_writer_prompt_requirements(
     prompt_text: str,
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    agents: Sequence[str] | None = None,
 ) -> tuple[ProseRequirementSpec, ...]:
     """Parse the mandatory requirement list from `prompt_text` (expanding `{hard_constraints_block}` if unformatted) and reject any untracked requirement lines."""
     expanded_text = (
         prompt_text.replace(
             HARD_CONSTRAINTS_PLACEHOLDER,
-            render_writer_prompt_constraints(goal_mode=goal_mode),
+            render_writer_prompt_constraints(goal_mode=goal_mode, agents=agents),
         )
         if HARD_CONSTRAINTS_PLACEHOLDER in prompt_text
         else prompt_text
@@ -1291,9 +1338,10 @@ def verify_prompt_and_checker_requirements_aligned(
     prompt_text: str | None = None,
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    agents: Sequence[str] | None = None,
 ) -> tuple[ProseRequirementSpec, ...]:
     """Verify that the writer prompt's parsed requirements, `WRITER_PROSE_REQUIREMENTS`, and the checker's enforced `check_id`s are identical."""
-    expected_reqs = get_writer_prose_requirements(goal_mode)
+    expected_reqs = get_writer_prose_requirements(goal_mode, agents=agents)
     if prompt_text is None:
         disk_raw = WRITER_PROMPT_PATH.read_text(encoding="utf-8")
         if HARD_CONSTRAINTS_PLACEHOLDER not in disk_raw:
@@ -1307,18 +1355,18 @@ def verify_prompt_and_checker_requirements_aligned(
                 )
         raw_text = disk_raw.replace(
             HARD_CONSTRAINTS_PLACEHOLDER,
-            render_writer_prompt_constraints(goal_mode=goal_mode),
+            render_writer_prompt_constraints(goal_mode=goal_mode, agents=agents),
         )
     else:
         raw_text = (
             prompt_text.replace(
                 HARD_CONSTRAINTS_PLACEHOLDER,
-                render_writer_prompt_constraints(goal_mode=goal_mode),
+                render_writer_prompt_constraints(goal_mode=goal_mode, agents=agents),
             )
             if HARD_CONSTRAINTS_PLACEHOLDER in prompt_text
             else prompt_text
         )
-    parsed_prompt_reqs = parse_writer_prompt_requirements(raw_text, goal_mode=goal_mode)
+    parsed_prompt_reqs = parse_writer_prompt_requirements(raw_text, goal_mode=goal_mode, agents=agents)
     if parsed_prompt_reqs != expected_reqs:
         prompt_ids = [r.check_id for r in parsed_prompt_reqs]
         shared_ids = [r.check_id for r in expected_reqs]
@@ -1499,6 +1547,13 @@ def _format_repair_hints_by_event_variant() -> dict[str, str]:
 
 _REPAIR_HINT_BY_EVENT_VARIANT: dict[str, str] = _format_repair_hints_by_event_variant()
 
+_REPAIR_HINT_BY_GOAL_SPLICE_VARIANT: dict[str, str] = {
+    "goal_token_duplicate": "write each agent's [[GOAL:<agent>]] token at most once in setup (remove duplicate goal token, check c_fidelity_goal)",
+    "goal_token_unknown_agent": "remove any [[GOAL:<agent>]] token for an unknown agent not in agents (check c_fidelity_goal)",
+    "goal_token_outside_setup": "remove any [[GOAL:<agent>]] token from the events paragraph and place goal tokens only in the setup paragraph (check c_fidelity_goal)",
+    "goal_token_mid_sentence": "place each [[GOAL:<agent>]] token as its own standalone sentence in setup (not embedded inside another sentence, check c_fidelity_goal)",
+}
+
 _REPAIR_HINT_BY_EVENT_KIND: dict[str, str] = {
     "enter": "names the room the actor came from and the room entered, with the actor as subject",
     "leave": "names the room the actor left and the destination room, with the actor as subject",
@@ -1635,8 +1690,13 @@ def format_repair_retry_line(
     reqs_by_id = {req.check_id: req for req in get_writer_prose_requirements(resolved_goal_mode)}
     rule_spec = reqs_by_id.get(exc.check_id)
     rule_hint = rule_spec.rule_text if rule_spec is not None else "satisfy this mandatory constraint."
+    splice_variant_hint = _REPAIR_HINT_BY_GOAL_SPLICE_VARIANT.get(
+        getattr(exc, "event_variant", None) or ""
+    )
     if is_single_turn:
         setup_prefix = f"Repair note (rule broken: check {exc.check_id}, {resolved_kind}): "
+        if splice_variant_hint is not None:
+            return f"{setup_prefix}{splice_variant_hint} and follow: {rule_hint}"
         if resolved_kind == "absent":
             return (
                 f"{setup_prefix}include one sentence naming {target_item} "
@@ -1649,6 +1709,11 @@ def format_repair_retry_line(
             )
         return (
             f"{setup_prefix}ensure {target_item} (check {exc.check_id}) satisfies: {rule_hint}"
+        )
+    if splice_variant_hint is not None:
+        return (
+            f"Keep your earlier text exactly as it was; {splice_variant_hint} "
+            f"so that it satisfies: {rule_hint} Leave every other sentence unchanged."
         )
     if resolved_kind == "absent":
         return (
@@ -1695,6 +1760,7 @@ def load_writer_prompt_template(
     path: Path | None = None,
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    agents: Sequence[str] | None = None,
 ) -> str:
     """Load the `qwen3.6:35b` writer prompt text file, expand `{hard_constraints_block}` from `WRITER_PROSE_REQUIREMENTS`, and verify alignment."""
     if goal_mode not in VALID_GOAL_MODES:
@@ -1714,11 +1780,13 @@ def load_writer_prompt_template(
     text = (
         raw_disk_text.replace(
             HARD_CONSTRAINTS_PLACEHOLDER,
-            render_writer_prompt_constraints(goal_mode=goal_mode),
+            render_writer_prompt_constraints(goal_mode=goal_mode, agents=agents),
         )
         if HARD_CONSTRAINTS_PLACEHOLDER in raw_disk_text
         else raw_disk_text
     )
+    if goal_mode == "splice":
+        text = text.replace(COPY_OUTPUT_FORMAT_LINE, format_splice_output_format_line(agents))
     missing = [w for w in BANNED_ADVERBS if w not in text.lower()]
     if missing:
         raise ValueError(f"Writer prompt template is missing banned adverbs: {missing}")
@@ -1728,7 +1796,7 @@ def load_writer_prompt_template(
             f"Writer prompt template must contain BELIEF_PERSISTENCE_RULE byte-identically exactly once; found {rule_count}."
         )
     if target == WRITER_PROMPT_PATH:
-        verify_prompt_and_checker_requirements_aligned(text, goal_mode=goal_mode)
+        verify_prompt_and_checker_requirements_aligned(text, goal_mode=goal_mode, agents=agents)
     return text
 
 
@@ -1814,7 +1882,7 @@ def format_writer_prompt(
     raw_template = (
         template
         if template is not None
-        else load_writer_prompt_template(goal_mode=goal_mode)
+        else load_writer_prompt_template(goal_mode=goal_mode, agents=world.agents)
     )
     world_setup = {
         "scenario_id": world.scenario_id,
@@ -1844,17 +1912,58 @@ def format_writer_prompt(
     if HARD_CONSTRAINTS_PLACEHOLDER in raw_template:
         expanded_template = raw_template.replace(
             HARD_CONSTRAINTS_PLACEHOLDER,
-            render_writer_prompt_constraints(goal_mode=goal_mode),
+            render_writer_prompt_constraints(goal_mode=goal_mode, agents=world.agents),
         )
+        if goal_mode == "splice":
+            expanded_template = expanded_template.replace(
+                COPY_OUTPUT_FORMAT_LINE,
+                format_splice_output_format_line(world.agents),
+            )
     elif goal_mode == "splice":
-        expanded_template = raw_template.replace(
-            f"- (c_fidelity_goal) {COPY_GOAL_RULE_TEXT}",
-            f"- (c_fidelity_goal) {SPLICE_GOAL_RULE_TEXT}",
+        expanded_template = (
+            raw_template.replace(
+                f"- (c_fidelity_goal) {COPY_GOAL_RULE_TEXT}",
+                f"- (c_fidelity_goal) {SPLICE_GOAL_RULE_TEXT}",
+            )
+            .replace(
+                f"- (a_no_markers_bracket) {COPY_BRACKET_RULE_TEXT}",
+                f"- (a_no_markers_bracket) {format_splice_bracket_rule_text(world.agents)}",
+            )
+            .replace(
+                f"- (a_no_markers_bracket) {format_splice_bracket_rule_text(None)}",
+                f"- (a_no_markers_bracket) {format_splice_bracket_rule_text(world.agents)}",
+            )
+            .replace(
+                COPY_OUTPUT_FORMAT_LINE,
+                format_splice_output_format_line(world.agents),
+            )
+            .replace(
+                format_splice_output_format_line(None),
+                format_splice_output_format_line(world.agents),
+            )
         )
     else:
-        expanded_template = raw_template.replace(
-            f"- (c_fidelity_goal) {SPLICE_GOAL_RULE_TEXT}",
-            f"- (c_fidelity_goal) {COPY_GOAL_RULE_TEXT}",
+        expanded_template = (
+            raw_template.replace(
+                f"- (c_fidelity_goal) {SPLICE_GOAL_RULE_TEXT}",
+                f"- (c_fidelity_goal) {COPY_GOAL_RULE_TEXT}",
+            )
+            .replace(
+                f"- (a_no_markers_bracket) {format_splice_bracket_rule_text(world.agents)}",
+                f"- (a_no_markers_bracket) {COPY_BRACKET_RULE_TEXT}",
+            )
+            .replace(
+                f"- (a_no_markers_bracket) {format_splice_bracket_rule_text(None)}",
+                f"- (a_no_markers_bracket) {COPY_BRACKET_RULE_TEXT}",
+            )
+            .replace(
+                format_splice_output_format_line(world.agents),
+                COPY_OUTPUT_FORMAT_LINE,
+            )
+            .replace(
+                format_splice_output_format_line(None),
+                COPY_OUTPUT_FORMAT_LINE,
+            )
         )
     formatted = (
         expanded_template.replace("{focal_agent}", focal_agent)
@@ -3474,6 +3583,7 @@ def check_prose_render_fidelity(
 
 
 _GOAL_TOKEN_RE = re.compile(r"\[\[GOAL:([^\[\]]*)\]\]")
+_GOAL_TOKEN_WITH_OPTIONAL_PUNCT_RE = re.compile(r"\[\[GOAL:([^\[\]]*)\]\]([.!?])?")
 
 
 @dataclass(frozen=True)
@@ -3484,12 +3594,56 @@ class GoalSpliceResult:
     goal_source: dict[str, str]
 
 
+def _token_is_standalone_sentence_in_setup(setup_para: str, token_str: str) -> bool:
+    """Return True if `token_str` (with optional single trailing '.', '!' or '?') is its own sentence in `setup_para`."""
+    idx = setup_para.find(token_str)
+    if idx < 0:
+        return True
+    raw_before = setup_para[:idx]
+    if raw_before and not raw_before[-1].isspace():
+        return False
+    before = raw_before.rstrip()
+    if before:
+        if before.endswith(GOAL_TOKEN_SUFFIX):
+            pass
+        elif before[-1] in ('"', "'", "”", "’") and len(before) >= 2 and before[-2] in (".", "!", "?"):
+            pass
+        elif before[-1] not in (".", "!", "?"):
+            return False
+    after_idx = idx + len(token_str)
+    if after_idx < len(setup_para) and setup_para[after_idx] in (".", "!", "?"):
+        after_idx += 1
+    after = setup_para[after_idx:]
+    if after:
+        if not after[0].isspace():
+            return False
+        after_stripped = after.lstrip()
+        if after_stripped:
+            if after_stripped.startswith(GOAL_TOKEN_PREFIX):
+                return True
+            first_ch = after_stripped[0]
+            if first_ch in ('"', "'", "“", "‘", "(") and len(after_stripped) >= 2:
+                first_ch = after_stripped[1]
+            if not first_ch.isupper():
+                return False
+    return True
+
+
+def _replace_single_goal_token_with_sentence(text: str, token_str: str, goal_sent: str) -> str:
+    """Replace the first occurrence of `token_str` (absorbing at most one trailing '.', '!' or '?') with `goal_sent`."""
+    pat = re.compile(re.escape(token_str) + r"[.!?]?")
+    return pat.sub(goal_sent, text, count=1)
+
+
 def splice_goal_tokens(prose: str, world: World) -> GoalSpliceResult:
     """Validate and expand `[[GOAL:<agent>]]` placeholder tokens in `prose` before running the prose checker.
 
-    - Each valid `[[GOAL:<agent>]]` in the setup paragraph is expanded to `<goal_text>.`.
+    - Each valid `[[GOAL:<agent>]]` in the setup paragraph (with optional trailing '.', '!' or '?') is expanded
+      to `<goal_text>.` (exactly one sentence-final period).
+    - A token in the middle of a sentence (not its own sentence) raises/records `c_fidelity_goal` (`altered`)
+      with `event_variant='goal_token_mid_sentence'`.
     - Missing token, duplicated token, unknown-agent token, or token outside the setup paragraph raises/records
-      `c_fidelity_goal` (`absent` or `false` as fits) with `goal_mode='splice'`.
+      `c_fidelity_goal` (`absent` or `false` as fits) with `goal_mode='splice'` and a token-specific `event_variant`.
     - If the model wrote `goal_text` itself instead of a token, records `goal_source[agent] = 'model_text'`.
     """
     norm_prose = normalize_prose_line_endings(prose)
@@ -3505,6 +3659,7 @@ def splice_goal_tokens(prose: str, world: World) -> GoalSpliceResult:
             f"Render check (c) failed: goal placeholder token {tok_raw!r} appears outside the setup paragraph (candidate sentence: {cand_sent!r}).",
             failing_sentence=cand_sent,
             failure_kind="false",
+            event_variant="goal_token_outside_setup",
             goal_mode="splice",
         )
 
@@ -3518,6 +3673,7 @@ def splice_goal_tokens(prose: str, world: World) -> GoalSpliceResult:
                 f"Render check (c) failed: goal placeholder token {tok_raw!r} names unknown agent {tok_agent!r} (candidate sentence: {cand_sent!r}).",
                 failing_sentence=cand_sent,
                 failure_kind="false",
+                event_variant="goal_token_unknown_agent",
                 goal_mode="splice",
             )
 
@@ -3539,11 +3695,12 @@ def splice_goal_tokens(prose: str, world: World) -> GoalSpliceResult:
                 f"Render check (c) failed: duplicate goal placeholder token {token_str!r} for agent '{ag}' in setup prose (found {tok_count}; candidate sentence: {cand_sent!r}).",
                 failing_sentence=cand_sent,
                 failure_kind="false",
+                event_variant="goal_token_duplicate",
                 goal_mode="splice",
             )
             goal_source[ag] = "token"
-            expanded_setup = expanded_setup.replace(token_str, goal_sent, 1)
-            expanded_setup = expanded_setup.replace(token_str, "")
+            expanded_setup = _replace_single_goal_token_with_sentence(expanded_setup, token_str, goal_sent)
+            expanded_setup = re.sub(re.escape(token_str) + r"[.!?]?", "", expanded_setup)
         elif tok_count == 1 and text_count >= 1:
             cand_sent = _find_sentence_with_substring(setup_para, token_str)
             _raise_prose_check_error(
@@ -3551,10 +3708,11 @@ def splice_goal_tokens(prose: str, world: World) -> GoalSpliceResult:
                 f"Render check (c) failed: both goal placeholder token {token_str!r} and goal text for agent '{ag}' appear in setup prose (candidate sentence: {cand_sent!r}).",
                 failing_sentence=cand_sent,
                 failure_kind="false",
+                event_variant="goal_token_duplicate",
                 goal_mode="splice",
             )
             goal_source[ag] = "token"
-            expanded_setup = expanded_setup.replace(token_str, "")
+            expanded_setup = re.sub(re.escape(token_str) + r"[.!?]?", "", expanded_setup)
         elif tok_count == 0 and text_count > 1:
             cand_sent = _find_sentence_with_substring(setup_para, goal_text)
             _raise_prose_check_error(
@@ -3578,14 +3736,24 @@ def splice_goal_tokens(prose: str, world: World) -> GoalSpliceResult:
             if collecting_all:
                 expanded_setup = f"{expanded_setup} {goal_sent}".strip()
         elif tok_count == 1 and text_count == 0:
+            if not _token_is_standalone_sentence_in_setup(setup_para, token_str):
+                cand_sent = _find_sentence_with_substring(setup_para, token_str)
+                _raise_prose_check_error(
+                    "c_fidelity_goal",
+                    f"Render check (c) failed: goal placeholder token {token_str!r} for agent '{ag}' must be its own standalone sentence in setup (candidate sentence: {cand_sent!r}).",
+                    failing_sentence=cand_sent,
+                    failure_kind="altered",
+                    event_variant="goal_token_mid_sentence",
+                    goal_mode="splice",
+                )
             goal_source[ag] = "token"
-            expanded_setup = expanded_setup.replace(token_str, goal_sent, 1)
+            expanded_setup = _replace_single_goal_token_with_sentence(expanded_setup, token_str, goal_sent)
         else:
             goal_source[ag] = "model_text"
 
     if collecting_all:
-        expanded_setup = _GOAL_TOKEN_RE.sub("", expanded_setup)
-        other_paras = _GOAL_TOKEN_RE.sub("", other_paras)
+        expanded_setup = _GOAL_TOKEN_WITH_OPTIONAL_PUNCT_RE.sub("", expanded_setup)
+        other_paras = _GOAL_TOKEN_WITH_OPTIONAL_PUNCT_RE.sub("", other_paras)
 
     if len(paragraphs) > 1:
         expanded_prose = f"{expanded_setup}\n\n{other_paras}"
@@ -3947,6 +4115,16 @@ class MockWriter:
             "Real /api/chat calls and GPU model loads are forbidden in MockWriter (CPU mock writer only)."
         )
 
+    def render_raw_response(self, world: World, focal_agent: str) -> str:
+        """Return the unexpanded mock writer response text for `(world, focal_agent)`."""
+        default_fn = (
+            render_world_template_goal_tokens
+            if self._goal_mode == "splice"
+            else render_world_template
+        )
+        render_fn = self._custom_renderer or default_fn
+        return render_fn(world, focal_agent)
+
     def render_scenario_pair(self, world: World) -> tuple[RenderedScenario, RenderedScenario]:
         """Render `world` twice, focalized on two distinct agents, over the complete log."""
         focal_0 = world.agents[0]
@@ -3955,18 +4133,12 @@ class MockWriter:
         prompt_0 = format_writer_prompt(world, focal_0, self._prompt_template, goal_mode=self._goal_mode)
         prompt_1 = format_writer_prompt(world, focal_1, self._prompt_template, goal_mode=self._goal_mode)
 
-        default_fn = (
-            render_world_template_goal_tokens
-            if self._goal_mode == "splice"
-            else render_world_template
-        )
-        render_fn = self._custom_renderer or default_fn
         rendered_texts: list[str] = []
         goal_sources: list[dict[str, str]] = []
         for r_idx, focal_ag in ((0, focal_0), (1, focal_1)):
             prose_text = ""
             try:
-                prose_text = render_fn(world, focal_ag)
+                prose_text = self.render_raw_response(world, focal_ag)
                 if self._goal_mode == "splice":
                     splice_res = splice_goal_tokens(prose_text, world)
                     expanded_text = splice_res.expanded_prose
@@ -4666,7 +4838,13 @@ def _resolve_failing_sentence_in_raw_response(
             goal_sent = f"{world.goals[ag].goal_text}."
             tok_str = format_goal_placeholder_token(ag)
             if goal_sent in unexpanded:
-                unexpanded = unexpanded.replace(goal_sent, tok_str)
+                replacement_tok = tok_str
+                for punct in (".", "!", "?"):
+                    cand_tok = f"{tok_str}{punct}"
+                    if cand_tok in raw_response:
+                        replacement_tok = cand_tok
+                        break
+                unexpanded = unexpanded.replace(goal_sent, replacement_tok)
         sha_u, _, _ = locate_failing_sentence_in_response(raw_response, unexpanded)
         if sha_u:
             return unexpanded
