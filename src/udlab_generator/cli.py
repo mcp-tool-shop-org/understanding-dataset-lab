@@ -22,7 +22,9 @@ from udlab_generator.probe import (
     run_shortcut_probe,
 )
 from udlab_generator.render import (
+    ATTEMPT_0_TEMPERATURE,
     DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_RETRY_FORM,
     DEFAULT_VRAM_HALT_MIB,
     DEFAULT_WRITER_MAX_NUM_CTX,
     DEFAULT_WRITER_MODEL_PIN,
@@ -32,7 +34,10 @@ from udlab_generator.render import (
     GENERATIONS_FILENAME,
     NUM_CTX_MARGIN_TOKENS,
     NUM_CTX_STEP_TOKENS,
+    RETRY_MIN_P,
+    RETRY_TEMPERATURE,
     SEALED_RESPONSES_FILENAME,
+    VALID_RETRY_FORMS,
     GenerationCallRecord,
     LlamaTokenizeCounter,
     MaxNumCtxRefusalError,
@@ -52,6 +57,7 @@ from udlab_generator.render import (
     count_duplicate_stake_statements,
     count_prompt_tokens_exact,
     decide_num_ctx,
+    derive_call_seed,
     estimate_prompt_tokens,
     format_non_sealed_refusal_reason,
     kill_pid_tree,
@@ -675,6 +681,9 @@ def build_and_probe_dataset(
     max_num_ctx: int = DEFAULT_WRITER_MAX_NUM_CTX,
     think: bool = DEFAULT_WRITER_THINK,
     max_retries: int = 0,
+    retry_form: str = DEFAULT_RETRY_FORM,
+    multi_turn_retries: bool = False,
+    short_circuit_dead_scenarios: bool = False,
     grant_id: str | None = None,
     resume: bool = False,
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
@@ -694,6 +703,15 @@ def build_and_probe_dataset(
         raise ValueError(f"writer_kind must be 'mock' or 'ollama', got {writer_kind!r}.")
     if max_retries < 0:
         raise ValueError(f"max_retries must be >= 0, got {max_retries}.")
+    resolved_retry_form = "multi_turn" if multi_turn_retries else str(retry_form)
+    if resolved_retry_form not in VALID_RETRY_FORMS:
+        raise ValueError(
+            f"retry_form must be one of {sorted(VALID_RETRY_FORMS)}, got {resolved_retry_form!r}."
+        )
+    resolved_short_circuit = bool(short_circuit_dead_scenarios)
+    dead_scenario_mode = (
+        "short_circuit" if resolved_short_circuit else "continue_other_rendering"
+    )
     if max_num_ctx > DEFAULT_WRITER_MAX_NUM_CTX:
         raise MaxNumCtxRefusalError(
             f"REFUSED (MAX_NUM_CTX_CAP): max_num_ctx={max_num_ctx} exceeds the hard VRAM ceiling limit "
@@ -733,6 +751,8 @@ def build_and_probe_dataset(
         private_seed_hex=initial_private_seed,
         writer_kind=writer_kind,
         writer_pin=effective_writer_pin,
+        short_circuit_dead_scenarios=resolved_short_circuit,
+        retry_form=resolved_retry_form,
     )
 
     if resume:
@@ -777,6 +797,8 @@ def build_and_probe_dataset(
             generations_path=generations_path,
             sealed_responses_path=sealed_responses_path,
             max_retries=max_retries,
+            retry_form=resolved_retry_form,
+            short_circuit_dead_scenarios=resolved_short_circuit,
             start_owned_server=should_own_server,
             popen_factory=popen_factory,
             prompt_token_counter=prompt_token_counter,
@@ -787,7 +809,11 @@ def build_and_probe_dataset(
             for idx in range(completed_count, len(worlds)):
                 w = worlds[idx]
                 prev_calls = len(ollama_writer.call_records)
-                pair = ollama_writer.render_scenario_pair(w, allow_refusal=True)
+                pair = ollama_writer.render_scenario_pair(
+                    w,
+                    allow_refusal=True,
+                    short_circuit_dead_scenarios=resolved_short_circuit,
+                )
                 new_calls = ollama_writer.call_records[prev_calls:]
                 if pair is not None:
                     rendered_pairs.append(pair)
@@ -826,6 +852,7 @@ def build_and_probe_dataset(
             for r_idx, rend in enumerate(pair):
                 call_index = len(all_mock_calls) + 1
                 call_id = f"{w.scenario_id}:r{r_idx}:call_{call_index:04d}"
+                call_seed = derive_call_seed(int(w.seed), r_idx, 0)
                 messages = [{"role": "user", "content": rend.writer_prompt}]
                 prompt_sha = hashlib.sha256(
                     json.dumps(messages, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -866,7 +893,8 @@ def build_and_probe_dataset(
                     num_ctx=n_ctx,
                     max_num_ctx=max_num_ctx,
                     think=resolved_think,
-                    temperature=0.0,
+                    temperature=ATTEMPT_0_TEMPERATURE,
+                    min_p=None,
                     done_reason="stop",
                     seconds=round(elapsed / 2.0, 6),
                     vram_peak_mib=0,
@@ -875,7 +903,7 @@ def build_and_probe_dataset(
                     checks_passed=True,
                     refusal_reasons=(),
                     attempt=0,
-                    seed=int(w.seed),
+                    seed=call_seed,
                     response_sha256=resp_sha,
                     thinking_sha256=think_sha,
                 )
@@ -892,7 +920,10 @@ def build_and_probe_dataset(
                         rendering_index=r_idx,
                         focal_agent=rend.focal_agent,
                         attempt=0,
-                        seed=int(w.seed),
+                        seed=call_seed,
+                        temperature=ATTEMPT_0_TEMPERATURE,
+                        min_p=None,
+                        retry_form="",
                         response_text=rend.prose,
                         thinking_text="",
                         response_sha256=resp_sha,
@@ -926,6 +957,9 @@ def build_and_probe_dataset(
         "num_predict": resolved_num_predict,
         "max_num_ctx": max_num_ctx,
         "max_retries": max_retries,
+        "retry_form": resolved_retry_form,
+        "short_circuit_dead_scenarios": resolved_short_circuit,
+        "dead_scenario_mode": dead_scenario_mode,
         "vram_halt_mib": vram_halt_mib,
         "grant_id": effective_grant_id,
         "prompt_token_counter": describe_prompt_token_counter(prompt_token_counter),
@@ -965,6 +999,9 @@ def build_and_probe_dataset(
         "writer": writer_kind,
         "writer_pin": effective_writer_pin.to_dict(),
         "max_retries": max_retries,
+        "retry_form": resolved_retry_form,
+        "short_circuit_dead_scenarios": resolved_short_circuit,
+        "dead_scenario_mode": dead_scenario_mode,
         "grant_id": effective_grant_id,
         "prompt_token_counter": describe_prompt_token_counter(prompt_token_counter),
         "vram_halt_mib": vram_halt_mib,
@@ -1059,6 +1096,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Number of repair retries per refused rendering (default: 0).",
     )
     parser.add_argument(
+        "--retry-form",
+        choices=("single_turn", "multi_turn"),
+        default=DEFAULT_RETRY_FORM,
+        help=f"Repair retry prompt form (default: {DEFAULT_RETRY_FORM}).",
+    )
+    parser.add_argument(
+        "--multi-turn-retries",
+        action="store_true",
+        default=False,
+        help="Explicitly opt into multi-turn repair retries that include the refused draft (default: off).",
+    )
+    parser.add_argument(
+        "--short-circuit-dead-scenarios",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Stop rendering a scenario as soon as one rendering has failed all its attempts "
+            "(default: off / continue writing and checking the other rendering)."
+        ),
+    )
+    parser.add_argument(
         "--grant-id",
         type=str,
         default=None,
@@ -1151,6 +1209,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_num_ctx=args.max_num_ctx,
             think=bool(args.think),
             max_retries=args.max_retries,
+            retry_form=args.retry_form,
+            multi_turn_retries=bool(args.multi_turn_retries),
+            short_circuit_dead_scenarios=bool(args.short_circuit_dead_scenarios),
             grant_id=args.grant_id,
             resume=args.resume,
             prompt_token_counter=prompt_token_counter,

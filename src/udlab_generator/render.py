@@ -103,6 +103,33 @@ DEFAULT_WRITER_THINK: bool = False
 DEFAULT_VRAM_HALT_MIB: int = 26_000
 NUM_CTX_MARGIN_TOKENS: int = 256
 NUM_CTX_STEP_TOKENS: int = 1024
+ATTEMPT_0_TEMPERATURE: float = 0.0
+RETRY_TEMPERATURE: float = 0.6
+RETRY_MIN_P: float = 0.05
+DEFAULT_RETRY_FORM: str = "single_turn"
+VALID_RETRY_FORMS: frozenset[str] = frozenset({"single_turn", "multi_turn"})
+CALL_SEED_DOMAIN_TAG: str = "udlab.call_seed.v1"
+CALL_SEED_MASK_31BIT: int = 0x7FFFFFFF
+
+
+def derive_call_seed(scenario_seed: int, rendering_index: int, attempt: int) -> int:
+    """Derive a deterministic, non-negative 31-bit per-call seed from `(scenario_seed, rendering_index, attempt)`.
+
+    Hashes `udlab.call_seed.v1:<scenario_seed>:<rendering_index>:<attempt>` with BLAKE2b (8-byte digest) and
+    truncates the first 4 big-endian bytes to 31 bits (`& 0x7FFFFFFF`). This ensures the two renderings of a
+    scenario and every retry attempt receive distinct, reproducible seeds without any new CLI flag.
+    """
+    if isinstance(scenario_seed, bool) or not isinstance(scenario_seed, int):
+        raise TypeError(f"scenario_seed must be an int, got {scenario_seed!r}")
+    if isinstance(rendering_index, bool) or rendering_index not in (0, 1):
+        raise ValueError(f"rendering_index must be 0 or 1, got {rendering_index!r}")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
+        raise ValueError(f"attempt must be an int >= 0, got {attempt!r}")
+    payload = f"{CALL_SEED_DOMAIN_TAG}:{scenario_seed}:{rendering_index}:{attempt}".encode("utf-8")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest[:4], "big") & CALL_SEED_MASK_31BIT
+
+
 # Card ul: the check id of a rendering whose exact prompt tokens + num_predict + margin exceed the cap. It is
 # recorded like a prose refusal, counted by the build summary, and the run continues with the next rendering.
 # Distinct from `max_num_ctx_exceeded`, which stays the configuration error for a requested cap above 9216.
@@ -258,6 +285,18 @@ class RenderedScenario:
     writer_prompt: str
     keys: ScenarioKeys
     world: World | None = None
+    attempt: int = 0
+    temperature: float = ATTEMPT_0_TEMPERATURE
+    min_p: float | None = None
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        if self.seed == 0 and self.world is not None:
+            object.__setattr__(
+                self,
+                "seed",
+                derive_call_seed(int(self.world.seed), int(self.rendering_index), int(self.attempt)),
+            )
 
 
 @dataclass(frozen=True)
@@ -1416,16 +1455,19 @@ _REPAIR_TARGET_BY_CHECK_ID: dict[str, str] = {
 def format_repair_retry_line(
     exc: RenderCheckError,
     *,
-    retry_form: str = "multi_turn",
+    retry_form: str = DEFAULT_RETRY_FORM,
     failure_kind: str | None = None,
 ) -> str:
     """Format a single repair-retry line from `exc.check_id` plus `absent`/`altered`/`false` flag, without key content or model text.
 
-    - For an `absent` required item in multi-turn form: `'Keep your earlier text as it was; add one sentence naming <item> ...'`.
-    - For an `altered` or `false` item in multi-turn form: `'Keep your earlier text exactly as it was; change only ...'`.
-    - When `retry_form == 'single_turn'`, omits 'keep your earlier text' / 'leaving every other sentence unchanged'
-      because attempt-0 text is not included in the single-turn fallback request.
+    - Single-turn form (`retry_form == 'single_turn'`, default): states the rule that was broken (`check_id`,
+      `event_index` and `event_kind` where present, and what must hold) without referring to an earlier draft,
+      quoting model text, or leaking a literal checker regex.
+    - Multi-turn form (`retry_form == 'multi_turn'`): retains the explicit multi-turn wording (`'Keep your earlier
+      text...'`) when the multi-turn retry option is explicitly enabled.
     """
+    if retry_form not in VALID_RETRY_FORMS:
+        raise ValueError(f"retry_form must be one of {sorted(VALID_RETRY_FORMS)}, got {retry_form!r}")
     resolved_kind = failure_kind if failure_kind is not None else getattr(exc, "failure_kind", "altered")
     if resolved_kind not in VALID_FAILURE_KINDS:
         raise ValueError(f"failure_kind must be one of {sorted(VALID_FAILURE_KINDS)}, got {resolved_kind!r}")
@@ -1444,9 +1486,19 @@ def format_repair_retry_line(
         )
         if exc.check_id == "c_fidelity_event_order":
             if is_single_turn:
+                ev_prefix = (
+                    f"Repair note (rule broken: event {exc.event_index} "
+                    f"({exc.event_kind}, check {exc.check_id}), {resolved_kind}): "
+                )
+                if resolved_kind == "absent":
+                    return (
+                        f"{ev_prefix}add one sentence for event {exc.event_index} "
+                        f"{pos_clause} ({exc.event_kind}, check {exc.check_id}) "
+                        f"so that it {hint}."
+                    )
                 return (
-                    f"Ensure event {exc.event_index} ({exc.event_kind}, check {exc.check_id}) "
-                    f"appears in its logged chronological position and {hint}."
+                    f"{ev_prefix}ensure event {exc.event_index} ({exc.event_kind}, check {exc.check_id}) "
+                    f"appears in its logged chronological position ({pos_clause}) and {hint}."
                 )
             if resolved_kind == "absent":
                 return (
@@ -1460,13 +1512,18 @@ def format_repair_retry_line(
                 f"and {hint}, leaving every other sentence unchanged."
             )
         if is_single_turn:
+            ev_prefix = (
+                f"Repair note (rule broken: event {exc.event_index} "
+                f"({exc.event_kind}, check {exc.check_id}), {resolved_kind}): "
+            )
             if resolved_kind == "absent":
                 return (
-                    f"Add one sentence for event {exc.event_index} {pos_clause} "
+                    f"{ev_prefix}add one sentence for event {exc.event_index} {pos_clause} "
                     f"({exc.event_kind}, check {exc.check_id}) so that it {hint}."
                 )
             return (
-                f"Ensure event {exc.event_index} ({exc.event_kind}, check {exc.check_id}) {hint}."
+                f"{ev_prefix}ensure event {exc.event_index} ({exc.event_kind}, check {exc.check_id}) "
+                f"is written {pos_clause} and {hint}."
             )
         if resolved_kind == "absent":
             return (
@@ -1482,11 +1539,20 @@ def format_repair_retry_line(
     rule_spec = WRITER_PROSE_REQUIREMENTS_BY_ID.get(exc.check_id)
     rule_hint = rule_spec.rule_text if rule_spec is not None else "satisfy this mandatory constraint."
     if is_single_turn:
+        setup_prefix = f"Repair note (rule broken: check {exc.check_id}, {resolved_kind}): "
         if resolved_kind == "absent":
-            return f"Include one sentence naming {target_item} (check {exc.check_id}) so that it satisfies: {rule_hint}"
+            return (
+                f"{setup_prefix}include one sentence naming {target_item} "
+                f"(check {exc.check_id}) so that it satisfies: {rule_hint}"
+            )
         if resolved_kind == "false":
-            return f"Correct the false statement in {target_item} (check {exc.check_id}) so that it satisfies: {rule_hint}"
-        return f"Ensure {target_item} (check {exc.check_id}) satisfies: {rule_hint}"
+            return (
+                f"{setup_prefix}remove any false setup statement ({target_item}, check {exc.check_id}) "
+                f"and follow: {rule_hint}"
+            )
+        return (
+            f"{setup_prefix}ensure {target_item} (check {exc.check_id}) satisfies: {rule_hint}"
+        )
     if resolved_kind == "absent":
         return (
             f"Keep your earlier text as it was; add one sentence naming {target_item} "
@@ -3613,6 +3679,10 @@ class MockWriter:
                 writer_prompt=prompt_0,
                 keys=keys_0,
                 world=world,
+                attempt=0,
+                temperature=ATTEMPT_0_TEMPERATURE,
+                min_p=None,
+                seed=derive_call_seed(int(world.seed), 0, 0),
             ),
             RenderedScenario(
                 scenario_id=world.scenario_id,
@@ -3622,6 +3692,10 @@ class MockWriter:
                 writer_prompt=prompt_1,
                 keys=keys_1,
                 world=world,
+                attempt=0,
+                temperature=ATTEMPT_0_TEMPERATURE,
+                min_p=None,
+                seed=derive_call_seed(int(world.seed), 1, 0),
             ),
         )
 
@@ -4190,6 +4264,9 @@ class SealedResponseEntry:
     failing_sentence_offset: int | None = None
     failing_sentence_length: int | None = None
     refusal_reasons: tuple[str, ...] = ()
+    temperature: float = ATTEMPT_0_TEMPERATURE
+    min_p: float | None = None
+    retry_form: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -4200,6 +4277,9 @@ class SealedResponseEntry:
             "focal_agent": self.focal_agent,
             "attempt": self.attempt,
             "seed": self.seed,
+            "temperature": self.temperature,
+            "min_p": self.min_p,
+            "retry_form": self.retry_form,
             "response_text": self.response_text,
             "thinking_text": self.thinking_text,
             "response_sha256": self.response_sha256,
@@ -4467,6 +4547,7 @@ class GenerationCallRecord:
     failing_sentence_length: int | None = None
     attempt: int = 0
     seed: int = 0
+    min_p: float | None = None
     response_sha256: str = ""
     thinking_sha256: str = ""
     repair_line: str = ""
@@ -4476,7 +4557,7 @@ class GenerationCallRecord:
     retry_unchanged_sentences: int | None = None
     retry_attempt0_sentences: int | None = None
     # Card ul: the exact prompt-token count that decided `num_ctx` (None when no tokenizer was configured, and
-    # on retries, which are sized from the measured attempt-0 counts).
+    # on multi-turn retries, which are sized from the measured attempt-0 counts).
     prompt_tokens_exact: int | None = None
     # Card sp: ordered vector of all prose check_ids that fired on this call (no text).
     fault_check_ids: tuple[str, ...] = ()
@@ -4534,6 +4615,7 @@ class GenerationCallRecord:
             "max_num_ctx": self.max_num_ctx,
             "think": self.think,
             "temperature": self.temperature,
+            "min_p": self.min_p,
             "done_reason": self.done_reason,
             "seconds": round(self.seconds, 6),
             "vram_peak_mib": self.vram_peak_mib,
@@ -4722,6 +4804,8 @@ class WriterCheckpointManager:
         private_seed_hex: str,
         writer_kind: str,
         writer_pin: PinnedWriterModelSpec = DEFAULT_WRITER_MODEL_PIN,
+        short_circuit_dead_scenarios: bool = False,
+        retry_form: str = DEFAULT_RETRY_FORM,
     ) -> None:
         self.output_dir = output_dir
         self.public_path = output_dir / CHECKPOINT_FILENAME
@@ -4731,6 +4815,8 @@ class WriterCheckpointManager:
         self.private_seed_hex = private_seed_hex
         self.writer_kind = writer_kind
         self.writer_pin = writer_pin
+        self.short_circuit_dead_scenarios = bool(short_circuit_dead_scenarios)
+        self.retry_form = str(retry_form)
 
         self._pub_entries: list[dict[str, Any]] = []
         self._sealed_entries: list[dict[str, Any]] = []
@@ -4752,6 +4838,13 @@ class WriterCheckpointManager:
             "writer_kind": self.writer_kind,
             "writer_model": self.writer_pin.ollama_tag,
             "writer_manifest_digest": self.writer_pin.manifest_digest,
+            "short_circuit_dead_scenarios": self.short_circuit_dead_scenarios,
+            "dead_scenario_mode": (
+                "short_circuit"
+                if self.short_circuit_dead_scenarios
+                else "continue_other_rendering"
+            ),
+            "retry_form": self.retry_form,
         }
 
     def _sealed_header(self) -> dict[str, object]:
@@ -4815,12 +4908,48 @@ class WriterCheckpointManager:
                 "rendering_index": r0.rendering_index,
                 "focal_agent": r0.focal_agent,
                 "prose": r0.prose,
+                "attempt": r0.attempt,
+                "temperature": r0.temperature,
+                "min_p": r0.min_p,
+                "seed": r0.seed,
+                "sampling": {
+                    "attempt": r0.attempt,
+                    "temperature": r0.temperature,
+                    "min_p": r0.min_p,
+                    "seed": r0.seed,
+                },
             }
             rendering_1_dict: dict[str, Any] | None = {
                 "rendering_index": r1.rendering_index,
                 "focal_agent": r1.focal_agent,
                 "prose": r1.prose,
+                "attempt": r1.attempt,
+                "temperature": r1.temperature,
+                "min_p": r1.min_p,
+                "seed": r1.seed,
+                "sampling": {
+                    "attempt": r1.attempt,
+                    "temperature": r1.temperature,
+                    "min_p": r1.min_p,
+                    "seed": r1.seed,
+                },
             }
+            kept_renderings_pub: list[dict[str, Any]] = [
+                {
+                    "rendering_index": r0.rendering_index,
+                    "attempt": r0.attempt,
+                    "temperature": r0.temperature,
+                    "min_p": r0.min_p,
+                    "seed": r0.seed,
+                },
+                {
+                    "rendering_index": r1.rendering_index,
+                    "attempt": r1.attempt,
+                    "temperature": r1.temperature,
+                    "min_p": r1.min_p,
+                    "seed": r1.seed,
+                },
+            ]
             kept = True
         else:
             if world is None:
@@ -4830,6 +4959,7 @@ class WriterCheckpointManager:
             prose_sha256 = []
             rendering_0_dict = None
             rendering_1_dict = None
+            kept_renderings_pub = []
             kept = False
 
         prev_hash = self._chain_head
@@ -4849,13 +4979,17 @@ class WriterCheckpointManager:
             "kept": kept,
             "focal_agents": focal_agents,
             "prose_sha256": prose_sha256,
+            "kept_renderings": kept_renderings_pub,
             "call_records": [
                 {
                     "call_id": rec.call_id,
                     "call_index": rec.call_index,
                     "rendering_index": rec.rendering_index,
                     "attempt": rec.attempt,
+                    "temperature": rec.temperature,
+                    "min_p": rec.min_p,
                     "seed": rec.seed,
+                    "retry_form": rec.retry_form,
                     "checks_passed": rec.checks_passed,
                     "eval_count": rec.eval_count,
                     "prompt_eval_count": rec.prompt_eval_count,
@@ -5006,6 +5140,40 @@ class WriterCheckpointManager:
                     raise sanitize_render_check_error_for_stderr(exc, prose_1) from None
                 keys = compute_scenario_keys(world)
 
+                r0_attempt = int(r0_dict.get("attempt", 0))
+                r0_temp = float(
+                    r0_dict["temperature"]
+                    if "temperature" in r0_dict
+                    else (ATTEMPT_0_TEMPERATURE if r0_attempt == 0 else RETRY_TEMPERATURE)
+                )
+                r0_min_p = (
+                    float(r0_dict["min_p"])
+                    if r0_dict.get("min_p") is not None
+                    else (None if r0_attempt == 0 else RETRY_MIN_P)
+                )
+                r0_seed = (
+                    int(r0_dict["seed"])
+                    if "seed" in r0_dict
+                    else derive_call_seed(int(world.seed), 0, r0_attempt)
+                )
+
+                r1_attempt = int(r1_dict.get("attempt", 0))
+                r1_temp = float(
+                    r1_dict["temperature"]
+                    if "temperature" in r1_dict
+                    else (ATTEMPT_0_TEMPERATURE if r1_attempt == 0 else RETRY_TEMPERATURE)
+                )
+                r1_min_p = (
+                    float(r1_dict["min_p"])
+                    if r1_dict.get("min_p") is not None
+                    else (None if r1_attempt == 0 else RETRY_MIN_P)
+                )
+                r1_seed = (
+                    int(r1_dict["seed"])
+                    if "seed" in r1_dict
+                    else derive_call_seed(int(world.seed), 1, r1_attempt)
+                )
+
                 restored_pairs.append(
                     (
                         RenderedScenario(
@@ -5016,6 +5184,10 @@ class WriterCheckpointManager:
                             writer_prompt=prompt_0,
                             keys=keys,
                             world=world,
+                            attempt=r0_attempt,
+                            temperature=r0_temp,
+                            min_p=r0_min_p,
+                            seed=r0_seed,
                         ),
                         RenderedScenario(
                             scenario_id=world.scenario_id,
@@ -5025,6 +5197,10 @@ class WriterCheckpointManager:
                             writer_prompt=prompt_1,
                             keys=keys,
                             world=world,
+                            attempt=r1_attempt,
+                            temperature=r1_temp,
+                            min_p=r1_min_p,
+                            seed=r1_seed,
                         ),
                     )
                 )
@@ -5057,6 +5233,11 @@ class WriterCheckpointManager:
                         max_num_ctx=int(c_dict["max_num_ctx"]),
                         think=bool(c_dict["think"]),
                         temperature=float(c_dict["temperature"]),
+                        min_p=(
+                            float(c_dict["min_p"])
+                            if c_dict.get("min_p") is not None
+                            else None
+                        ),
                         done_reason=str(c_dict["done_reason"]),
                         seconds=float(c_dict["seconds"]),
                         vram_peak_mib=int(c_dict["vram_peak_mib"]),
@@ -5158,6 +5339,9 @@ class OllamaWriter:
         generations_path: Path | None = None,
         sealed_responses_path: Path | None = None,
         max_retries: int = 0,
+        retry_form: str = DEFAULT_RETRY_FORM,
+        multi_turn_retries: bool = False,
+        short_circuit_dead_scenarios: bool = False,
         start_owned_server: bool | None = None,
         popen_factory: Callable[..., Any] | None = None,
         server_port: int | None = None,
@@ -5166,6 +5350,13 @@ class OllamaWriter:
     ) -> None:
         if max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
+        resolved_retry_form = "multi_turn" if multi_turn_retries else str(retry_form)
+        if resolved_retry_form not in VALID_RETRY_FORMS:
+            raise ValueError(
+                f"retry_form must be one of {sorted(VALID_RETRY_FORMS)}, got {resolved_retry_form!r}"
+            )
+        self._retry_form: str = resolved_retry_form
+        self._short_circuit_dead_scenarios: bool = bool(short_circuit_dead_scenarios)
         # Card ul: the exact counter (llama-tokenize on CPU against the pinned blob). When None (CPU tests with
         # fake transports) the bytes/3 estimate stands in for the decision.
         self._prompt_token_counter: PromptTokenCounter | None = prompt_token_counter
@@ -5321,6 +5512,14 @@ class OllamaWriter:
         return self._max_retries
 
     @property
+    def retry_form(self) -> str:
+        return self._retry_form
+
+    @property
+    def short_circuit_dead_scenarios(self) -> bool:
+        return self._short_circuit_dead_scenarios
+
+    @property
     def prompt_token_counter(self) -> PromptTokenCounter | None:
         return self._prompt_token_counter
 
@@ -5385,6 +5584,9 @@ class OllamaWriter:
                 focal_agent=rec.focal_agent,
                 attempt=rec.attempt,
                 seed=rec.seed,
+                temperature=rec.temperature,
+                min_p=rec.min_p,
+                retry_form=rec.retry_form,
                 response_text=response_text,
                 thinking_text=thinking_text,
                 response_sha256=rec.response_sha256,
@@ -5485,7 +5687,8 @@ class OllamaWriter:
                 num_ctx=round_up_num_ctx(needed, step=NUM_CTX_STEP_TOKENS),
                 max_num_ctx=self._max_num_ctx,
                 think=self._think,
-                temperature=0.0,
+                temperature=ATTEMPT_0_TEMPERATURE,
+                min_p=None,
                 done_reason=CTX_OVER_CAP_CHECK_ID,
                 seconds=0.0,
                 vram_peak_mib=self._gpu_guard.peak_vram_mib,
@@ -5495,7 +5698,7 @@ class OllamaWriter:
                 refusal_reasons=(format_non_sealed_refusal_reason(check_id=CTX_OVER_CAP_CHECK_ID),),
                 check_id=CTX_OVER_CAP_CHECK_ID,
                 attempt=0,
-                seed=base_seed,
+                seed=derive_call_seed(base_seed, rendering_index, 0),
                 fault_check_ids=(CTX_OVER_CAP_CHECK_ID,),
             )
             self._append_generation_record(rec)
@@ -5521,86 +5724,117 @@ class OllamaWriter:
         for attempt in range(self._max_retries + 1):
             call_index = len(self._call_records) + 1
             call_id = f"{scenario_id}:r{rendering_index}:call_{call_index:04d}"
-            call_seed = base_seed
+            call_seed = derive_call_seed(base_seed, rendering_index, attempt)
+            call_temp = ATTEMPT_0_TEMPERATURE if attempt == 0 else RETRY_TEMPERATURE
+            call_min_p: float | None = None if attempt == 0 else RETRY_MIN_P
             if attempt > 0 and last_exc is not None:
-                mt_repair_line = format_repair_retry_line(last_exc, retry_form="multi_turn")
-                mt_repair_tokens = self._count_repair_turn_tokens(mt_repair_line, retry_form="multi_turn")
                 p0_tokens = (
                     attempt_0_eval_pair[0]
                     if attempt_0_eval_pair[0] > 0
-                    else prompt_tokens_estimate
+                    else (prompt_tokens_exact if prompt_tokens_exact is not None else prompt_tokens_estimate)
                 )
-                e0_tokens = (
-                    attempt_0_eval_pair[1]
-                    if attempt_0_eval_pair[0] > 0
-                    else estimate_prompt_tokens(attempt_0_content or "")
-                )
-                multiturn_need = (
-                    p0_tokens + e0_tokens + mt_repair_tokens + self._num_predict + NUM_CTX_MARGIN_TOKENS
-                )
-                if multiturn_need <= self._max_num_ctx:
-                    if (
-                        attempt_0_content is None
-                        or not attempt_0_response_sha256
-                        or _sha256_bytes(attempt_0_content.encode("utf-8")) != attempt_0_response_sha256
-                    ):
-                        raise AssertionError(
-                            "Multi-turn retry assistant turn is not byte-identical to the sealed attempt-0 response."
-                        )
-                    if self._sealed_responses:
-                        sealed_a0 = next(
-                            (
-                                sr
-                                for sr in reversed(self._sealed_responses)
-                                if sr.scenario_id == scenario_id
-                                and sr.rendering_index == rendering_index
-                                and sr.attempt == 0
-                            ),
-                            None,
-                        )
+                if self._retry_form == "multi_turn":
+                    mt_repair_line = format_repair_retry_line(last_exc, retry_form="multi_turn")
+                    mt_repair_tokens = self._count_repair_turn_tokens(mt_repair_line, retry_form="multi_turn")
+                    e0_tokens = (
+                        attempt_0_eval_pair[1]
+                        if attempt_0_eval_pair[0] > 0
+                        else estimate_prompt_tokens(attempt_0_content or "")
+                    )
+                    multiturn_need = (
+                        p0_tokens + e0_tokens + mt_repair_tokens + self._num_predict + NUM_CTX_MARGIN_TOKENS
+                    )
+                    if multiturn_need <= self._max_num_ctx:
                         if (
-                            sealed_a0 is None
-                            or sealed_a0.response_sha256 != attempt_0_response_sha256
-                            or _sha256_bytes(attempt_0_content.encode("utf-8")) != sealed_a0.response_sha256
+                            attempt_0_content is None
+                            or not attempt_0_response_sha256
+                            or _sha256_bytes(attempt_0_content.encode("utf-8")) != attempt_0_response_sha256
                         ):
                             raise AssertionError(
-                                "Multi-turn retry assistant turn sha256 does not match sealed_store attempt-0 response_sha256."
+                                "Multi-turn retry assistant turn is not byte-identical to the sealed attempt-0 response."
                             )
-                    retry_form = "multi_turn"
-                    retry_fallback_reason = ""
-                    repair_line = mt_repair_line
-                    repair_line_sha = _sha256_bytes(repair_line.encode("utf-8"))
-                    attempt_messages = [
-                        {
-                            "role": "user",
-                            "content": prompt_text,
-                        },
-                        {
-                            "role": "assistant",
-                            "content": attempt_0_content,
-                        },
-                        {
-                            "role": "user",
-                            "content": repair_line,
-                        },
-                    ]
-                    attempt_num_ctx = compute_num_ctx(
-                        p0_tokens + e0_tokens + mt_repair_tokens,
-                        self._num_predict,
-                        margin=NUM_CTX_MARGIN_TOKENS,
-                        step=NUM_CTX_STEP_TOKENS,
-                    )
+                        if self._sealed_responses:
+                            sealed_a0 = next(
+                                (
+                                    sr
+                                    for sr in reversed(self._sealed_responses)
+                                    if sr.scenario_id == scenario_id
+                                    and sr.rendering_index == rendering_index
+                                    and sr.attempt == 0
+                                ),
+                                None,
+                            )
+                            if (
+                                sealed_a0 is None
+                                or sealed_a0.response_sha256 != attempt_0_response_sha256
+                                or _sha256_bytes(attempt_0_content.encode("utf-8")) != sealed_a0.response_sha256
+                            ):
+                                raise AssertionError(
+                                    "Multi-turn retry assistant turn sha256 does not match sealed_store attempt-0 response_sha256."
+                                )
+                        retry_form = "multi_turn"
+                        retry_fallback_reason = ""
+                        repair_line = mt_repair_line
+                        repair_line_sha = _sha256_bytes(repair_line.encode("utf-8"))
+                        attempt_messages = [
+                            {
+                                "role": "user",
+                                "content": prompt_text,
+                            },
+                            {
+                                "role": "assistant",
+                                "content": attempt_0_content,
+                            },
+                            {
+                                "role": "user",
+                                "content": repair_line,
+                            },
+                        ]
+                        attempt_prompt_exact = None
+                        attempt_num_ctx = decide_num_ctx(
+                            p0_tokens + e0_tokens + mt_repair_tokens,
+                            self._num_predict,
+                            max_num_ctx=self._max_num_ctx,
+                            margin=NUM_CTX_MARGIN_TOKENS,
+                            step=NUM_CTX_STEP_TOKENS,
+                        )
+                    else:
+                        retry_form = "single_turn"
+                        repair_line = format_repair_retry_line(last_exc, retry_form="single_turn")
+                        repair_line_sha = _sha256_bytes(repair_line.encode("utf-8"))
+                        st_repair_tokens = self._count_repair_turn_tokens(repair_line, retry_form="single_turn")
+                        retry_fallback_reason = (
+                            f"multiturn_need_exceeds_max_num_ctx: need={multiturn_need} "
+                            f"(prompt_eval_count={p0_tokens} + eval_count={e0_tokens} + "
+                            f"repair_tokens={mt_repair_tokens} + num_predict={self._num_predict} + "
+                            f"margin={NUM_CTX_MARGIN_TOKENS}) > max_num_ctx={self._max_num_ctx}"
+                        )
+                        single_turn_prompt = f"{prompt_text.rstrip('\n')}\n{repair_line}"
+                        attempt_messages = [
+                            {
+                                "role": "user",
+                                "content": single_turn_prompt,
+                            }
+                        ]
+                        attempt_prompt_exact = self._count_prompt_tokens_exact(attempt_messages)
+                        single_turn_tokens = (
+                            attempt_prompt_exact
+                            if attempt_prompt_exact is not None
+                            else (p0_tokens + st_repair_tokens)
+                        )
+                        attempt_num_ctx = decide_num_ctx(
+                            single_turn_tokens,
+                            self._num_predict,
+                            max_num_ctx=self._max_num_ctx,
+                            margin=NUM_CTX_MARGIN_TOKENS,
+                            step=NUM_CTX_STEP_TOKENS,
+                        )
                 else:
                     retry_form = "single_turn"
+                    retry_fallback_reason = ""
                     repair_line = format_repair_retry_line(last_exc, retry_form="single_turn")
                     repair_line_sha = _sha256_bytes(repair_line.encode("utf-8"))
                     st_repair_tokens = self._count_repair_turn_tokens(repair_line, retry_form="single_turn")
-                    retry_fallback_reason = (
-                        f"multiturn_need_exceeds_max_num_ctx: need={multiturn_need} "
-                        f"(prompt_eval_count={p0_tokens} + eval_count={e0_tokens} + "
-                        f"repair_tokens={mt_repair_tokens} + num_predict={self._num_predict} + "
-                        f"margin={NUM_CTX_MARGIN_TOKENS}) > max_num_ctx={self._max_num_ctx}"
-                    )
                     single_turn_prompt = f"{prompt_text.rstrip('\n')}\n{repair_line}"
                     attempt_messages = [
                         {
@@ -5608,16 +5842,19 @@ class OllamaWriter:
                             "content": single_turn_prompt,
                         }
                     ]
-                    single_turn_tokens = p0_tokens + st_repair_tokens
-                    if single_turn_tokens + self._num_predict + NUM_CTX_MARGIN_TOKENS <= self._max_num_ctx:
-                        attempt_num_ctx = compute_num_ctx(
-                            single_turn_tokens,
-                            self._num_predict,
-                            margin=NUM_CTX_MARGIN_TOKENS,
-                            step=NUM_CTX_STEP_TOKENS,
-                        )
-                    else:
-                        attempt_num_ctx = self._max_num_ctx
+                    attempt_prompt_exact = self._count_prompt_tokens_exact(attempt_messages)
+                    single_turn_tokens = (
+                        attempt_prompt_exact
+                        if attempt_prompt_exact is not None
+                        else (p0_tokens + st_repair_tokens)
+                    )
+                    attempt_num_ctx = decide_num_ctx(
+                        single_turn_tokens,
+                        self._num_predict,
+                        max_num_ctx=self._max_num_ctx,
+                        margin=NUM_CTX_MARGIN_TOKENS,
+                        step=NUM_CTX_STEP_TOKENS,
+                    )
             else:
                 repair_line = ""
                 repair_line_sha = ""
@@ -5629,22 +5866,31 @@ class OllamaWriter:
                         "content": prompt_text,
                     }
                 ]
+                attempt_prompt_exact = prompt_tokens_exact
                 attempt_num_ctx = num_ctx
             attempt_prompt_sha = _sha256_bytes(_canonical_json_line(attempt_messages).encode("utf-8"))
             attempt_prompt_est = estimate_prompt_tokens(attempt_messages)
-            # Card ul: retries are sized from the measured attempt-0 counts, so only attempt 0 carries the exact count.
-            attempt_prompt_exact = prompt_tokens_exact if attempt == 0 else None
+            if attempt == 0:
+                call_options: dict[str, Any] = {
+                    "temperature": 0,
+                    "seed": call_seed,
+                    "num_predict": self._num_predict,
+                    "num_ctx": attempt_num_ctx,
+                }
+            else:
+                call_options = {
+                    "temperature": RETRY_TEMPERATURE,
+                    "min_p": RETRY_MIN_P,
+                    "seed": call_seed,
+                    "num_predict": self._num_predict,
+                    "num_ctx": attempt_num_ctx,
+                }
             payload: dict[str, Any] = {
                 "model": self.ollama_tag,
                 "messages": attempt_messages,
                 "think": self._think,
                 "stream": False,
-                "options": {
-                    "temperature": 0,
-                    "seed": call_seed,
-                    "num_predict": self._num_predict,
-                    "num_ctx": attempt_num_ctx,
-                },
+                "options": call_options,
             }
             t0 = time.perf_counter()
             resp = self._transport("POST", chat_url, payload)
@@ -5702,7 +5948,7 @@ class OllamaWriter:
                     licence_id=self._model_pin.licence_id,
                     prompt_sha256=attempt_prompt_sha,
                     prompt_tokens_estimate=attempt_prompt_est,
-                prompt_tokens_exact=attempt_prompt_exact,
+                    prompt_tokens_exact=attempt_prompt_exact,
                     prompt_eval_count=prompt_eval_count,
                     eval_count=eval_count,
                     thinking_words=thinking_words,
@@ -5710,7 +5956,8 @@ class OllamaWriter:
                     num_ctx=attempt_num_ctx,
                     max_num_ctx=self._max_num_ctx,
                     think=self._think,
-                    temperature=0.0,
+                    temperature=call_temp,
+                    min_p=call_min_p,
                     done_reason=done_reason,
                     seconds=wall_s,
                     vram_peak_mib=self._gpu_guard.peak_vram_mib,
@@ -5783,7 +6030,7 @@ class OllamaWriter:
                     licence_id=self._model_pin.licence_id,
                     prompt_sha256=attempt_prompt_sha,
                     prompt_tokens_estimate=attempt_prompt_est,
-                prompt_tokens_exact=attempt_prompt_exact,
+                    prompt_tokens_exact=attempt_prompt_exact,
                     prompt_eval_count=prompt_eval_count,
                     eval_count=eval_count,
                     thinking_words=thinking_words,
@@ -5791,7 +6038,8 @@ class OllamaWriter:
                     num_ctx=attempt_num_ctx,
                     max_num_ctx=self._max_num_ctx,
                     think=self._think,
-                    temperature=0.0,
+                    temperature=call_temp,
+                    min_p=call_min_p,
                     done_reason=done_reason,
                     seconds=wall_s,
                     vram_peak_mib=self._gpu_guard.peak_vram_mib,
@@ -5867,7 +6115,8 @@ class OllamaWriter:
                 num_ctx=attempt_num_ctx,
                 max_num_ctx=self._max_num_ctx,
                 think=self._think,
-                temperature=0.0,
+                temperature=call_temp,
+                min_p=call_min_p,
                 done_reason=done_reason,
                 seconds=wall_s,
                 vram_peak_mib=self._gpu_guard.peak_vram_mib,
@@ -5900,8 +6149,14 @@ class OllamaWriter:
         world: World,
         *,
         allow_refusal: bool = False,
+        short_circuit_dead_scenarios: bool | None = None,
     ) -> tuple[RenderedScenario, RenderedScenario] | None:
         """Render `world` twice via `qwen3.6:35b`, run all prose checks (a)-(d), and verify key invariance."""
+        should_short_circuit = (
+            self._short_circuit_dead_scenarios
+            if short_circuit_dead_scenarios is None
+            else bool(short_circuit_dead_scenarios)
+        )
         focal_0 = world.agents[0]
         focal_1 = world.agents[1]
 
@@ -5916,6 +6171,10 @@ class OllamaWriter:
             prompt_text=prompt_0,
             allow_refusal=allow_refusal,
         )
+        rec_0 = self._call_records[-1] if prose_0 is not None and self._call_records else None
+        if prose_0 is None and should_short_circuit:
+            return None
+
         prose_1 = self._chat_render(
             world=world,
             scenario_id=world.scenario_id,
@@ -5924,6 +6183,7 @@ class OllamaWriter:
             prompt_text=prompt_1,
             allow_refusal=allow_refusal,
         )
+        rec_1 = self._call_records[-1] if prose_1 is not None and self._call_records else None
         if prose_0 is None or prose_1 is None:
             return None
 
@@ -5941,6 +6201,10 @@ class OllamaWriter:
                 writer_prompt=prompt_0,
                 keys=keys_0,
                 world=world,
+                attempt=rec_0.attempt if rec_0 is not None else 0,
+                temperature=rec_0.temperature if rec_0 is not None else ATTEMPT_0_TEMPERATURE,
+                min_p=rec_0.min_p if rec_0 is not None else None,
+                seed=rec_0.seed if rec_0 is not None else derive_call_seed(int(world.seed), 0, 0),
             ),
             RenderedScenario(
                 scenario_id=world.scenario_id,
@@ -5950,6 +6214,10 @@ class OllamaWriter:
                 writer_prompt=prompt_1,
                 keys=keys_1,
                 world=world,
+                attempt=rec_1.attempt if rec_1 is not None else 0,
+                temperature=rec_1.temperature if rec_1 is not None else ATTEMPT_0_TEMPERATURE,
+                min_p=rec_1.min_p if rec_1 is not None else None,
+                seed=rec_1.seed if rec_1 is not None else derive_call_seed(int(world.seed), 1, 0),
             ),
         )
 
