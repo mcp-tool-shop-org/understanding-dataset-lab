@@ -1,0 +1,21 @@
+Shape key for the tag on each event row. The tag names the sentence shape for that event; a tag ending in _0 means any accepted shape for that kind. A shape never changes who, what, where, the loudness, the visibility or the order. Never write a tag or this key in the story.
+MOVE_0: any accepted move shape (station changes always use MOVE_0 and the table's station-change shape).
+MOVE_1: In the <room>, <actor> <verb> the <target_object> from the <from_location> to the <to_location>.
+MOVE_2: From the <from_location> to the <to_location>, <actor> <verb> the <target_object> in the <room>.
+MOVE_3: In the <room>, the <target_object> was <verb> from the <from_location> to the <to_location> by <actor>.
+MOVE_4: In the <room>, <actor>, <short phrase>, <verb> the <target_object> from the <from_location> to the <to_location>.
+On an occluded move, every move shape still ends with ", the <occluder> blocking sight."
+SEE_0: any accepted see shape.
+SEE_1: In the <room>, <actor> <verb> the <target_object> in the <to_location>.
+SEE_2: <actor>, <short phrase>, <verb> the <target_object> in the <to_location> in the <room>.
+SEE_3: In the <room>, the <occluder> blocked <actor>'s sight of the <target_object> from the far-side alcove.
+SEE_4: In the <room>, <actor> could not see the <target_object> from the far-side alcove, blocked by the <occluder>.
+SEE_5: In the <room>, the <occluder> hid the <target_object> from <actor> at the far-side alcove.
+SAY_0: any accepted say shape.
+SAY_1: <actor> <verb> at <noise_level> dB in the <room>, "<utterance>."
+SAY_2: "<utterance>," <actor> <verb> at <noise_level> dB in the <room>.
+SAY_3: At <noise_level> dB in the <room>, <actor> <verb>, "<utterance>."
+SAY_4: <actor> <verb> at <noise_level> dB, "<utterance>," in the <room>.
+SAY_5: In the <room>, <actor>, <short phrase>, <verb> at <noise_level> dB: "<utterance>."
+<short phrase> is at most six words about the actor and names no one, no place and no object.
+ENTER_0, LEAVE_0, MESSAGE_0: the shape in the table.

@@ -29,6 +29,7 @@ from udlab_generator.render import (
     DEFAULT_GOAL_MODE,
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_RETRY_FORM,
+    DEFAULT_SHAPE_PLAN,
     DEFAULT_VRAM_HALT_MIB,
     DEFAULT_WRITER_MAX_NUM_CTX,
     DEFAULT_WRITER_MODEL_PIN,
@@ -40,11 +41,13 @@ from udlab_generator.render import (
     NUM_CTX_STEP_TOKENS,
     SEALED_DIAGNOSTICS_FILENAME,
     SEALED_RESPONSES_FILENAME,
+    SHAPE_PLAN_BLOCK_SIZE,
     VALID_ACCEPTED_FORMS_LINES,
     VALID_CHECKER_PROFILES,
     VALID_CONSTRAINT_LAYOUTS,
     VALID_GOAL_MODES,
     VALID_RETRY_FORMS,
+    VALID_SHAPE_PLANS,
     EventDiagnosticRecord,
     GenerationCallRecord,
     LlamaTokenizeCounter,
@@ -65,6 +68,7 @@ from udlab_generator.render import (
     compare_paired_runs,
     compute_hard_constraints_sha256,
     compute_sealed_response_digests,
+    compute_shape_plan_run_telemetry,
     count_duplicate_stake_statements,
     count_prompt_tokens_exact,
     decide_num_ctx,
@@ -73,6 +77,7 @@ from udlab_generator.render import (
     diagnose_rendered_prose,
     estimate_prompt_tokens,
     format_non_sealed_refusal_reason,
+    generate_shape_plan,
     kill_pid_tree,
     locate_failing_sentence_in_response,
     parse_generation_refusal_metadata,
@@ -753,6 +758,8 @@ def build_and_probe_dataset(
     constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     accepted_forms_line: str = DEFAULT_ACCEPTED_FORMS_LINE,
     checker_profile: str = DEFAULT_CHECKER_PROFILE,
+    shape_plan: str = DEFAULT_SHAPE_PLAN,
+    shape_plan_seed: int | None = None,
     presence_penalty: float | None = None,
     grant_id: str | None = None,
     resume: bool = False,
@@ -795,10 +802,18 @@ def build_and_probe_dataset(
         raise ValueError(
             f"checker_profile must be one of {sorted(VALID_CHECKER_PROFILES)}, got {checker_profile!r}."
         )
+    if shape_plan not in VALID_SHAPE_PLANS:
+        raise ValueError(
+            f"shape_plan must be one of {sorted(VALID_SHAPE_PLANS)}, got {shape_plan!r}."
+        )
     resolved_goal_mode = str(goal_mode)
     resolved_constraint_layout = str(constraint_layout)
     resolved_accepted_forms_line = str(accepted_forms_line)
     resolved_checker_profile = str(checker_profile)
+    resolved_shape_plan = str(shape_plan)
+    resolved_shape_plan_seed = (
+        int(shape_plan_seed) if shape_plan_seed is not None else int(base_seed)
+    )
     resolved_presence_penalty = float(presence_penalty) if presence_penalty is not None else None
     resolved_short_circuit = bool(short_circuit_dead_scenarios)
     dead_scenario_mode = (
@@ -824,6 +839,17 @@ def build_and_probe_dataset(
 
     configs = make_balanced_configs(count, base_seed=base_seed)
     worlds = [generate_world(cfg) for cfg in configs]
+    effective_block_size = (
+        SHAPE_PLAN_BLOCK_SIZE
+        if len(worlds) % SHAPE_PLAN_BLOCK_SIZE == 0
+        else max(1, len(worlds))
+    )
+    plan_bundle = generate_shape_plan(
+        worlds,
+        seed=resolved_shape_plan_seed,
+        block_size=effective_block_size,
+    )
+    plan_by_sid: dict[str, list[dict[str, object]]] = plan_bundle["plan_by_scenario_id"]  # type: ignore[assignment]
 
     output_dir.mkdir(parents=True, exist_ok=True)
     public_dir = output_dir / "part_public"
@@ -850,6 +876,8 @@ def build_and_probe_dataset(
         constraint_layout=resolved_constraint_layout,
         accepted_forms_line=resolved_accepted_forms_line,
         checker_profile=resolved_checker_profile,
+        shape_plan=resolved_shape_plan,
+        shape_plan_seed=resolved_shape_plan_seed,
     )
 
     if resume:
@@ -901,6 +929,8 @@ def build_and_probe_dataset(
             constraint_layout=resolved_constraint_layout,
             accepted_forms_line=resolved_accepted_forms_line,
             checker_profile=resolved_checker_profile,
+            shape_plan=resolved_shape_plan,
+            shape_plan_seed=resolved_shape_plan_seed,
             presence_penalty=resolved_presence_penalty,
             start_owned_server=should_own_server,
             popen_factory=popen_factory,
@@ -916,6 +946,7 @@ def build_and_probe_dataset(
                     w,
                     allow_refusal=True,
                     short_circuit_dead_scenarios=resolved_short_circuit,
+                    scenario_shape_plan=plan_by_sid.get(w.scenario_id),
                 )
                 checkpoint.set_modelfile_parameters(ollama_writer.modelfile_parameters)
                 new_calls = ollama_writer.call_records[prev_calls:]
@@ -942,7 +973,10 @@ def build_and_probe_dataset(
         mock_writer = MockWriter(
             goal_mode=resolved_goal_mode,
             constraint_layout=resolved_constraint_layout,
+            checker_profile=resolved_checker_profile,
             accepted_forms_line=resolved_accepted_forms_line,
+            shape_plan=resolved_shape_plan,
+            shape_plan_seed=resolved_shape_plan_seed,
         )
         all_mock_calls: list[GenerationCallRecord] = list(restored_calls)
         if resume and generations_path is not None:
@@ -954,8 +988,12 @@ def build_and_probe_dataset(
 
         for idx in range(completed_count, len(worlds)):
             w = worlds[idx]
+            scen_plan = plan_by_sid.get(w.scenario_id)
             t0 = time.perf_counter()
-            pair = mock_writer.render_scenario_pair(w)
+            pair = mock_writer.render_scenario_pair(
+                w,
+                scenario_shape_plan=scen_plan,
+            )
             if resolved_presence_penalty is not None:
                 pair = (
                     replace(pair[0], presence_penalty=resolved_presence_penalty),
@@ -971,7 +1009,10 @@ def build_and_probe_dataset(
                 prompt_sha = hashlib.sha256(
                     json.dumps(messages, sort_keys=True, separators=(",", ":")).encode("utf-8")
                 ).hexdigest()
-                raw_mock_response = mock_writer.render_raw_response(w, rend.focal_agent)
+                raw_mock_response = mock_writer.render_raw_response(
+                    w,
+                    rend.focal_agent,
+                )
                 resp_sha, think_sha = compute_sealed_response_digests(raw_mock_response, "")
                 p_est = estimate_prompt_tokens(messages)
                 # Card ul: the exact count decides num_ctx when a tokenizer is configured; the estimate otherwise.
@@ -1068,6 +1109,8 @@ def build_and_probe_dataset(
     diagnostics_error: str | None = None
     diagnostics_summary: dict[str, object] | None = None
     diagnostics_sealed_sha256: str | None = None
+    attempt0_responses_by_rend: dict[tuple[str, int], str] = {}
+    final_responses_by_rend: dict[tuple[str, int], str] = {}
     try:
         worlds_by_sid = {w.scenario_id: w for w in worlds}
         diag_records: list[EventDiagnosticRecord] = []
@@ -1077,7 +1120,13 @@ def build_and_probe_dataset(
                 if sr_line.strip():
                     sr_obj = json.loads(sr_line)
                     if isinstance(sr_obj, dict):
-                        final_sealed_by_rend[(str(sr_obj["scenario_id"]), int(sr_obj["rendering_index"]))] = sr_obj
+                        sid_key = str(sr_obj["scenario_id"])
+                        r_idx_key = int(sr_obj["rendering_index"])
+                        resp_txt = str(sr_obj.get("response_text") or "")
+                        if int(sr_obj.get("attempt", 0)) == 0 or (sid_key, r_idx_key) not in attempt0_responses_by_rend:
+                            attempt0_responses_by_rend[(sid_key, r_idx_key)] = resp_txt
+                        final_responses_by_rend[(sid_key, r_idx_key)] = resp_txt
+                        final_sealed_by_rend[(sid_key, r_idx_key)] = sr_obj
             for (sid, r_idx), sr_obj in final_sealed_by_rend.items():
                 if sid in worlds_by_sid:
                     diag_records.extend(
@@ -1102,6 +1151,17 @@ def build_and_probe_dataset(
         diagnostics_summary = None
         diagnostics_sealed_sha256 = None
 
+    shape_plan_telemetry = compute_shape_plan_run_telemetry(
+        worlds,
+        shape_plan=resolved_shape_plan,
+        shape_plan_seed=resolved_shape_plan_seed,
+        plan_bundle=plan_bundle,
+        attempt0_prose_by_rendering=attempt0_responses_by_rend,
+        final_prose_by_rendering=final_responses_by_rend,
+        goal_mode=resolved_goal_mode,
+        checker_profile=resolved_checker_profile,
+    )
+
     generations_bytes = generations_path.read_bytes() if generations_path.is_file() else b""
     generations_sha256 = hashlib.sha256(generations_bytes).hexdigest()
     responses_bytes = sealed_responses_path.read_bytes() if sealed_responses_path.is_file() else b""
@@ -1112,6 +1172,7 @@ def build_and_probe_dataset(
         goal_mode=resolved_goal_mode,
         constraint_layout=resolved_constraint_layout,
         accepted_forms_line=resolved_accepted_forms_line,
+        shape_plan=resolved_shape_plan,
     )
 
     writer_provenance: dict[str, Any] = {
@@ -1121,6 +1182,9 @@ def build_and_probe_dataset(
         "constraint_layout": resolved_constraint_layout,
         "accepted_forms_line": resolved_accepted_forms_line,
         "checker_profile": resolved_checker_profile,
+        "shape_plan": resolved_shape_plan,
+        "shape_plan_seed": resolved_shape_plan_seed,
+        "shape_plan_telemetry": shape_plan_telemetry,
         "hard_constraints_sha256": hard_constraints_sha256,
         "presence_penalty": resolved_presence_penalty,
         "modelfile_parameters": modelfile_parameters,
@@ -1180,6 +1244,15 @@ def build_and_probe_dataset(
         "constraint_layout": resolved_constraint_layout,
         "accepted_forms_line": resolved_accepted_forms_line,
         "checker_profile": resolved_checker_profile,
+        "shape_plan": resolved_shape_plan,
+        "shape_plan_seed": resolved_shape_plan_seed,
+        "shape_plan_telemetry": shape_plan_telemetry,
+        "plan_records": shape_plan_telemetry["plan_records"],
+        "lag1_persistence_by_kind": shape_plan_telemetry["lag1_persistence_by_kind"],
+        "compliance_by_kind": shape_plan_telemetry["compliance_by_kind"],
+        "compliance_by_position_tercile": shape_plan_telemetry["compliance_by_position_tercile"],
+        "confusion_matrix_by_kind": shape_plan_telemetry["confusion_matrix_by_kind"],
+        "outcomes_by_assigned_form": shape_plan_telemetry["outcomes_by_assigned_form"],
         "hard_constraints_sha256": hard_constraints_sha256,
         "presence_penalty": resolved_presence_penalty,
         "modelfile_parameters": modelfile_parameters,
@@ -1349,6 +1422,21 @@ def main(
         ),
     )
     parser.add_argument(
+        "--shape-plan",
+        choices=("off", "assigned", "wildcard"),
+        default=DEFAULT_SHAPE_PLAN,
+        help=(
+            f"Stage 4 shape-plan mode: 'off' (default), 'assigned' (balanced per-row form tags), "
+            f"or 'wildcard' (token-matched wildcard tags)."
+        ),
+    )
+    parser.add_argument(
+        "--shape-plan-seed",
+        type=int,
+        default=None,
+        help="Optional deterministic seed for Stage 4 shape-plan assignment (defaults to bank/base seed).",
+    )
+    parser.add_argument(
         "--grant-id",
         type=str,
         default=None,
@@ -1467,6 +1555,8 @@ def main(
                 constraint_layout=args.constraint_layout,
                 accepted_forms_line=args.accepted_forms_line,
                 checker_profile=args.checker_profile,
+                shape_plan=args.shape_plan,
+                shape_plan_seed=args.shape_plan_seed,
                 presence_penalty=args.presence_penalty,
                 output_path=args.paired_out,
                 sealed_responses_path=paired_sealed_responses_path,
@@ -1540,6 +1630,8 @@ def main(
             constraint_layout=args.constraint_layout,
             accepted_forms_line=args.accepted_forms_line,
             checker_profile=args.checker_profile,
+            shape_plan=args.shape_plan,
+            shape_plan_seed=args.shape_plan_seed,
             presence_penalty=args.presence_penalty,
             grant_id=args.grant_id,
             resume=args.resume,
