@@ -12589,6 +12589,481 @@ def test_114_diagnostic_pass_exception_isolation_records_type_only(
     assert secret_err_msg not in paired_raw
 
 
+def _load_checker_tightening_fixture_doc(kind: str) -> dict[str, object]:
+    fix_path = Path(__file__).resolve().parent / "fixtures" / "checker_tightening" / f"{kind}.json"
+    return json.loads(fix_path.read_text(encoding="utf-8"))
+
+
+def _build_checker_tightening_fixture_world(spec: dict[str, object]) -> World:
+    from dataclasses import replace
+    from udlab_generator import world_from_scenario_seed
+
+    base = world_from_scenario_seed(0, index=0)
+    rooms = tuple(str(r) for r in spec["rooms"])  # type: ignore[index]
+    agents = tuple(str(a) for a in spec["agents"])  # type: ignore[index]
+    absent = tuple(str(a) for a in spec["absent_parties"])  # type: ignore[index]
+    objects = tuple(str(o) for o in spec["objects"])  # type: ignore[index]
+    doorways = tuple((str(a), str(b)) for a, b in spec["doorways"])  # type: ignore[index]
+    containers_by_room = {
+        str(k): (str(v[0]), str(v[1]))
+        for k, v in spec["containers_by_room"].items()  # type: ignore[union-attr]
+    }
+    occluders_by_room = {
+        str(k): str(v) for k, v in spec["occluders_by_room"].items()  # type: ignore[union-attr]
+    }
+    fixtures_by_room = {
+        str(k): (str(v) if v is not None else "")
+        for k, v in spec["fixtures_by_room"].items()  # type: ignore[union-attr]
+    }
+    return replace(
+        base,
+        scenario_id=str(spec["scenario_id"]),
+        seed=int(spec["seed"]),  # type: ignore[arg-type]
+        domain_name=str(spec["domain_name"]),
+        rooms=rooms,
+        doorways=doorways,
+        agents=agents,
+        absent_parties=absent,
+        objects=objects,
+        containers_by_room=containers_by_room,
+        occluders_by_room=occluders_by_room,
+        fixtures_by_room=fixtures_by_room,
+        initial_agent_rooms={ag: rooms[0] for ag in agents},
+        goals={
+            ag: AgentGoal(
+                agent=ag,
+                goal_text=f"{ag} plans to inspect the {rooms[0]}",
+                causal_preconditions=("F1",),
+            )
+            for ag in agents
+        },
+        noise_threshold=int(spec["noise_threshold"]),  # type: ignore[arg-type]
+    )
+
+
+def _load_checker_tightening_cases(kind: str) -> list[tuple[str, dict[str, object], dict[str, object]]]:
+    doc = _load_checker_tightening_fixture_doc(kind)
+    world_spec = doc["world"]  # type: ignore[assignment]
+    fixtures = doc["fixtures"]  # type: ignore[assignment]
+    return [(str(item["id"]), item, world_spec) for item in fixtures]  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("fixture_id", "fixture_item", "world_spec"),
+    _load_checker_tightening_cases("move"),
+    ids=[c[0] for c in _load_checker_tightening_cases("move")],
+)
+def test_115_checker_tightening_move_fixture_suite(
+    fixture_id: str,
+    fixture_item: dict[str, object],
+    world_spec: dict[str, object],
+) -> None:
+    """Parametrised move fixture suite (valid matrix + Categories 1-11 invalid matrix)."""
+    from udlab_generator.render import _sentence_matches_event
+
+    world = _build_checker_tightening_fixture_world(world_spec)
+    ev = Event(**fixture_item["event"])  # type: ignore[arg-type]
+    expected = fixture_item["expect"] == "pass"
+    actual = _sentence_matches_event(
+        str(fixture_item["sentence"]),
+        ev,
+        world.noise_threshold,
+        world=world,
+    )
+    assert actual is expected, (
+        f"Move fixture {fixture_id!r} ({fixture_item['category']!r}, {fixture_item['form']!r}) "
+        f"expected {expected}, got {actual}: {fixture_item['sentence']!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("fixture_id", "fixture_item", "world_spec"),
+    _load_checker_tightening_cases("see"),
+    ids=[c[0] for c in _load_checker_tightening_cases("see")],
+)
+def test_116_checker_tightening_see_fixture_suite(
+    fixture_id: str,
+    fixture_item: dict[str, object],
+    world_spec: dict[str, object],
+) -> None:
+    """Parametrised see fixture suite (valid matrix + Categories 1-11 invalid matrix)."""
+    from udlab_generator.render import _sentence_matches_event
+
+    world = _build_checker_tightening_fixture_world(world_spec)
+    ev = Event(**fixture_item["event"])  # type: ignore[arg-type]
+    expected = fixture_item["expect"] == "pass"
+    actual = _sentence_matches_event(
+        str(fixture_item["sentence"]),
+        ev,
+        world.noise_threshold,
+        world=world,
+    )
+    assert actual is expected, (
+        f"See fixture {fixture_id!r} ({fixture_item['category']!r}, {fixture_item['form']!r}) "
+        f"expected {expected}, got {actual}: {fixture_item['sentence']!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("fixture_id", "fixture_item", "world_spec"),
+    _load_checker_tightening_cases("say"),
+    ids=[c[0] for c in _load_checker_tightening_cases("say")],
+)
+def test_117_checker_tightening_say_fixture_suite(
+    fixture_id: str,
+    fixture_item: dict[str, object],
+    world_spec: dict[str, object],
+) -> None:
+    """Parametrised say fixture suite (valid matrix + Categories 1-11 invalid matrix)."""
+    from udlab_generator.render import _sentence_matches_event
+
+    world = _build_checker_tightening_fixture_world(world_spec)
+    ev = Event(**fixture_item["event"])  # type: ignore[arg-type]
+    expected = fixture_item["expect"] == "pass"
+    actual = _sentence_matches_event(
+        str(fixture_item["sentence"]),
+        ev,
+        world.noise_threshold,
+        world=world,
+    )
+    assert actual is expected, (
+        f"Say fixture {fixture_id!r} ({fixture_item['category']!r}, {fixture_item['form']!r}) "
+        f"expected {expected}, got {actual}: {fixture_item['sentence']!r}"
+    )
+
+
+def test_118_defect_1_move_object_must_be_direct_object_of_move_verb() -> None:
+    """Defect 1 regression: `ev.target_object` must be the direct object of the actor's move verb in the same clause."""
+    from udlab_generator.render import _sentence_matches_event
+
+    doc = _load_checker_tightening_fixture_doc("move")
+    world = _build_checker_tightening_fixture_world(doc["world"])  # type: ignore[arg-type]
+    ev = Event(
+        step=1,
+        kind="move",
+        actor="Mira",
+        room="amber room",
+        target_object="copper token",
+        from_location="pine crate",
+        to_location="tin locker",
+        occluded=False,
+        occluder=None,
+    )
+    assert not _sentence_matches_event(
+        "Near the copper token in the amber room, Mira moved the glass prism from the pine crate to the tin locker.",
+        ev,
+        world.noise_threshold,
+        world=world,
+    )
+    assert _sentence_matches_event(
+        "In the amber room, Mira moved the copper token from the pine crate to the tin locker.",
+        ev,
+        world.noise_threshold,
+        world=world,
+    )
+
+
+def test_119_defect_2_occluder_must_govern_blocked_in_same_clause() -> None:
+    """Defect 2 regression: 'blocked' or 'blocking sight' must govern the occluder in the same clause for move and see."""
+    from udlab_generator.render import _sentence_matches_event
+
+    doc = _load_checker_tightening_fixture_doc("move")
+    world = _build_checker_tightening_fixture_world(doc["world"])  # type: ignore[arg-type]
+    ev_move_occ = Event(
+        step=1,
+        kind="move",
+        actor="Mira",
+        room="amber room",
+        target_object="copper token",
+        from_location="pine crate",
+        to_location="tin locker",
+        occluded=True,
+        occluder="felt curtain",
+    )
+    assert not _sentence_matches_event(
+        "In the amber room near the felt curtain, Mira moved the copper token from the pine crate to the tin locker after a latch blocked.",
+        ev_move_occ,
+        world.noise_threshold,
+        world=world,
+    )
+    ev_see_occ = Event(
+        step=2,
+        kind="see",
+        actor="Mira",
+        room="amber room",
+        target_object="pine crate",
+        from_location="pine crate",
+        to_location="pine crate",
+        occluded=True,
+        occluder="felt curtain",
+    )
+    assert not _sentence_matches_event(
+        "In the amber room at the far-side alcove near the felt curtain, Mira looked toward the pine crate while a distant shutter blocked the view.",
+        ev_see_occ,
+        world.noise_threshold,
+        world=world,
+    )
+
+
+def test_120_defect_3_move_source_and_destination_must_belong_to_same_clause() -> None:
+    """Defect 3 regression: source and destination phrases must belong to the actor's move verb in one clause after the object."""
+    from udlab_generator.render import _sentence_matches_event
+
+    doc = _load_checker_tightening_fixture_doc("move")
+    world = _build_checker_tightening_fixture_world(doc["world"])  # type: ignore[arg-type]
+    ev = Event(
+        step=1,
+        kind="move",
+        actor="Mira",
+        room="amber room",
+        target_object="copper token",
+        from_location="pine crate",
+        to_location="tin locker",
+        occluded=False,
+        occluder=None,
+    )
+    assert not _sentence_matches_event(
+        "In the amber room, a label from the pine crate lay on the floor; Mira moved the copper token to the tin locker.",
+        ev,
+        world.noise_threshold,
+        world=world,
+    )
+
+
+def test_121_defect_4_actor_must_be_grammatical_subject_adjacent_to_verb() -> None:
+    """Defect 4 regression: actor must be the grammatical subject of the event verb with no clause boundary or new subject between them."""
+    from udlab_generator.render import _sentence_matches_event
+
+    doc = _load_checker_tightening_fixture_doc("move")
+    world = _build_checker_tightening_fixture_world(doc["world"])  # type: ignore[arg-type]
+    ev_move = Event(
+        step=1,
+        kind="move",
+        actor="Mira",
+        room="amber room",
+        target_object="copper token",
+        from_location="pine crate",
+        to_location="tin locker",
+    )
+    ev_see = Event(
+        step=2,
+        kind="see",
+        actor="Mira",
+        room="amber room",
+        target_object="copper token",
+        from_location="pine crate",
+        to_location="pine crate",
+    )
+    ev_say = Event(
+        step=3,
+        kind="say",
+        actor="Mira",
+        room="amber room",
+        utterance="The copper token is stored in the tin locker.",
+        noise_level=55,
+    )
+    assert not _sentence_matches_event(
+        "In the amber room, Mira, while an assistant moved the copper token from the pine crate to the tin locker, waited quietly.",
+        ev_move,
+        world.noise_threshold,
+        world=world,
+    )
+    assert not _sentence_matches_event(
+        "In the amber room, Mira, while an assistant saw the copper token inside the pine crate, waited quietly.",
+        ev_see,
+        world.noise_threshold,
+        world=world,
+    )
+    assert not _sentence_matches_event(
+        'In the amber room, Mira, while an assistant said at 55 dB, "The copper token is stored in the tin locker," waited quietly.',
+        ev_say,
+        world.noise_threshold,
+        world=world,
+    )
+
+
+def test_122_defect_5_say_db_and_utterance_must_belong_to_speaker_clause() -> None:
+    """Defect 5 regression: `<N> dB` and the quoted utterance must belong to the speaker's own say clause."""
+    from udlab_generator.render import _sentence_matches_event
+
+    doc = _load_checker_tightening_fixture_doc("say")
+    world = _build_checker_tightening_fixture_world(doc["world"])  # type: ignore[arg-type]
+    ev_say = Event(
+        step=1,
+        kind="say",
+        actor="Mira",
+        room="amber room",
+        utterance="The copper token is stored in the tin locker.",
+        noise_level=55,
+    )
+    assert not _sentence_matches_event(
+        'In the amber room, Mira spoke softly while a bell rang at 55 dB, and a sign read, "The copper token is stored in the tin locker."',
+        ev_say,
+        world.noise_threshold,
+        world=world,
+    )
+
+
+def test_123_defect_6_single_quoted_spans_stripped_and_matched_for_say_message_negation_db() -> None:
+    """Defect 6 regression: single-quoted spans (`'...'` and `‘...’`) are stripped from `frame_low` and matched as quotes."""
+    from udlab_generator.render import _sentence_matches_event
+
+    doc = _load_checker_tightening_fixture_doc("say")
+    world = _build_checker_tightening_fixture_world(doc["world"])  # type: ignore[arg-type]
+    ev_say = Event(
+        step=1,
+        kind="say",
+        actor="Mira",
+        room="amber room",
+        utterance="The copper token is stored in the tin locker.",
+        noise_level=55,
+    )
+    assert not _sentence_matches_event(
+        "In the amber room, Mira said: 'A chime sounded at 55 dB while the copper token is stored in the tin locker.'",
+        ev_say,
+        world.noise_threshold,
+        world=world,
+    )
+    assert _sentence_matches_event(
+        "In the amber room, Mira said at 55 dB: 'The copper token is stored in the tin locker.'",
+        ev_say,
+        world.noise_threshold,
+        world=world,
+    )
+    ev_move = Event(
+        step=2,
+        kind="move",
+        actor="Mira",
+        room="amber room",
+        target_object="copper token",
+        from_location="pine crate",
+        to_location="tin locker",
+    )
+    assert not _sentence_matches_event(
+        "In the amber room, Nolan remarked, 'Mira moved the copper token from the pine crate to the tin locker.'",
+        ev_move,
+        world.noise_threshold,
+        world=world,
+    )
+
+
+def test_124_defect_7_say_requires_correct_room_and_rejects_missing_or_wrong_room() -> None:
+    """Defect 7 regression: a say sentence with no room fails, and one that names a different room fails."""
+    from udlab_generator.render import _sentence_matches_event
+
+    doc = _load_checker_tightening_fixture_doc("say")
+    world = _build_checker_tightening_fixture_world(doc["world"])  # type: ignore[arg-type]
+    ev_say = Event(
+        step=1,
+        kind="say",
+        actor="Mira",
+        room="amber room",
+        utterance="The copper token is stored in the tin locker.",
+        noise_level=55,
+    )
+    # Missing room must fail
+    assert not _sentence_matches_event(
+        'Mira said at 55 dB: "The copper token is stored in the tin locker."',
+        ev_say,
+        world.noise_threshold,
+        world=world,
+    )
+    # Different room must fail
+    assert not _sentence_matches_event(
+        'In the birch room, Mira said at 55 dB: "The copper token is stored in the tin locker."',
+        ev_say,
+        world.noise_threshold,
+        world=world,
+    )
+    # Correct room in frame passes
+    assert _sentence_matches_event(
+        'In the amber room, Mira said at 55 dB: "The copper token is stored in the tin locker."',
+        ev_say,
+        world.noise_threshold,
+        world=world,
+    )
+
+
+def test_125_rescore_prose_records_refuses_prose_output_and_emits_no_prose_strings(
+    tmp_path: Path,
+) -> None:
+    """Verify `rescore_prose_records` refuses verbose/debug/output_path calls and never emits any prose string."""
+    from udlab_generator import (
+        render_world_template,
+        rescore_prose_records,
+        world_from_scenario_seed,
+    )
+
+    w0 = world_from_scenario_seed(20261102, index=0)
+    focal = w0.agents[0]
+    valid_prose = render_world_template(w0, focal)
+    planted_marker = "PLANTED_SECRET_PROSE_SPAN_DO_NOT_ECHO_99182"
+    invalid_prose = valid_prose + f"\n\n{planted_marker} suspiciously appeared."
+
+    # 1. Refusal tests: any option or record field requesting verbose/debug/print/output_path raises ValueError
+    with pytest.raises(ValueError, match="checker_version"):
+        rescore_prose_records([], checker_version="")
+    with pytest.raises(ValueError, match="refuses"):
+        rescore_prose_records(
+            [{"world": w0, "prose": valid_prose}],
+            checker_version="tightened-v1",
+            verbose=True,
+        )
+    with pytest.raises(ValueError, match="refuses"):
+        rescore_prose_records(
+            [{"world": w0, "prose": valid_prose}],
+            checker_version="tightened-v1",
+            debug=True,
+        )
+    with pytest.raises(ValueError, match="refuses"):
+        rescore_prose_records(
+            [{"world": w0, "prose": valid_prose}],
+            checker_version="tightened-v1",
+            output_path=tmp_path / "out.json",
+        )
+    with pytest.raises(ValueError, match="refuses"):
+        rescore_prose_records(
+            [{"world": w0, "prose": valid_prose, "include_prose": True}],
+            checker_version="tightened-v1",
+        )
+
+    # 2. Score planted valid + invalid fixture records and assert no prose substring appears anywhere in output
+    out = rescore_prose_records(
+        [
+            {
+                "scenario_id": w0.scenario_id,
+                "rendering_index": 0,
+                "focal_agent": focal,
+                "world": w0,
+                "prose": valid_prose,
+            },
+            {
+                "scenario_id": w0.scenario_id,
+                "rendering_index": 1,
+                "focal_agent": focal,
+                "world": w0,
+                "prose": invalid_prose,
+            },
+        ],
+        checker_version="tightened-v1",
+    )
+    assert len(out) == 2
+    assert out[0]["passed"] is True
+    assert out[0]["reason_code"] == "PASS"
+    assert out[0]["fault_check_ids"] == []
+    assert all(out[0]["event_kind_passed"].values())  # type: ignore[arg-type]
+
+    assert out[1]["passed"] is False
+    assert out[1]["reason_code"] == "b_banned_adverbs"
+    assert "b_banned_adverbs" in out[1]["fault_check_ids"]  # type: ignore[operator]
+
+    serialized = json.dumps(out)
+    assert planted_marker not in serialized
+    for sent in [s.strip() for p in valid_prose.split("\n\n") for s in p.split(".") if len(s.strip()) > 12]:
+        assert sent not in serialized
+
+
+
 
 
 

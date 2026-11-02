@@ -1,0 +1,729 @@
+{
+  "schema_version": "udlab.checker_tightening_fixtures.v1",
+  "kind": "say",
+  "world": {
+    "scenario_id": "scen_fixture_0001",
+    "seed": 900001,
+    "domain_name": "synthetic_fixture_domain",
+    "rooms": [
+      "amber room",
+      "birch room",
+      "cobalt room"
+    ],
+    "doorways": [
+      [
+        "amber room",
+        "birch room"
+      ],
+      [
+        "birch room",
+        "cobalt room"
+      ]
+    ],
+    "agents": [
+      "Mira",
+      "Nolan",
+      "Pia"
+    ],
+    "absent_parties": [
+      "Quin"
+    ],
+    "objects": [
+      "copper token",
+      "glass prism",
+      "key to the archive",
+      "note from the desk"
+    ],
+    "containers_by_room": {
+      "amber room": [
+        "pine crate",
+        "tin locker"
+      ],
+      "birch room": [
+        "slate box",
+        "reed basket"
+      ],
+      "cobalt room": [
+        "cedar trunk",
+        "iron bin"
+      ]
+    },
+    "occluders_by_room": {
+      "amber room": "felt curtain",
+      "birch room": "timber screen",
+      "cobalt room": "canvas partition"
+    },
+    "fixtures_by_room": {
+      "amber room": "wall sundial",
+      "birch room": null,
+      "cobalt room": null
+    },
+    "noise_threshold": 40
+  },
+  "fixtures": [
+    {
+      "id": "say_std_valid_canonical_pre_quote",
+      "form": "say_standard",
+      "category": "valid",
+      "expect": "pass",
+      "sentence": "In the amber room, Mira said at 55 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_valid_table_order_comma_quote",
+      "form": "say_standard",
+      "category": "valid",
+      "expect": "pass",
+      "sentence": "Mira announced at 55 dB in the amber room, \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_valid_post_quote_attribution",
+      "form": "say_standard",
+      "category": "valid",
+      "expect": "pass",
+      "sentence": "\"The copper token is stored in the tin locker,\" Mira stated at 55 dB in the amber room.",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_valid_post_quote_period_attribution",
+      "form": "say_standard",
+      "category": "valid",
+      "expect": "pass",
+      "sentence": "\"The copper token is stored in the tin locker.\" Mira announced at 55 dB in the amber room.",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_valid_parenthetical_threshold_note",
+      "form": "say_standard",
+      "category": "valid",
+      "expect": "pass",
+      "sentence": "Next, in the amber room at 55 dB (at or above the 40 dB doorway threshold), Mira said: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_valid_single_quotes",
+      "form": "say_standard",
+      "category": "valid",
+      "expect": "pass",
+      "sentence": "In the amber room, Mira said at 55 dB: 'The copper token is stored in the tin locker.'",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_valid_curly_single_quotes",
+      "form": "say_standard",
+      "category": "valid",
+      "expect": "pass",
+      "sentence": "In the amber room, Mira reported at 55 dB: ‘The copper token is stored in the tin locker.’",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_valid_curly_double_quotes",
+      "form": "say_standard",
+      "category": "valid",
+      "expect": "pass",
+      "sentence": "In the amber room, Mira claimed at 55 dB: “The copper token is stored in the tin locker.”",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_valid_delimiter_to_from_in_utterance",
+      "form": "say_standard",
+      "category": "valid",
+      "expect": "pass",
+      "sentence": "In the amber room, Mira said at 55 dB: \"The key to the birch room was moved from the pine crate to the slate box.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The key to the birch room was moved from the pine crate to the slate box.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat1_wrong_speaker",
+      "form": "say_standard",
+      "category": "1_wrong_slot",
+      "expect": "fail",
+      "sentence": "In the amber room, Nolan said at 55 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat1_wrong_db",
+      "form": "say_standard",
+      "category": "1_wrong_slot",
+      "expect": "fail",
+      "sentence": "In the amber room, Mira said at 25 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat1_wrong_room",
+      "form": "say_standard",
+      "category": "1_wrong_slot",
+      "expect": "fail",
+      "sentence": "In the birch room, Mira said at 55 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat1_missing_room",
+      "form": "say_standard",
+      "category": "1_wrong_slot",
+      "expect": "fail",
+      "sentence": "Mira said at 55 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat2_swap_speaker_listener",
+      "form": "say_standard",
+      "category": "2_asymmetric_swaps",
+      "expect": "fail",
+      "sentence": "In the amber room, to Mira, Nolan said at 55 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat3_second_agent_rel_clause",
+      "form": "say_standard",
+      "category": "3_second_agent_next_to_verb",
+      "expect": "fail",
+      "sentence": "In the amber room, Nolan, who stood beside Mira, said at 55 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat3_second_agent_pp",
+      "form": "say_standard",
+      "category": "3_second_agent_next_to_verb",
+      "expect": "fail",
+      "sentence": "In the amber room, an assistant near Mira said at 55 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat4_never_claimed",
+      "form": "say_standard",
+      "category": "4_wide_scope_negation_non_factive_irrealis",
+      "expect": "fail",
+      "sentence": "In the amber room, Mira never claimed at 55 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat4_almost_said",
+      "form": "say_standard",
+      "category": "4_wide_scope_negation_non_factive_irrealis",
+      "expect": "fail",
+      "sentence": "In the amber room, Mira almost said at 55 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat4_counterfactual_had",
+      "form": "say_standard",
+      "category": "4_wide_scope_negation_non_factive_irrealis",
+      "expect": "fail",
+      "sentence": "In the amber room, had Mira said at 55 dB, \"The copper token is stored in the tin locker,\" Nolan would have heard.",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat5_prepared_to_say",
+      "form": "say_standard",
+      "category": "5_hedges_and_incomplete_events",
+      "expect": "fail",
+      "sentence": "In the amber room, Mira prepared to say at 55 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat5_tried_to_say",
+      "form": "say_standard",
+      "category": "5_hedges_and_incomplete_events",
+      "expect": "fail",
+      "sentence": "In the amber room, Mira tried to say at 55 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat6_outer_room_and_db_taken_from_quote",
+      "form": "say_standard",
+      "category": "6_cross_kind_embedding",
+      "expect": "fail",
+      "sentence": "In the birch room, Mira said at 25 dB: \"In the amber room at 55 dB, the copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat7_partial_span_trailing_action",
+      "form": "say_standard",
+      "category": "7_partial_span",
+      "expect": "fail",
+      "sentence": "In the amber room, Mira said at 55 dB, \"The copper token is stored in the tin locker,\" and she then moved the copper token to the pine crate.",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat8_bundled_two_events",
+      "form": "say_standard",
+      "category": "8_bundled_or_reordered_events",
+      "expect": "fail",
+      "sentence": "Before Mira said at 55 dB in the amber room, \"The copper token is stored in the tin locker,\" she moved the glass prism.",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat9_delimiter_room_only_inside_quote",
+      "form": "say_standard",
+      "category": "9_delimiter_collision",
+      "expect": "fail",
+      "sentence": "Mira said at 55 dB: \"In the amber room, the key to the birch room was moved from the pine crate to the slate box.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The key to the birch room was moved from the pine crate to the slate box.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat10_defect4_actor_verb_no_adjacency",
+      "form": "say_standard",
+      "category": "10_defect_cases",
+      "defect": 4,
+      "expect": "fail",
+      "sentence": "In the amber room, Mira, while an assistant said at 55 dB, \"The copper token is stored in the tin locker,\" waited quietly.",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat10_defect5_db_and_quote_not_tied_to_speaker",
+      "form": "say_standard",
+      "category": "10_defect_cases",
+      "defect": 5,
+      "expect": "fail",
+      "sentence": "In the amber room, Mira spoke softly while a bell rang at 55 dB, and a sign read, \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat10_defect6_single_quoted_db_and_negation",
+      "form": "say_standard",
+      "category": "10_defect_cases",
+      "defect": 6,
+      "expect": "fail",
+      "sentence": "In the amber room, Mira said: 'A chime sounded at 55 dB while the copper token is stored in the tin locker.'",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat10_defect7_say_without_room",
+      "form": "say_standard",
+      "category": "10_defect_cases",
+      "defect": 7,
+      "expect": "fail",
+      "sentence": "Mira said at 55 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    },
+    {
+      "id": "say_std_inv_cat11_dual_location_attachment",
+      "form": "say_standard",
+      "category": "11_dual_location_attachment",
+      "expect": "fail",
+      "sentence": "In the amber room, Mira in the birch room said at 55 dB: \"The copper token is stored in the tin locker.\"",
+      "event": {
+        "step": 1,
+        "kind": "say",
+        "actor": "Mira",
+        "room": "amber room",
+        "target_object": null,
+        "from_location": null,
+        "to_location": null,
+        "utterance": "The copper token is stored in the tin locker.",
+        "noise_level": 55,
+        "occluded": false,
+        "occluder": null,
+        "recipient": null,
+        "stated_reason": null
+      }
+    }
+  ]
+}
