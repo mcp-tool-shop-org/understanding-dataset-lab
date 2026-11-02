@@ -22,6 +22,7 @@ from udlab_generator import (
     check_prose_no_markers,
     check_rendered_prose,
     collect_prose_faults,
+    format_repair_retry_line,
     render_world_template,
     rescore_prose_records,
 )
@@ -194,7 +195,7 @@ _STATION_MOVE_FIXTURES: list[dict[str, str]] = [
 
 
 def _build_verdict_invariance_battery() -> list[dict[str, Any]]:
-    """Construct the 32 multi-event scenes in the fixture world for verdict-invariance testing."""
+    """Construct the 34 multi-event scenes in the fixture world for verdict-invariance testing."""
     ev_map: dict[str, Event] = {
         **_STAGE4_EVENTS,
         **_STATION_MOVE_EVENTS,
@@ -213,6 +214,88 @@ def _build_verdict_invariance_battery() -> list[dict[str, Any]]:
             room="birch room",
             from_location="amber room",
             to_location="birch room",
+        ),
+        "leave_nolan_ab": Event(
+            step=1,
+            kind="leave",
+            actor="Nolan",
+            room="amber room",
+            from_location="amber room",
+            to_location="birch room",
+        ),
+        "enter_nolan_ab": Event(
+            step=1,
+            kind="enter",
+            actor="Nolan",
+            room="birch room",
+            from_location="amber room",
+            to_location="birch room",
+        ),
+        "move_nolan_prism": Event(
+            step=1,
+            kind="move",
+            actor="Nolan",
+            room="birch room",
+            target_object="glass prism",
+            from_location="slate box",
+            to_location="reed basket",
+            occluded=False,
+        ),
+        "see_nolan_prism": Event(
+            step=1,
+            kind="see",
+            actor="Nolan",
+            room="birch room",
+            target_object="glass prism",
+            to_location="reed basket",
+            occluded=False,
+        ),
+        "msg_nolan_quin": Event(
+            step=1,
+            kind="message",
+            actor="Nolan",
+            room="birch room",
+            recipient="Quin",
+            utterance="The glass prism is in the reed basket.",
+        ),
+        "move_pia_key": Event(
+            step=1,
+            kind="move",
+            actor="Pia",
+            room="cobalt room",
+            target_object="key to the archive",
+            from_location="cedar trunk",
+            to_location="iron bin",
+            occluded=False,
+        ),
+        "stat_pia_cobalt_alcove": Event(
+            step=1,
+            kind="move",
+            actor="Pia",
+            room="cobalt room",
+            target_object="canvas partition",
+            from_location="container bay",
+            to_location="far-side alcove",
+            occluded=False,
+        ),
+        "see_pia_cobalt_occ": Event(
+            step=1,
+            kind="see",
+            actor="Pia",
+            room="cobalt room",
+            target_object="cedar trunk",
+            from_location="far-side alcove",
+            to_location="cedar trunk",
+            occluded=True,
+            occluder="canvas partition",
+        ),
+        "say_pia_cobalt_quiet": Event(
+            step=1,
+            kind="say",
+            actor="Pia",
+            room="cobalt room",
+            utterance="The cedar trunk is behind the canvas partition.",
+            noise_level=35,
         ),
     }
     fix_by_id = {str(r["id"]): str(r["sentence"]) for r in _STAGE4_CASES}
@@ -262,6 +345,29 @@ def _build_verdict_invariance_battery() -> list[dict[str, Any]]:
         ("bund30_bundled_move_and_see_one_sent", "bundled", ["move", "see_clear"], ["In the amber room, Mira moved the copper token from the pine crate to the tin locker, and then Mira saw the copper token in the pine crate."]),
         ("bund31_bundled_with_trailing_valid", "bundled", ["say", "move", "see_clear"], [fix_by_id["acc_say_std"], "In the amber room, Mira moved the copper token from the pine crate to the tin locker; Mira saw the copper token in the pine crate.", s_see_clear_std]),
         ("mix32_fna_meaning_extra_unlogged", "mixed", ["say", "move", "see_clear"], [fix_by_id["fna_say_inverted"], fix_by_id["mean_move_cleft_bystander"], s_see_clear_std, "In the amber room, Mira saw the glass prism in the tin locker."]),
+        (
+            "v33_valid_nolan_birch_prism_message",
+            "valid",
+            ["leave_nolan_ab", "enter_nolan_ab", "move_nolan_prism", "see_nolan_prism", "msg_nolan_quin"],
+            [
+                "Nolan exited the amber room toward the birch room.",
+                "Nolan entered the birch room from the amber room.",
+                "Nolan transferred the glass prism from the slate box to the reed basket in the birch room.",
+                "Nolan observed the glass prism in the reed basket in the birch room.",
+                'In the birch room, Nolan sent a message to Quin: "The glass prism is in the reed basket."',
+            ],
+        ),
+        (
+            "v34_valid_pia_cobalt_key_station_occ",
+            "valid",
+            ["move_pia_key", "stat_pia_cobalt_alcove", "see_pia_cobalt_occ", "say_pia_cobalt_quiet"],
+            [
+                "In the cobalt room, Pia placed the key to the archive from the cedar trunk into the iron bin.",
+                "In the cobalt room, Pia stepped behind the canvas partition to the far-side alcove.",
+                "In the cobalt room, the canvas partition blocked Pia's sight of the cedar trunk from the far-side alcove.",
+                '"The cedar trunk is behind the canvas partition," Pia stated at 35 dB in the cobalt room.',
+            ],
+        ),
     ]
 
     battery: list[dict[str, Any]] = []
@@ -275,6 +381,8 @@ def _build_verdict_invariance_battery() -> list[dict[str, Any]]:
             {
                 "id": scene_id,
                 "category": category,
+                "events": list(ev_keys),
+                "num_sentences": len(sents),
                 "world": w_scene,
                 "focal": focal,
                 "prose": prose,
@@ -283,7 +391,33 @@ def _build_verdict_invariance_battery() -> list[dict[str, Any]]:
     return battery
 
 
+def _build_tag_echo_battery_scene() -> dict[str, Any]:
+    """Construct the battery-style tag-echo scene (`echo35_tag_echo_move_token`) that passes at base `856df86` and fails at head."""
+    fix_by_id = {str(r["id"]): str(r["sentence"]) for r in _STAGE4_CASES}
+    w = _load_stage3_world()
+    focal = w.agents[0]
+    nt = w.noise_threshold
+    s_see_clear_std = _render_event_sentence(_STAGE4_EVENTS["see_clear"], focal, nt)
+    ev_keys = ["say", "move", "see_clear"]
+    sents = [fix_by_id["acc_say_std"], fix_by_id["echo_move_tag"], s_see_clear_std]
+    evs = tuple(replace(_STAGE4_EVENTS[k], step=i) for i, k in enumerate(ev_keys, start=1))
+    w_scene = replace(w, events=evs)
+    template_prose = render_world_template(w_scene, focal)
+    setup_para, _ = template_prose.split("\n\n", 1)
+    prose = f"{setup_para}\n\n" + " ".join(sents)
+    return {
+        "id": "echo35_tag_echo_move_token",
+        "category": "tag_echo_tightened",
+        "events": list(ev_keys),
+        "num_sentences": len(sents),
+        "world": w_scene,
+        "focal": focal,
+        "prose": prose,
+    }
+
+
 _BATTERY_SCENES = _build_verdict_invariance_battery()
+_TAG_ECHO_BATTERY_SCENE = _build_tag_echo_battery_scene()
 _EXPECTED_VERDICTS_DOC: dict[str, Any] = json.loads(
     EXPECTED_VERDICTS_PATH.read_text(encoding="utf-8")
 )
@@ -589,6 +723,61 @@ def test_review_scenes_a_and_b_fault_attribution() -> None:
         (1, "c_fidelity_missing_event", "c_fidelity_missing_event", "absent"),
         (2, "c_fidelity_missing_event", "form_not_accepted", "altered"),
         (None, "c_fidelity_unlogged_event", "c_fidelity_unlogged_event", "altered"),
+    ]
+
+
+@pytest.mark.parametrize("profile", ["c", "d"])
+def test_retry_repair_line_for_reattributed_review_scene_a(profile: str) -> None:
+    """Card 1c item 1: pin the `format_repair_retry_line` wording for review scene (a) under profiles c and d."""
+    scene_by_id = {str(s["id"]): s for s in _BATTERY_SCENES}
+    scene_a = scene_by_id["omit22_review_scene_a"]
+    with pytest.raises(RenderCheckError) as exc_info:
+        check_rendered_prose(
+            scene_a["prose"],
+            scene_a["world"],
+            focal_agent=scene_a["focal"],
+            checker_profile=profile,
+        )
+    err = exc_info.value
+    assert err.event_index == 2
+    assert err.failure_kind == "absent"
+    assert err.check_id == "c_fidelity_missing_event"
+
+    retry_line = format_repair_retry_line(err)
+    assert "add one sentence for event 2 immediately after the sentence for event 1" in retry_line
+    assert "ensure event 2" not in retry_line
+
+
+@pytest.mark.parametrize("profile", ["c", "d"])
+def test_tag_echo_battery_scene_passes_at_base_856df86_and_fails_at_head(profile: str) -> None:
+    """Card 1c item 3: battery-style scene with a `MOVE_n` tag-echo sentence passes at base `856df86` and fails at head."""
+    scene = _TAG_ECHO_BATTERY_SCENE
+    scene_id = str(scene["id"])
+    expected_row = _EXPECTED_BY_ID[scene_id]
+    prof_key = f"profile_{profile}"
+
+    # Base 856df86 passed (no `SAY_n` / `MOVE_n` / `SEE_n` rejection in `_sentence_matches_event` at base).
+    assert expected_row[prof_key]["passed"] is True
+    assert expected_row[prof_key]["faults"] == []
+
+    # Head rejects the `MOVE_2` tag-echo sentence at event 2 with `rule_id == "tag_echo"`.
+    with pytest.raises(RenderCheckError) as exc_info:
+        check_rendered_prose(
+            scene["prose"],
+            scene["world"],
+            focal_agent=scene["focal"],
+            checker_profile=profile,
+        )
+    assert exc_info.value.event_index == 2
+    assert exc_info.value.rule_id == "tag_echo"
+    faults = collect_prose_faults(
+        scene["prose"],
+        scene["world"],
+        focal_agent=scene["focal"],
+        checker_profile=profile,
+    )
+    assert [(f.event_index, f.check_id, f.rule_id, f.failure_kind) for f in faults] == [
+        (2, "c_fidelity_missing_event", "tag_echo", "altered"),
     ]
 
 

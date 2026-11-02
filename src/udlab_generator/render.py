@@ -1,10 +1,10 @@
 """Deterministic third-person perspective renderer, writer prompt, prose checks, and OllamaWriter.
 
-Note (2026-11-02): In `check_prose_render_fidelity`, sequential-checker fault attribution changed, verdicts did not.
-When event `ev` fails `_sentence_matches_event`, `next_ev_matches_search_start` also checks whether
-`event_sentences[search_start]` satisfies `_event_content_present` for `world.events[ev_idx + 1]` and not for `ev`,
-preserving that candidate sentence for `ev_idx + 1` so a misshapen sentence's fault (`form_not_accepted`) is
-attributed to the event whose content it carries rather than consumed as an `altered` fault on an omitted earlier event.
+Note (2026-11-02): In `check_prose_render_fidelity`, sequential-checker fault attribution changed (`next_ev_matches_search_start`
+also checks `_event_content_present` for `ev_idx + 1` and not `ev`, preserving a misshapen sentence so `form_not_accepted` lands on
+`ev_idx + 1` instead of `altered` on omitted `ev`). This also alters the retry repair line (`format_repair_retry_line`) in re-attributed
+scenes: the first fault's `failure_kind` goes from `"altered"` to `"absent"`, so the line changes from `"ensure event k is written ..."` to
+`"add one sentence for event k ..."`. Attempt-0 verdicts are unchanged, except that a sentence containing a `SAY_n`, `MOVE_n` or `SEE_n` token is now rejected (`_sentence_matches_event`, render.py:3936), as intended by the card; bracket role labels were already rejected at the base, by `check_prose_no_markers`.
 """
 
 from __future__ import annotations
@@ -6052,10 +6052,10 @@ def collect_prose_faults(
 ) -> tuple[ProseFaultRecord, ...]:
     """Run all prose checks (a)-(d) in collect-all mode and return every `ProseFaultRecord` (with no text).
 
-    Note (2026-11-02): fault attribution changed, verdicts did not. In `check_prose_render_fidelity`,
-    `next_ev_matches_search_start` also preserves `event_sentences[search_start]` for `world.events[ev_idx + 1]`
-    when `_event_content_present` ties the candidate sentence to `ev_idx + 1` rather than `ev`, moving a misshapen
-    sentence's fault to the event whose content it carries without changing scene-level pass/fail verdicts.
+    Note (2026-11-02): In `check_prose_render_fidelity`, fault attribution changed (`next_ev_matches_search_start` preserves a candidate
+    sentence whose `_event_content_present` matches `ev_idx + 1` and not `ev`; in re-attributed scenes the first fault's `failure_kind` goes
+    from `"altered"` to `"absent"`, so the retry repair line changes from `"ensure event k is written ..."` to `"add one sentence for event k ..."`).
+    Attempt-0 verdicts are unchanged, except that a sentence containing a `SAY_n`, `MOVE_n` or `SEE_n` token is now rejected (`_sentence_matches_event`, render.py:3936), as intended by the card; bracket role labels were already rejected at the base, by `check_prose_no_markers`.
     """
     if goal_mode not in VALID_GOAL_MODES:
         raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
