@@ -886,8 +886,6 @@ def test_parity_with_e0e010c0_fixture_and_existing_callers() -> None:
                 rows_d = match_rendering_event_forms(
                     prose, w, focal_agent=focal, goal_mode="copy", checker_profile="d"
                 )
-                assert all("sentence_index" in r for r in rows_c)
-                assert all("sentence_index" in r for r in rows_d)
                 actual_template_scenes.append(
                     {
                         "seed": seed,
@@ -1051,6 +1049,26 @@ def test_parity_with_e0e010c0_fixture_and_existing_callers() -> None:
     assert json.dumps(rescore_out_c, sort_keys=True) == json.dumps(
         exp_caller["rescore_profile_c"], sort_keys=True
     )
+
+
+def test_rows_carry_sentence_index() -> None:
+    """Head-only assertion moved from `test_parity_with_e0e010c0_fixture_and_existing_callers` so the parity test runs unchanged against e0e010c0 source."""
+    fixture_doc = json.loads(PARITY_FIXTURE_PATH.read_text(encoding="utf-8"))
+    fixed_seeds: list[int] = [int(s) for s in fixture_doc["fixed_seeds"]]
+    for seed in fixed_seeds:
+        for cfg in make_balanced_configs(4, base_seed=seed):
+            w = generate_world(cfg)
+            for r_idx in (0, 1):
+                focal = w.agents[r_idx]
+                prose = render_world_template(w, focal)
+                rows_c = match_rendering_event_forms(
+                    prose, w, focal_agent=focal, goal_mode="copy", checker_profile="c"
+                )
+                rows_d = match_rendering_event_forms(
+                    prose, w, focal_agent=focal, goal_mode="copy", checker_profile="d"
+                )
+                assert all("sentence_index" in r for r in rows_c)
+                assert all("sentence_index" in r for r in rows_d)
 
 
 def test_return_sentence_count_and_default_return_type() -> None:

@@ -1,0 +1,66 @@
+{
+  "schema_version": "udlab.stage5.template_swap_fixtures.v1",
+  "description": "Synthetic non-bank fixtures for Stage 5 Card U2 rollback and seam-flag tests.",
+  "rollback_case_1_fault_grew": {
+    "s_0_folded_leave_enter": "Into the reading room from the slate tray, Ana walked and left.",
+    "s_1_passive_move_3": "In the reading room, the brass ledger was moved from the slate tray to the cedar shelf by Ana.",
+    "planned_form_for_ev3": "MOVE_2",
+    "expected_cause": "fault_grew",
+    "expected_rule_id": "c_fidelity_missing_event"
+  },
+  "rollback_case_2_neighbour_index_shifts_same_form": {
+    "s_0_folded_leave_enter": "Into the reading room from the slate tray, Ana walked and left.",
+    "s_1_passive_move_3": "In the reading room, the brass ledger was moved from the slate tray to the cedar shelf by Ana.",
+    "s_2_standard_folded_leave_enter": "From the slate tray, Ana walked into the reading room and left.",
+    "s_3_fronted_move_2": "From the slate tray to the cedar shelf, Ana moved the brass ledger in the reading room.",
+    "planned_form_for_ev3": "MOVE_2",
+    "expected_cause": "neighbour_changed",
+    "before_indices": [0, 0, 1],
+    "after_attempted_splice_indices": [1, 2, 3],
+    "unchanged_neighbour_forms": ["LEAVE_0", "ENTER_0"]
+  },
+  "rollback_case_3_two_sentence_template": {
+    "forced_two_sentence_template": "In the vault room, Ana moved the brass ledger from the oak drawer to the steel cabinet. Ana paused briefly.",
+    "expected_cause": "count_changed"
+  },
+  "rollback_case_4_wrong_form_template": {
+    "forced_move_1_when_move_3_planned": "In the vault room, Ana moved the brass ledger from the oak drawer to the steel cabinet.",
+    "planned_form": "MOVE_3",
+    "realized_form": "MOVE_1",
+    "expected_cause": "wrong_form"
+  },
+  "rollback_case_5_b_failed_scene": {
+    "bad_move_sentence_pronoun": "After Ana paused in the vault room, she moved the brass ledger from the oak drawer to the steel cabinet.",
+    "bad_move_rule_id": "defect_4_actor_subject",
+    "new_fault_template_third_room": "In the vault room and the reading room, Ana moved the brass ledger from the oak drawer to the steel cabinet.",
+    "new_fault_rule_id": "other_room"
+  },
+  "rollback_case_11_two_events_trade_indices": {
+    "s_0_only_matches_ev2": "In the vault room, Ana, near the intake, observed the brass ledger in open view.",
+    "s_1_matches_both_ev1_and_ev2": "From Ana's station, in the vault room, Ana observed the brass ledger in open view.",
+    "planned_form_for_ev2": "SEE_1",
+    "before_indices": [1, 0],
+    "after_attempted_splice_indices": [0, 1],
+    "expected_cause": "neighbour_changed"
+  },
+  "seam_flag_fixtures": {
+    "pronoun_openings": [
+      "She walked from the vault room into the reading room.",
+      "He observed the brass ledger at the oak drawer in open view.",
+      "They moved the seal stamp from the slate tray to the cedar shelf in the reading room.",
+      "\"It is ready,\" Ben said at 60 dB in the vault room."
+    ],
+    "participial_openings": [
+      "Walking into the reading room, Ana left the vault room.",
+      "Standing by the oak drawer, Ben observed the brass ledger in the vault room.",
+      "Moved quickly across the bay, the brass ledger rested in the steel cabinet.",
+      "Working carefully in the vault room, Ana checked the wall barometer."
+    ],
+    "plain_openings": [
+      "In the vault room, Ana moved the brass ledger from the oak drawer to the steel cabinet.",
+      "From the oak drawer to the steel cabinet, Ana moved the brass ledger in the vault room.",
+      "Ana said at 60 dB in the vault room, \"The brass ledger is stored in the steel cabinet.\"",
+      "At the far-side alcove, Ana observed the wall barometer in the vault room."
+    ]
+  }
+}
