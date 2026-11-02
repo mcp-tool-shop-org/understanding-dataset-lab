@@ -361,15 +361,42 @@ def _stage_shape(raw_text: str, target_session: str) -> dict[str, object]:
     }
 
 
+def _is_format_verified_on_real_cli(mid_matches_bracket_prefix: bool, is_fake_cli: bool) -> bool:
+    return bool(mid_matches_bracket_prefix) and not bool(is_fake_cli)
+
+
+def _build_smoke_shape(
+    pre_raw: str,
+    mid_raw: str,
+    post_raw: str,
+    target_session: str,
+    is_fake_cli: bool,
+) -> dict[str, object]:
+    pre_stage = _stage_shape(pre_raw, target_session)
+    mid_stage = _stage_shape(mid_raw, target_session)
+    post_stage = _stage_shape(post_raw, target_session)
+    return {
+        "format_verified_on_real_cli": _is_format_verified_on_real_cli(
+            bool(mid_stage["matches_bracket_prefix"]),
+            is_fake_cli,
+        ),
+        "pre_sessions": pre_stage,
+        "mid_sessions": mid_stage,
+        "post_sessions": post_stage,
+    }
+
+
 receipt_path = out_path.parent / "vm_receipt.json"
 smoke_shape: dict[str, object] | None = None
 if smoke_flag:
-    smoke_shape = {
-        "format_verified_on_real_cli": False,
-        "pre_sessions": _stage_shape(os.environ.get("UDLAB_SMOKE_PRE_SESSIONS", ""), smoke_session_name),
-        "mid_sessions": _stage_shape(os.environ.get("UDLAB_SMOKE_MID_SESSIONS", ""), smoke_session_name),
-        "post_sessions": _stage_shape(os.environ.get("UDLAB_SMOKE_POST_SESSIONS", ""), smoke_session_name),
-    }
+    is_fake_cli = os.environ.get("UDLAB_COLAB_IS_FAKE", "").strip() == "1"
+    smoke_shape = _build_smoke_shape(
+        os.environ.get("UDLAB_SMOKE_PRE_SESSIONS", ""),
+        os.environ.get("UDLAB_SMOKE_MID_SESSIONS", ""),
+        os.environ.get("UDLAB_SMOKE_POST_SESSIONS", ""),
+        smoke_session_name,
+        is_fake_cli,
+    )
     smoke_receipt = {
         "status": outcome,
         "step": "session_smoke",
@@ -460,8 +487,10 @@ if [[ "$SESSION_SMOKE_FLAG" -eq 1 ]]; then
   }
   log_msg "LOCK_ACQUIRED lock=$OPEN_LOCK"
   PRE_SESSIONS="$(run_colab sessions </dev/null || true)"
-  # NOTE: The real `colab sessions` row format has not been checked yet against a live session;
-  # the CPU `--session-smoke` rung will check it and record the real output's shape (no tokens or ids) in its receipt.
+  # Verified on 2026-11-02 (CPU session-smoke `smoke-01`), real `colab sessions` shapes:
+  # - live session row: `[<SESSION>] <TOKEN> | <TOKEN>: <TOKEN> | <TOKEN>: <TOKEN> | <TOKEN>: <TOKEN>`
+  # - empty list: `[colab] No active sessions found on server.`
+  # The `[<session>]` / `^\[<session>\]` match is confirmed for a live row, and `[colab] ...` is never a session.
   if printf '%s\n' "$PRE_SESSIONS" | grep -Fq "[$SESSION_NAME]"; then
     flock -u 9 || true
     RUN_WHY="session $SESSION_NAME already exists in colab sessions; refusing to reuse name"
@@ -593,8 +622,10 @@ if [[ -x "$RECONCILE_SH" ]]; then
   COLAB_LOCK_DIR="$LOCK_DIR" "$RECONCILE_SH" --live </dev/null | scrub_stream >> "$CLI_LOG" || true
 fi
 PRE_SESSIONS="$(run_colab sessions </dev/null || true)"
-# NOTE: The real `colab sessions` row format has not been checked yet against a live session;
-# the CPU `--session-smoke` rung will check it and record the real output's shape (no tokens or ids) in its receipt.
+# Verified on 2026-11-02 (CPU session-smoke `smoke-01`), real `colab sessions` shapes:
+# - live session row: `[<SESSION>] <TOKEN> | <TOKEN>: <TOKEN> | <TOKEN>: <TOKEN> | <TOKEN>: <TOKEN>`
+# - empty list: `[colab] No active sessions found on server.`
+# The `[<session>]` / `^\[<session>\]` match is confirmed for a live row, and `[colab] ...` is never a session.
 if printf '%s\n' "$PRE_SESSIONS" | grep -Fq "[$SESSION_NAME]"; then
   flock -u 9 || true
   RUN_WHY="session $SESSION_NAME already exists in colab sessions; refusing to reuse name"
