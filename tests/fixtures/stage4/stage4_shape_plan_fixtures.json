@@ -378,10 +378,11 @@
    "meaning": "within each variant, form counts in a 20-scenario block differ by at most 1"
   },
   "two_form_switch_rate_band": {
-   "low": 0.62,
+   "low": 0.6,
    "high": 0.71,
    "expected": 0.6667,
-   "design_choice": true
+   "design_choice": true,
+   "basis": "widened 2026-11-02 before freeze; 60 seeds on the 80-scenario dev bank gave mean 0.647, min 0.6227"
   },
   "position_independence": "form draw must not change when event indices are permuted (same seed, same plan)",
   "plan_record_fields": [

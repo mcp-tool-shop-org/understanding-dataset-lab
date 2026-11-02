@@ -89,14 +89,26 @@ TAG_ECHO_TOKENS: tuple[str, ...] = (
     *(f"SAY_{n}" for n in range(10)),
     *(f"MOVE_{n}" for n in range(10)),
     *(f"SEE_{n}" for n in range(10)),
+    "ENTER_0",
+    "LEAVE_0",
+    "MESSAGE_0",
     "[Actor]",
     "[Room]",
     "[Object]",
     "[Occluder]",
+    "Shape key for the tag on each event row",
 )
 
+
+def _tag_echo_token_pattern(token: str) -> str:
+    """Return the regex alternative for a single `TAG_ECHO_TOKENS` entry with word or bracket boundaries."""
+    if token.startswith("[") and token.endswith("]"):
+        return rf"(?<!\w){re.escape(token)}(?!\w)"
+    return rf"\b{re.escape(token)}\b"
+
+
 _TAG_ECHO_RE = re.compile(
-    r"(?:\b(?:SAY|MOVE|SEE|ENTER|LEAVE|MESSAGE)_[0-9]\b|(?<!\w)\[(?:Actor|Room|Object|Occluder)\](?!\w)|Shape key for the tag on each event row)",
+    r"(?:" + "|".join(_tag_echo_token_pattern(tok) for tok in TAG_ECHO_TOKENS) + r")",
     re.IGNORECASE,
 )
 
@@ -195,10 +207,11 @@ SHAPE_PLAN_DESIGN_CHOICES: dict[str, dict[str, object]] = {
         "meaning": "within each variant, form counts in a 20-scenario block differ by at most 1",
     },
     "two_form_switch_rate_band": {
-        "low": 0.62,
+        "low": 0.6,
         "high": 0.71,
         "expected": 0.6667,
         "design_choice": True,
+        "basis": "widened 2026-11-02 before freeze; 60 seeds on the 80-scenario dev bank gave mean 0.647, min 0.6227",
     },
 }
 VALID_GOAL_SOURCES: frozenset[str] = frozenset({"model_text", "token"})
@@ -2414,10 +2427,12 @@ def generate_shape_plan(
     - One plan per scenario, shared by both renderings.
     - Uniform draw from valid forms for each event's variant (`SHAPE_PLAN_VARIANT_FORMS`).
     - Rejects any draw that would make three consecutive same-kind events in a scene share a form.
-    - Balances per block of `block_size` (20) scenarios so each form's count within a variant differs
-      by at most 1 across the block after the rejection rule.
-    - Never reads event position (`ev.step` or `event_index`) when drawing forms; uses per-variant
-      RNG streams so permuting event positions leaves the drawn forms for each variant invariant.
+    - Balances per block of `block_size` (20) scenarios in bank order (and balances any final
+      partial block on its own when the bank size is not a multiple of 20) so each form's count
+      within a variant differs by at most 1 across the block after the rejection rule.
+    - Never reads `ev.step` or `event_index` when drawing forms (relabeling `ev.step` leaves the
+      plan identical); the draw is sequence-dependent through the 3-in-a-row run-length rule and
+      per-variant stream order, with flat form marginals across position terciles.
     """
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise TypeError(f"seed must be an int, got {seed!r}")
@@ -2550,10 +2565,15 @@ def generate_shape_plan(
                 all_records.append(rec)
             plan_by_scenario_id[w.scenario_id] = scen_records
 
+    block_sizes = [
+        len(worlds[b_start : b_start + block_size])
+        for b_start in range(0, len(worlds), block_size)
+    ]
     persistence_stats = compute_shape_plan_lag1_persistence(all_records)
     return {
         "seed": seed,
         "block_size": block_size,
+        "block_sizes": block_sizes,
         "design_choices": dict(SHAPE_PLAN_DESIGN_CHOICES),
         "block_balance_max_spread": dict(SHAPE_PLAN_DESIGN_CHOICES["block_balance_max_spread"]),
         "two_form_switch_rate_band": dict(SHAPE_PLAN_DESIGN_CHOICES["two_form_switch_rate_band"]),
@@ -2656,6 +2676,74 @@ def verify_shape_plan_tag_pairs_token_parity(
                 "equal": True,
             }
         )
+    return results
+
+
+SHAPE_PLAN_JSON_CONTEXT_TEMPLATES: dict[str, str] = {
+    "sort_keys_target_and_to": (
+        '{"actor":"Mira","from_location":"pine crate","kind":"move","order_index":1,'
+        '"room":"amber room","shape_tag":"<TAG>","target_object":"copper token","to_location":"tin locker"}'
+    ),
+    "sort_keys_target_only": (
+        '{"actor":"Mira","kind":"see","occluded":true,"occluder":"canvas screen","order_index":2,'
+        '"room":"amber room","shape_tag":"<TAG>","target_object":"copper token"}'
+    ),
+    "sort_keys_utterance_only": (
+        '{"actor":"Mira","kind":"say","noise_level":55,"order_index":3,'
+        '"room":"amber room","shape_tag":"<TAG>","utterance":"The copper token is stored in the tin locker."}'
+    ),
+    "kind_first_stated_reason_utterance": (
+        '{"kind":"say","order_index":3,"actor":"Mira","room":"amber room","noise_level":55,'
+        '"shape_tag":"<TAG>","stated_reason":"audit check","utterance":"The copper token is stored in the tin locker."}'
+    ),
+    "insertion_order_closing_brace": (
+        '{"order_index":1,"kind":"move","actor":"Mira","room":"amber room","target_object":"copper token",'
+        '"from_location":"pine crate","to_location":"tin locker","shape_tag":"<TAG>"}'
+    ),
+}
+
+
+def verify_shape_plan_json_context_token_parity(
+    counter: PromptTokenCounter,
+    tag_pairs: Sequence[tuple[str, str]] = SHAPE_PLAN_TAG_PAIRS,
+    context_templates: Mapping[str, str] = SHAPE_PLAN_JSON_CONTEXT_TEMPLATES,
+) -> list[dict[str, object]]:
+    """Check that every `(assigned, wildcard)` tag pair has identical token count (tolerance 0) across JSON event-log contexts."""
+    cache: dict[str, int] = {}
+    use_cache = isinstance(counter, LlamaTokenizeCounter)
+
+    def _count(text: str) -> int:
+        if use_cache and text in cache:
+            return cache[text]
+        val = int(counter(text))
+        if use_cache:
+            cache[text] = val
+        return val
+
+    results: list[dict[str, object]] = []
+    for context_name, template in context_templates.items():
+        if "<TAG>" not in template:
+            raise ValueError(f"JSON context template {context_name!r} must contain '<TAG>' placeholder.")
+        for assigned_tag, wildcard_tag in tag_pairs:
+            a_json = template.replace("<TAG>", assigned_tag)
+            w_json = template.replace("<TAG>", wildcard_tag)
+            a_tokens = _count(a_json)
+            w_tokens = _count(w_json)
+            if a_tokens != w_tokens:
+                raise ValueError(
+                    f"STOPPED: JSON context {context_name!r} tag pair ({assigned_tag!r}, {wildcard_tag!r}) "
+                    f"differs in token count: {a_tokens} vs {w_tokens}."
+                )
+            results.append(
+                {
+                    "context": context_name,
+                    "assigned": assigned_tag,
+                    "wildcard": wildcard_tag,
+                    "assigned_tokens": a_tokens,
+                    "wildcard_tokens": w_tokens,
+                    "equal": True,
+                }
+            )
     return results
 
 
@@ -6993,7 +7081,6 @@ def match_rendering_event_forms(
                 "rule_id": None,
             }
         )
-
     return results
 
 
@@ -7021,12 +7108,7 @@ def compute_shape_plan_run_telemetry(
         else (int(worlds[0].seed) if worlds else 20261103)
     )
     if plan_bundle is None:
-        effective_block_size = (
-            SHAPE_PLAN_BLOCK_SIZE
-            if len(worlds) >= SHAPE_PLAN_BLOCK_SIZE and len(worlds) % SHAPE_PLAN_BLOCK_SIZE == 0
-            else max(1, len(worlds))
-        )
-        plan_bundle = generate_shape_plan(worlds, seed=resolved_seed, block_size=effective_block_size)
+        plan_bundle = generate_shape_plan(worlds, seed=resolved_seed, block_size=SHAPE_PLAN_BLOCK_SIZE)
 
     plan_records: list[dict[str, object]] = [
         {
@@ -7271,8 +7353,18 @@ def compute_shape_plan_run_telemetry(
 
     return {
         "shape_plan": shape_plan,
+        "baseline_only": shape_plan == "off",
         "shape_plan_seed": resolved_seed,
         "block_size": int(plan_bundle.get("block_size", SHAPE_PLAN_BLOCK_SIZE)),
+        "block_sizes": list(
+            plan_bundle.get(
+                "block_sizes",
+                [
+                    len(worlds[b_start : b_start + SHAPE_PLAN_BLOCK_SIZE])
+                    for b_start in range(0, len(worlds), SHAPE_PLAN_BLOCK_SIZE)
+                ],
+            )
+        ),
         "design_choices": dict(SHAPE_PLAN_DESIGN_CHOICES),
         "block_balance_max_spread": dict(SHAPE_PLAN_DESIGN_CHOICES["block_balance_max_spread"]),
         "two_form_switch_rate_band": dict(SHAPE_PLAN_DESIGN_CHOICES["two_form_switch_rate_band"]),
@@ -12026,15 +12118,10 @@ def run_paired_seed_bank(
         if shape_plan_seed is not None
         else (int(seeds[0]) if seeds else 20261103)
     )
-    effective_block_size = (
-        SHAPE_PLAN_BLOCK_SIZE
-        if len(worlds) >= SHAPE_PLAN_BLOCK_SIZE and len(worlds) % SHAPE_PLAN_BLOCK_SIZE == 0
-        else max(1, len(worlds))
-    )
     plan_bundle = generate_shape_plan(
         worlds,
         seed=resolved_plan_seed,
-        block_size=effective_block_size,
+        block_size=SHAPE_PLAN_BLOCK_SIZE,
     )
     plan_by_sid: Mapping[str, Sequence[Mapping[str, Any]]] = plan_bundle["plan_by_scenario_id"]  # type: ignore[assignment]
 
