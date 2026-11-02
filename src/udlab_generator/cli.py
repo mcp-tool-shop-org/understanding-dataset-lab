@@ -23,6 +23,7 @@ from udlab_generator.probe import (
 )
 from udlab_generator.render import (
     ATTEMPT_0_TEMPERATURE,
+    DEFAULT_CONSTRAINT_LAYOUT,
     DEFAULT_GOAL_MODE,
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_RETRY_FORM,
@@ -37,6 +38,7 @@ from udlab_generator.render import (
     NUM_CTX_STEP_TOKENS,
     SEALED_DIAGNOSTICS_FILENAME,
     SEALED_RESPONSES_FILENAME,
+    VALID_CONSTRAINT_LAYOUTS,
     VALID_GOAL_MODES,
     VALID_RETRY_FORMS,
     EventDiagnosticRecord,
@@ -57,6 +59,7 @@ from udlab_generator.render import (
     check_rendered_prose,
     collect_prose_faults,
     compare_paired_runs,
+    compute_hard_constraints_sha256,
     compute_sealed_response_digests,
     count_duplicate_stake_statements,
     count_prompt_tokens_exact,
@@ -712,6 +715,7 @@ def build_and_probe_dataset(
     multi_turn_retries: bool = False,
     short_circuit_dead_scenarios: bool = False,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    constraint_layout: str = DEFAULT_CONSTRAINT_LAYOUT,
     presence_penalty: float | None = None,
     grant_id: str | None = None,
     resume: bool = False,
@@ -742,7 +746,12 @@ def build_and_probe_dataset(
         raise ValueError(
             f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}."
         )
+    if constraint_layout not in VALID_CONSTRAINT_LAYOUTS:
+        raise ValueError(
+            f"constraint_layout must be one of {sorted(VALID_CONSTRAINT_LAYOUTS)}, got {constraint_layout!r}."
+        )
     resolved_goal_mode = str(goal_mode)
+    resolved_constraint_layout = str(constraint_layout)
     resolved_presence_penalty = float(presence_penalty) if presence_penalty is not None else None
     resolved_short_circuit = bool(short_circuit_dead_scenarios)
     dead_scenario_mode = (
@@ -791,6 +800,7 @@ def build_and_probe_dataset(
         retry_form=resolved_retry_form,
         goal_mode=resolved_goal_mode,
         presence_penalty=resolved_presence_penalty,
+        constraint_layout=resolved_constraint_layout,
     )
 
     if resume:
@@ -839,6 +849,7 @@ def build_and_probe_dataset(
             retry_form=resolved_retry_form,
             short_circuit_dead_scenarios=resolved_short_circuit,
             goal_mode=resolved_goal_mode,
+            constraint_layout=resolved_constraint_layout,
             presence_penalty=resolved_presence_penalty,
             start_owned_server=should_own_server,
             popen_factory=popen_factory,
@@ -877,7 +888,10 @@ def build_and_probe_dataset(
             else None
         )
     else:
-        mock_writer = MockWriter(goal_mode=resolved_goal_mode)
+        mock_writer = MockWriter(
+            goal_mode=resolved_goal_mode,
+            constraint_layout=resolved_constraint_layout,
+        )
         all_mock_calls: list[GenerationCallRecord] = list(restored_calls)
         if resume and generations_path is not None:
             lines = "".join(
@@ -957,6 +971,7 @@ def build_and_probe_dataset(
                     thinking_sha256=think_sha,
                     goal_mode=resolved_goal_mode,
                     presence_penalty=resolved_presence_penalty,
+                    constraint_layout=resolved_constraint_layout,
                 )
                 all_mock_calls.append(rec)
                 scen_calls.append(rec)
@@ -981,6 +996,7 @@ def build_and_probe_dataset(
                         thinking_sha256=think_sha,
                         goal_mode=resolved_goal_mode,
                         presence_penalty=resolved_presence_penalty,
+                        constraint_layout=resolved_constraint_layout,
                     ),
                 )
 
@@ -1039,11 +1055,17 @@ def build_and_probe_dataset(
     responses_sealed_sha256 = hashlib.sha256(responses_bytes).hexdigest()
 
     outcomes = _summarize_call_outcomes(all_call_records)
+    hard_constraints_sha256 = compute_hard_constraints_sha256(
+        goal_mode=resolved_goal_mode,
+        constraint_layout=resolved_constraint_layout,
+    )
 
     writer_provenance: dict[str, Any] = {
         "writer": writer_kind,
         "writer_pin": effective_writer_pin.to_dict(),
         "goal_mode": resolved_goal_mode,
+        "constraint_layout": resolved_constraint_layout,
+        "hard_constraints_sha256": hard_constraints_sha256,
         "presence_penalty": resolved_presence_penalty,
         "modelfile_parameters": modelfile_parameters,
         "think": resolved_think,
@@ -1095,6 +1117,8 @@ def build_and_probe_dataset(
         "writer": writer_kind,
         "writer_pin": effective_writer_pin.to_dict(),
         "goal_mode": resolved_goal_mode,
+        "constraint_layout": resolved_constraint_layout,
+        "hard_constraints_sha256": hard_constraints_sha256,
         "presence_penalty": resolved_presence_penalty,
         "modelfile_parameters": modelfile_parameters,
         "max_retries": max_retries,
@@ -1236,6 +1260,15 @@ def main(
         help=f"Writer goal mode: 'copy' (default) or 'splice' ([[GOAL:<agent>]] tokens expanded before checks).",
     )
     parser.add_argument(
+        "--constraint-layout",
+        choices=tuple(sorted(VALID_CONSTRAINT_LAYOUTS)),
+        default=DEFAULT_CONSTRAINT_LAYOUT,
+        help=(
+            f"Writer prompt Paragraph 2 event-order constraint layout: "
+            f"'line' (default, 11 per-event-kind bullets) or 'table' (compact 8-row pipe table + 2 bullets)."
+        ),
+    )
+    parser.add_argument(
         "--grant-id",
         type=str,
         default=None,
@@ -1350,6 +1383,7 @@ def main(
             paired_res = run_paired_seed_bank(
                 seed_bank=args.paired_seed_bank,
                 goal_mode=args.goal_mode,
+                constraint_layout=args.constraint_layout,
                 presence_penalty=args.presence_penalty,
                 output_path=args.paired_out,
                 sealed_responses_path=paired_sealed_responses_path,
@@ -1414,6 +1448,7 @@ def main(
             multi_turn_retries=bool(args.multi_turn_retries),
             short_circuit_dead_scenarios=bool(args.short_circuit_dead_scenarios),
             goal_mode=args.goal_mode,
+            constraint_layout=args.constraint_layout,
             presence_penalty=args.presence_penalty,
             grant_id=args.grant_id,
             resume=args.resume,
