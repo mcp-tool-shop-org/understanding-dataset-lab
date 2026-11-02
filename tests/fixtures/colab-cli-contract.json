@@ -1,0 +1,93 @@
+{
+  "cli": "google-colab-cli",
+  "version": "v0.7.4",
+  "global_options": [
+    "--auth",
+    "--client-oauth-config",
+    "--config",
+    "--help",
+    "--install-completion",
+    "--logtostderr",
+    "--show-completion",
+    "-c",
+    "-h"
+  ],
+  "commands": {
+    "new": {
+      "options": [
+        "--gpu",
+        "--help",
+        "--high-mem",
+        "--session",
+        "--tpu",
+        "-h",
+        "-s"
+      ],
+      "usage": "Usage: colab new [OPTIONS]"
+    },
+    "exec": {
+      "options": [
+        "--env",
+        "--file",
+        "--help",
+        "--output-image",
+        "--session",
+        "--timeout",
+        "-f",
+        "-h",
+        "-s"
+      ],
+      "usage": "Usage: colab exec [OPTIONS]"
+    },
+    "download": {
+      "options": [
+        "--help",
+        "--session",
+        "-h",
+        "-s"
+      ],
+      "usage": "Usage: colab download [OPTIONS] {remote_path} {local_path}"
+    },
+    "upload": {
+      "options": [
+        "--help",
+        "--session",
+        "-h",
+        "-s"
+      ],
+      "usage": "Usage: colab upload [OPTIONS] {local_path} {remote_path}"
+    },
+    "stop": {
+      "options": [
+        "--help",
+        "--session",
+        "-h",
+        "-s"
+      ],
+      "usage": "Usage: colab stop [OPTIONS]"
+    },
+    "sessions": {
+      "options": [
+        "--help",
+        "-h"
+      ],
+      "usage": "Usage: colab sessions [OPTIONS]"
+    },
+    "usage": {
+      "options": [
+        "--help",
+        "-h"
+      ],
+      "usage": "Usage: colab usage [OPTIONS]"
+    },
+    "status": {
+      "options": [
+        "--help",
+        "--session",
+        "-h",
+        "-s"
+      ],
+      "usage": "Usage: colab status [OPTIONS]"
+    }
+  }
+}
