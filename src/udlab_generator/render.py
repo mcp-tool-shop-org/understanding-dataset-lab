@@ -149,8 +149,52 @@ PROMPT_TOKEN_ESTIMATE_RULE: str = "ceil(utf8_bytes / 3)"
 CHECKPOINT_FILENAME: str = "checkpoint.json"
 SEALED_CHECKPOINT_FILENAME: str = "checkpoint.sealed.json"
 SEALED_RESPONSES_FILENAME: str = "responses.sealed.jsonl"
+SEALED_DIAGNOSTICS_FILENAME: str = "diagnostics.sealed.jsonl"
 CHECKPOINT_GENESIS_HASH: str = "0" * 64
 GENERATIONS_FILENAME: str = "generations.jsonl"
+PAIRED_SEED_BANK_SCHEMA_V1: str = "paired_seed_bank_run_v1"
+PAIRED_SEED_BANK_SCHEMA_V2: str = "paired_seed_bank_run_v2"
+PAIRED_SEED_BANK_SCHEMA_VERSION: str = PAIRED_SEED_BANK_SCHEMA_V2
+VALID_PAIRED_SEED_BANK_SCHEMA_VERSIONS: frozenset[str] = frozenset(
+    {
+        PAIRED_SEED_BANK_SCHEMA_V1,
+        PAIRED_SEED_BANK_SCHEMA_V2,
+    }
+)
+
+VALID_DIAGNOSTIC_CLASSES: frozenset[str] = frozenset(
+    {
+        "VALID",
+        "CASCADE_VICTIM",
+        "SPLIT_ACROSS_SENTENCES",
+        "MALFORMED_SINGLE_SENTENCE",
+        "EXACT_COPY_LOOP",
+        "TRUE_REORDERING",
+        "TRUE_OMISSION",
+    }
+)
+DIAGNOSTIC_CLASS_ORDER: tuple[str, ...] = (
+    "VALID",
+    "CASCADE_VICTIM",
+    "SPLIT_ACROSS_SENTENCES",
+    "MALFORMED_SINGLE_SENTENCE",
+    "EXACT_COPY_LOOP",
+    "TRUE_REORDERING",
+    "TRUE_OMISSION",
+)
+DIAGNOSTIC_SUBRULE_NAMES: tuple[str, ...] = (
+    "actor_name_present",
+    "pronoun_before_verb",
+    "allowed_verb_present",
+    "actor_before_verb",
+    "no_intervening_party",
+    "source_room",
+    "destination_room",
+    "source_before_destination",
+    "no_third_room",
+    "exact_db",
+    "verbatim_quote",
+)
 
 OllamaHttpTransport = Callable[[str, str, dict[str, Any] | None], dict[str, Any]]
 
@@ -306,6 +350,7 @@ class RenderedScenario:
     seed: int = 0
     goal_mode: str = DEFAULT_GOAL_MODE
     goal_source: dict[str, str] | None = None
+    presence_penalty: float | None = None
 
     def __post_init__(self) -> None:
         if self.goal_mode not in VALID_GOAL_MODES:
@@ -4750,7 +4795,68 @@ def start_owned_ollama_server(
     except Exception:
         server.stop()
         raise
+    print(f"Owned Ollama server started at {base_url}", file=sys.stderr, flush=True)
     return server
+
+
+def parse_ollama_modelfile_parameters(raw_parameters: object) -> dict[str, object]:
+    """Parse the `parameters` string (or mapping) from Ollama `/api/show` into a structured dict."""
+    if isinstance(raw_parameters, Mapping):
+        return {str(k): v for k, v in raw_parameters.items()}
+    if not isinstance(raw_parameters, str) or not raw_parameters.strip():
+        return {}
+    parsed: dict[str, object] = {}
+    for raw_line in raw_parameters.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.upper().startswith("PARAMETER "):
+            line = line[len("PARAMETER ") :].strip()
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        key, val_raw = parts[0].strip(), parts[1].strip()
+        if (val_raw.startswith('"') and val_raw.endswith('"')) or (
+            val_raw.startswith("'") and val_raw.endswith("'")
+        ):
+            val: object = val_raw[1:-1]
+        elif val_raw.lower() in ("true", "false"):
+            val = val_raw.lower() == "true"
+        else:
+            try:
+                if "." in val_raw or "e" in val_raw.lower():
+                    val = float(val_raw)
+                else:
+                    val = int(val_raw)
+            except ValueError:
+                val = val_raw
+        if key in parsed:
+            existing = parsed[key]
+            if isinstance(existing, list):
+                existing.append(val)
+            else:
+                parsed[key] = [existing, val]
+        else:
+            parsed[key] = val
+    return parsed
+
+
+def query_ollama_model_parameters(
+    *,
+    base_url: str,
+    ollama_tag: str = PINNED_WRITER_MODEL_PIN_TAG if "PINNED_WRITER_MODEL_PIN_TAG" in globals() else PINNED_WRITER_MODEL_TAG,
+    http_transport: OllamaHttpTransport = default_ollama_http_transport,
+) -> dict[str, object]:
+    """Query `POST <base_url>/api/show` for `ollama_tag` and return parsed Modelfile parameters."""
+    clean_base = require_loopback_ollama_url(base_url)
+    show_url = f"{clean_base}/api/show"
+    try:
+        resp = http_transport("POST", show_url, {"model": ollama_tag})
+    except Exception:
+        return {}
+    if not isinstance(resp, Mapping):
+        return {}
+    return parse_ollama_modelfile_parameters(resp.get("parameters"))
 
 
 @dataclass(frozen=True)
@@ -4781,6 +4887,7 @@ class SealedResponseEntry:
     min_p: float | None = None
     retry_form: str = ""
     goal_mode: str = DEFAULT_GOAL_MODE
+    presence_penalty: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -4793,6 +4900,7 @@ class SealedResponseEntry:
             "seed": self.seed,
             "temperature": self.temperature,
             "min_p": self.min_p,
+            "presence_penalty": self.presence_penalty,
             "retry_form": self.retry_form,
             "goal_mode": self.goal_mode,
             "response_text": self.response_text,
@@ -5118,6 +5226,7 @@ class GenerationCallRecord:
     # Card sp: ordered vector of all prose check_ids that fired on this call (no text).
     fault_check_ids: tuple[str, ...] = ()
     goal_mode: str = DEFAULT_GOAL_MODE
+    presence_penalty: float | None = None
 
     def __post_init__(self) -> None:
         if self.goal_mode not in VALID_GOAL_MODES:
@@ -5178,6 +5287,7 @@ class GenerationCallRecord:
             "think": self.think,
             "temperature": self.temperature,
             "min_p": self.min_p,
+            "presence_penalty": self.presence_penalty,
             "done_reason": self.done_reason,
             "seconds": round(self.seconds, 6),
             "vram_peak_mib": self.vram_peak_mib,
@@ -5369,6 +5479,8 @@ class WriterCheckpointManager:
         short_circuit_dead_scenarios: bool = False,
         retry_form: str = DEFAULT_RETRY_FORM,
         goal_mode: str = DEFAULT_GOAL_MODE,
+        presence_penalty: float | None = None,
+        modelfile_parameters: Mapping[str, object] | None = None,
     ) -> None:
         if goal_mode not in VALID_GOAL_MODES:
             raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
@@ -5383,10 +5495,17 @@ class WriterCheckpointManager:
         self.short_circuit_dead_scenarios = bool(short_circuit_dead_scenarios)
         self.retry_form = str(retry_form)
         self.goal_mode = str(goal_mode)
+        self.presence_penalty = float(presence_penalty) if presence_penalty is not None else None
+        self.modelfile_parameters: dict[str, object] = (
+            dict(modelfile_parameters) if modelfile_parameters is not None else {}
+        )
 
         self._pub_entries: list[dict[str, Any]] = []
         self._sealed_entries: list[dict[str, Any]] = []
         self._chain_head: str = CHECKPOINT_GENESIS_HASH
+
+    def set_modelfile_parameters(self, params: Mapping[str, object] | None) -> None:
+        self.modelfile_parameters = dict(params) if params is not None else {}
 
     @property
     def completed_count(self) -> int:
@@ -5412,6 +5531,8 @@ class WriterCheckpointManager:
             ),
             "retry_form": self.retry_form,
             "goal_mode": self.goal_mode,
+            "presence_penalty": self.presence_penalty,
+            "modelfile_parameters": dict(self.modelfile_parameters),
         }
 
     def _sealed_header(self) -> dict[str, object]:
@@ -5488,6 +5609,7 @@ class WriterCheckpointManager:
                 "attempt": r0.attempt,
                 "temperature": r0.temperature,
                 "min_p": r0.min_p,
+                "presence_penalty": r0.presence_penalty,
                 "seed": r0.seed,
                 "goal_mode": r0.goal_mode,
                 "goal_source": r0_goal_source,
@@ -5505,6 +5627,7 @@ class WriterCheckpointManager:
                 "attempt": r1.attempt,
                 "temperature": r1.temperature,
                 "min_p": r1.min_p,
+                "presence_penalty": r1.presence_penalty,
                 "seed": r1.seed,
                 "goal_mode": r1.goal_mode,
                 "goal_source": r1_goal_source,
@@ -5521,6 +5644,7 @@ class WriterCheckpointManager:
                     "attempt": r0.attempt,
                     "temperature": r0.temperature,
                     "min_p": r0.min_p,
+                    "presence_penalty": r0.presence_penalty,
                     "seed": r0.seed,
                     "goal_mode": r0.goal_mode,
                     "goal_source": r0_goal_source,
@@ -5530,6 +5654,7 @@ class WriterCheckpointManager:
                     "attempt": r1.attempt,
                     "temperature": r1.temperature,
                     "min_p": r1.min_p,
+                    "presence_penalty": r1.presence_penalty,
                     "seed": r1.seed,
                     "goal_mode": r1.goal_mode,
                     "goal_source": r1_goal_source,
@@ -5575,6 +5700,7 @@ class WriterCheckpointManager:
                     "attempt": rec.attempt,
                     "temperature": rec.temperature,
                     "min_p": rec.min_p,
+                    "presence_penalty": rec.presence_penalty,
                     "seed": rec.seed,
                     "goal_mode": rec.goal_mode,
                     "retry_form": rec.retry_form,
@@ -5641,9 +5767,11 @@ class WriterCheckpointManager:
             or sealed_header.get("writer_manifest_digest") != self.writer_pin.manifest_digest
             or pub_header.get("goal_mode", DEFAULT_GOAL_MODE) != self.goal_mode
             or sealed_header.get("goal_mode", DEFAULT_GOAL_MODE) != self.goal_mode
+            or pub_header.get("presence_penalty") != self.presence_penalty
+            or sealed_header.get("presence_penalty") != self.presence_penalty
         ):
             raise ValueError(
-                "Cannot --resume: checkpoint header (count, seed, writer_kind, goal_mode, or writer_manifest_digest) mismatches requested run."
+                "Cannot --resume: checkpoint header (count, seed, writer_kind, goal_mode, presence_penalty, or writer_manifest_digest) mismatches requested run."
             )
 
         restored_private_seed = str(sealed_header.get("private_seed_hex") or "")
@@ -5792,6 +5920,11 @@ class WriterCheckpointManager:
                             seed=r0_seed,
                             goal_mode=r0_goal_mode,
                             goal_source=r0_g_source,
+                            presence_penalty=(
+                                float(r0_dict["presence_penalty"])
+                                if r0_dict.get("presence_penalty") is not None
+                                else self.presence_penalty
+                            ),
                         ),
                         RenderedScenario(
                             scenario_id=world.scenario_id,
@@ -5807,6 +5940,11 @@ class WriterCheckpointManager:
                             seed=r1_seed,
                             goal_mode=r1_goal_mode,
                             goal_source=r1_g_source,
+                            presence_penalty=(
+                                float(r1_dict["presence_penalty"])
+                                if r1_dict.get("presence_penalty") is not None
+                                else self.presence_penalty
+                            ),
                         ),
                     )
                 )
@@ -5900,6 +6038,11 @@ class WriterCheckpointManager:
                             str(x) for x in (c_dict.get("fault_check_ids") or ())
                         ),
                         goal_mode=str(c_dict.get("goal_mode", self.goal_mode)),
+                        presence_penalty=(
+                            float(c_dict["presence_penalty"])
+                            if c_dict.get("presence_penalty") is not None
+                            else self.presence_penalty
+                        ),
                     )
                 )
 
@@ -5955,9 +6098,14 @@ class OllamaWriter:
         server_port: int | None = None,
         ollama_models_dir: Path | str | None = None,
         prompt_token_counter: PromptTokenCounter | None = None,
+        presence_penalty: float | None = None,
     ) -> None:
         if max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
+        if presence_penalty is not None and (
+            isinstance(presence_penalty, bool) or not isinstance(presence_penalty, (int, float))
+        ):
+            raise TypeError(f"presence_penalty must be a float or None, got {presence_penalty!r}")
         resolved_retry_form = "multi_turn" if multi_turn_retries else str(retry_form)
         if resolved_retry_form not in VALID_RETRY_FORMS:
             raise ValueError(
@@ -5970,6 +6118,10 @@ class OllamaWriter:
         self._retry_form: str = resolved_retry_form
         self._short_circuit_dead_scenarios: bool = bool(short_circuit_dead_scenarios)
         self._goal_mode: str = str(goal_mode)
+        self._presence_penalty: float | None = (
+            float(presence_penalty) if presence_penalty is not None else None
+        )
+        self._modelfile_parameters: dict[str, object] = {}
         self._last_goal_source: dict[str, str] = {}
         # Card ul: the exact counter (llama-tokenize on CPU against the pinned blob). When None (CPU tests with
         # fake transports) the bytes/3 estimate stands in for the decision.
@@ -6138,6 +6290,14 @@ class OllamaWriter:
         return self._goal_mode
 
     @property
+    def presence_penalty(self) -> float | None:
+        return self._presence_penalty
+
+    @property
+    def modelfile_parameters(self) -> dict[str, object]:
+        return dict(self._modelfile_parameters)
+
+    @property
     def prompt_token_counter(self) -> PromptTokenCounter | None:
         return self._prompt_token_counter
 
@@ -6219,6 +6379,7 @@ class OllamaWriter:
                 failing_sentence_length=rec.failing_sentence_length,
                 refusal_reasons=self._pending_sealed_refusal_reasons,
                 goal_mode=rec.goal_mode,
+                presence_penalty=rec.presence_penalty,
             )
             self._pending_sealed_failing_sentence = None
             self._pending_sealed_refusal_reasons = ()
@@ -6232,6 +6393,11 @@ class OllamaWriter:
                 base_url=self._base_url,
                 ollama_tag=self.ollama_tag,
                 expected_digest=self.manifest_digest,
+                http_transport=self._transport,
+            )
+            self._modelfile_parameters = query_ollama_model_parameters(
+                base_url=self._base_url,
+                ollama_tag=self.ollama_tag,
                 http_transport=self._transport,
             )
             self._verified_local_digest = True
@@ -6320,6 +6486,7 @@ class OllamaWriter:
                 seed=derive_call_seed(base_seed, rendering_index, 0),
                 fault_check_ids=(CTX_OVER_CAP_CHECK_ID,),
                 goal_mode=self._goal_mode,
+                presence_penalty=self._presence_penalty,
             )
             self._append_generation_record(rec)
             self._refusals.append(
@@ -6505,6 +6672,8 @@ class OllamaWriter:
                     "num_predict": self._num_predict,
                     "num_ctx": attempt_num_ctx,
                 }
+            if self._presence_penalty is not None:
+                call_options["presence_penalty"] = self._presence_penalty
             payload: dict[str, Any] = {
                 "model": self.ollama_tag,
                 "messages": attempt_messages,
@@ -6599,6 +6768,7 @@ class OllamaWriter:
                     retry_attempt0_sentences=retry_attempt0_total,
                     fault_check_ids=("length_stop",),
                     goal_mode=self._goal_mode,
+                    presence_penalty=self._presence_penalty,
                 )
                 self._pending_sealed_failing_sentence = None
                 self._pending_sealed_refusal_reasons = (f"length_stop: {reason_msg}",)
@@ -6702,6 +6872,7 @@ class OllamaWriter:
                     retry_attempt0_sentences=retry_attempt0_total,
                     fault_check_ids=fault_ids,
                     goal_mode=self._goal_mode,
+                    presence_penalty=self._presence_penalty,
                 )
                 self._pending_sealed_failing_sentence = raw_fail_sent
                 self._pending_sealed_refusal_reasons = (full_sealed_reason,)
@@ -6781,6 +6952,7 @@ class OllamaWriter:
                 retry_unchanged_sentences=retry_unchanged,
                 retry_attempt0_sentences=retry_attempt0_total,
                 goal_mode=self._goal_mode,
+                presence_penalty=self._presence_penalty,
             )
             self._append_generation_record(rec, response_text=content, thinking_text=thinking_text)
             return stored_prose
@@ -6855,6 +7027,7 @@ class OllamaWriter:
                 seed=rec_0.seed if rec_0 is not None else derive_call_seed(int(world.seed), 0, 0),
                 goal_mode=self._goal_mode,
                 goal_source=goal_source_0,
+                presence_penalty=self._presence_penalty,
             ),
             RenderedScenario(
                 scenario_id=world.scenario_id,
@@ -6870,6 +7043,7 @@ class OllamaWriter:
                 seed=rec_1.seed if rec_1 is not None else derive_call_seed(int(world.seed), 1, 0),
                 goal_mode=self._goal_mode,
                 goal_source=goal_source_1,
+                presence_penalty=self._presence_penalty,
             ),
         )
 
@@ -6924,22 +7098,1026 @@ def world_from_scenario_seed(scenario_seed: int, index: int = 0) -> World:
     return generate_world(cfg)
 
 
-def _resolve_git_commit_sha() -> str:
-    """Return the current git commit SHA if available, or 'unknown'."""
+def _resolve_git_commit_sha(cwd: Path | None = None) -> str:
+    """Return the exact 40-hex git commit SHA if available, or 'unknown'."""
+    target_cwd = cwd if cwd is not None else Path(__file__).resolve().parent
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=str(Path(__file__).resolve().parent),
+            cwd=str(target_cwd),
             capture_output=True,
             text=True,
             check=False,
             timeout=5,
         )
-        if proc.returncode == 0 and proc.stdout.strip():
-            return proc.stdout.strip()
+        cand = proc.stdout.strip() if proc.returncode == 0 and proc.stdout else ""
+        if re.fullmatch(r"[0-9a-f]{40}", cand) is not None:
+            return cand
     except Exception:
         pass
     return "unknown"
+
+
+@dataclass(frozen=True)
+class EventDiagnosticRecord:
+    """Per-event diagnostic alignment record (never a gate)."""
+
+    scenario_id: str
+    rendering_index: int
+    n_events: int
+    event_index: int
+    rel_pos: float
+    event_kind: str
+    actor: str
+    same_actor_as_prev: bool
+    route_pair_repeat_idx: int | None
+    seq_checker_status: str
+    actor_name_present: bool
+    pronoun_before_verb: bool
+    allowed_verb_present: bool
+    actor_before_verb: bool
+    no_intervening_party: bool
+    source_room: bool
+    destination_room: bool
+    source_before_destination: bool
+    no_third_room: bool
+    exact_db: bool
+    verbatim_quote: bool
+    aligned_sentence_index: int | None
+    failed_subrules: tuple[str, ...]
+    is_copy_of_sentence_index: int | None
+    diagnostic_class: str
+
+    def __post_init__(self) -> None:
+        if self.diagnostic_class not in VALID_DIAGNOSTIC_CLASSES:
+            raise ValueError(
+                f"diagnostic_class must be one of {sorted(VALID_DIAGNOSTIC_CLASSES)}, got {self.diagnostic_class!r}"
+            )
+        if self.seq_checker_status not in ("PASS", "FAIL"):
+            raise ValueError(
+                f"seq_checker_status must be 'PASS' or 'FAIL', got {self.seq_checker_status!r}"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        subrules_map: dict[str, bool] = {
+            "actor_name_present": self.actor_name_present,
+            "pronoun_before_verb": self.pronoun_before_verb,
+            "allowed_verb_present": self.allowed_verb_present,
+            "actor_before_verb": self.actor_before_verb,
+            "no_intervening_party": self.no_intervening_party,
+            "source_room": self.source_room,
+            "destination_room": self.destination_room,
+            "source_before_destination": self.source_before_destination,
+            "no_third_room": self.no_third_room,
+            "exact_db": self.exact_db,
+            "verbatim_quote": self.verbatim_quote,
+        }
+        return {
+            "scenario_id": self.scenario_id,
+            "rendering_index": self.rendering_index,
+            "n_events": self.n_events,
+            "event_index": self.event_index,
+            "rel_pos": self.rel_pos,
+            "event_kind": self.event_kind,
+            "actor": self.actor,
+            "same_actor_as_prev": self.same_actor_as_prev,
+            "route_pair_repeat_idx": self.route_pair_repeat_idx,
+            "seq_checker_status": self.seq_checker_status,
+            **subrules_map,
+            "subrules": dict(subrules_map),
+            "aligned_sentence_index": self.aligned_sentence_index,
+            "failed_subrules": list(self.failed_subrules),
+            "is_copy_of_sentence_index": self.is_copy_of_sentence_index,
+            "diagnostic_class": self.diagnostic_class,
+        }
+
+
+_DIAG_PRONOUN_RE = re.compile(
+    r"\b(?:he|she|they|him|her|them|his|hers|their|theirs)\b",
+    re.IGNORECASE,
+)
+
+
+def evaluate_event_subrules(
+    sentence: str,
+    ev: Event,
+    world: World,
+    *,
+    prev_sentence: str | None = None,
+    prev_event: Event | None = None,
+) -> dict[str, bool]:
+    """Evaluate the 11 atomic sub-rule booleans for `(ev, sentence)` without gating."""
+    s_low = sentence.lower()
+    s_unquoted_low = re.sub(r'"[^"]*"|“[^”]*”', '""', s_low)
+    frame_low = s_unquoted_low if ev.kind in ("say", "message") else s_low
+    all_parties: tuple[str, ...] = tuple(world.agents) + tuple(world.absent_parties)
+    is_station_move = is_station_transition_event(ev, world)
+    is_folded_movement = (
+        ev.kind in ("enter", "leave")
+        and bool(ev.from_location and ev.to_location)
+        and _sentence_has_folded_from_and_arrival(
+            s_low,
+            ev.from_location or "",
+            ev.to_location or "",
+        )
+    )
+    if ev.kind == "see":
+        kind_verbs: tuple[str, ...] = SIGHTING_VERBS
+    elif is_station_move:
+        kind_verbs = STATION_CHANGE_PERSON_VERBS
+    elif ev.kind in ("enter", "leave") and is_folded_movement:
+        kind_verbs = tuple(
+            dict.fromkeys(_ACTION_VERBS_BY_KIND.get(ev.kind, ()) + _FOLDED_LEAVE_ENTER_VERBS)
+        )
+    else:
+        kind_verbs = _ACTION_VERBS_BY_KIND.get(ev.kind, ())
+
+    possessive_occluded_see = _sentence_states_occluder_blocked_actor_sight(s_low, ev)
+    actor_esc = re.escape(ev.actor.lower())
+    actor_matches = list(re.finditer(rf"\b{actor_esc}\b", frame_low))
+    actor_name_present = len(actor_matches) > 0
+
+    verb_matches: list[re.Match[str]] = []
+    for v_word in kind_verbs:
+        verb_matches.extend(re.finditer(rf"\b{re.escape(v_word.lower())}\b", frame_low))
+    allowed_verb_present = bool(possessive_occluded_see or verb_matches)
+
+    subj_ok = bool(
+        possessive_occluded_see
+        or _actor_precedes_verb_as_subject(frame_low, ev.actor, kind_verbs, all_parties, ev=ev)
+    )
+
+    if subj_ok:
+        actor_before_verb = True
+        no_intervening_party = True
+        pronoun_before_verb = False
+    else:
+        actor_before_verb = False
+        if actor_name_present and verb_matches:
+            for am in actor_matches:
+                for vm in verb_matches:
+                    if am.end() <= vm.start() and not _verb_is_scoped_by_negation(
+                        frame_low, am.start(), vm.start(), vm.end(), ev
+                    ):
+                        actor_before_verb = True
+                        break
+                if actor_before_verb:
+                    break
+        if actor_name_present and allowed_verb_present and actor_before_verb:
+            subj_without_others = _actor_precedes_verb_as_subject(
+                frame_low, ev.actor, kind_verbs, (ev.actor,), ev=ev
+            )
+            no_intervening_party = not subj_without_others
+        else:
+            no_intervening_party = True
+
+        pronoun_before_verb = False
+        if verb_matches and not actor_before_verb:
+            for vm in verb_matches:
+                prefix = frame_low[: vm.start()]
+                if _DIAG_PRONOUN_RE.search(prefix) is not None:
+                    pronoun_before_verb = True
+                    break
+
+    if ev.kind == "leave":
+        source_room = bool(ev.from_location and ev.from_location.lower() in s_low)
+        destination_room = bool(ev.to_location and ev.to_location.lower() in s_low)
+        source_before_destination = bool(
+            ev.from_location
+            and ev.to_location
+            and _ordered_from_to_positions(
+                s_low,
+                ev.from_location,
+                ev.to_location,
+                require_from_prep=False,
+                allow_dest_before_source=is_folded_movement,
+            )
+        )
+    elif ev.kind == "enter":
+        has_explicit_from = bool(
+            ev.from_location
+            and re.search(
+                rf"\b(?:from|out of|exited|left|departed)\s+{_ARTICLE_OPT_RE}{re.escape(ev.from_location.lower())}\b",
+                s_low,
+            )
+        )
+        has_prev_leave = _preceding_sentence_is_matching_leave(
+            prev_sentence, prev_event, ev, world.noise_threshold, world=world
+        )
+        source_room = bool(has_explicit_from or has_prev_leave)
+        destination_room = bool(ev.to_location and ev.to_location.lower() in s_low)
+        if has_explicit_from and ev.from_location and ev.to_location:
+            source_before_destination = _ordered_from_to_positions(
+                s_low,
+                ev.from_location,
+                ev.to_location,
+                require_from_prep=True,
+                allow_dest_before_source=True,
+            )
+        elif has_prev_leave and ev.to_location:
+            to_esc = re.escape(ev.to_location.lower())
+            source_before_destination = bool(
+                re.search(
+                    rf"\b(?:to|into|toward|towards|for|onto|in|at|entered|arrived\s+in)\s+{_ARTICLE_OPT_RE}{to_esc}(?!\s+(?:doorway|threshold)\b)\b",
+                    s_low,
+                )
+            )
+        else:
+            source_before_destination = False
+    elif ev.kind == "move":
+        if is_station_move:
+            source_room = ev.room.lower() in frame_low
+            destination_room = bool(ev.to_location and ev.to_location.lower() in s_low)
+            source_before_destination = _sentence_matches_station_move(s_low, ev)
+        else:
+            source_room = bool(
+                ev.room.lower() in frame_low
+                and ev.from_location
+                and ev.from_location.lower() in s_low
+            )
+            destination_room = bool(
+                ev.to_location
+                and ev.to_location.lower() in s_low
+                and ev.target_object
+                and ev.target_object.lower() in s_low
+            )
+            source_before_destination = bool(
+                ev.from_location
+                and ev.to_location
+                and _ordered_from_to_positions(
+                    s_low,
+                    ev.from_location,
+                    ev.to_location,
+                    require_from_prep=True,
+                )
+            )
+    elif ev.kind == "see":
+        source_room = ev.room.lower() in frame_low
+        destination_room = bool(ev.target_object and ev.target_object.lower() in s_low)
+        source_before_destination = True
+    elif ev.kind == "message":
+        source_room = True if ev.room.lower() not in frame_low else (ev.room.lower() in frame_low)
+        destination_room = bool(
+            ev.recipient
+            and re.search(
+                rf"\b(?:to|for|messaged|texted|notified)\s+{re.escape(ev.recipient.lower())}\b",
+                frame_low,
+            )
+        )
+        source_before_destination = True
+    else:
+        # say
+        source_room = True if ev.room.lower() not in frame_low else (ev.room.lower() in frame_low)
+        destination_room = True
+        source_before_destination = True
+
+    if ev.kind in ("enter", "leave"):
+        allowed_rooms = {
+            ev.room.lower(),
+            (ev.from_location or "").lower(),
+            (ev.to_location or "").lower(),
+        } - {""}
+    else:
+        allowed_rooms = {ev.room.lower()}
+    no_third_room = not any(
+        r.lower() not in allowed_rooms and r.lower() in frame_low for r in world.rooms
+    )
+
+    if ev.kind == "say":
+        exact_db = f"{ev.noise_level} db" in frame_low
+    else:
+        exact_db = True
+
+    if ev.kind in ("say", "message"):
+        utt_core = (ev.utterance or "").rstrip(".!?").lower()
+        verbatim_quote = bool(utt_core and utt_core in s_low)
+    else:
+        verbatim_quote = True
+
+    return {
+        "actor_name_present": actor_name_present,
+        "pronoun_before_verb": pronoun_before_verb,
+        "allowed_verb_present": allowed_verb_present,
+        "actor_before_verb": actor_before_verb,
+        "no_intervening_party": no_intervening_party,
+        "source_room": source_room,
+        "destination_room": destination_room,
+        "source_before_destination": source_before_destination,
+        "no_third_room": no_third_room,
+        "exact_db": exact_db,
+        "verbatim_quote": verbatim_quote,
+    }
+
+
+def _normalize_sentence_for_copy_check(sentence: str) -> str:
+    return re.sub(r"\s+", " ", sentence.strip()).lower()
+
+
+def diagnose_rendered_prose(
+    prose: str,
+    world: World,
+    *,
+    rendering_index: int = 0,
+    focal_agent: str | None = None,
+    goal_mode: str = DEFAULT_GOAL_MODE,
+) -> tuple[EventDiagnosticRecord, ...]:
+    """Run the non-gating diagnostic alignment pass over `prose` for `world`.
+
+    Never alters or replaces the authoritative checker verdict. Computes one `EventDiagnosticRecord`
+    per event in `world.events`.
+    """
+    _ = (focal_agent, goal_mode)
+    norm_prose = normalize_prose_line_endings(prose)
+    paragraphs = [p.strip() for p in norm_prose.split("\n\n") if p.strip()]
+    event_sentences: list[str] = []
+    if len(paragraphs) >= 2:
+        for ev_para in paragraphs[1:]:
+            event_sentences.extend(_split_prose_sentences(ev_para))
+    elif paragraphs:
+        event_sentences.extend(_split_prose_sentences(paragraphs[0]))
+
+    n_events = len(world.events)
+    if n_events == 0:
+        return ()
+
+    # 1. Replicate the sequential checker's per-event matching pass to record seq_checker_status ("PASS" / "FAIL")
+    seq_matched: list[int | None] = [None] * n_events
+    seq_status: list[str] = ["FAIL"] * n_events
+    matched_sentence_indices: list[int] = []
+    search_start = 0
+    for ev_idx, ev in enumerate(world.events):
+        prev_ev = world.events[ev_idx - 1] if ev_idx > 0 else None
+        next_ev = world.events[ev_idx + 1] if ev_idx + 1 < n_events else None
+        found_idx: int | None = None
+        if (
+            ev.kind == "enter"
+            and prev_ev is not None
+            and matched_sentence_indices
+            and search_start == matched_sentence_indices[-1] + 1
+        ):
+            s_prev = matched_sentence_indices[-1]
+            if search_start < len(event_sentences) and _sentence_matches_event(
+                event_sentences[search_start],
+                ev,
+                world.noise_threshold,
+                world=world,
+                prev_sentence=event_sentences[s_prev],
+                prev_event=prev_ev,
+            ):
+                found_idx = search_start
+            elif _sentence_matches_folded_leave_enter(
+                event_sentences[s_prev],
+                prev_ev,
+                ev,
+                world.noise_threshold,
+                world=world,
+            ):
+                found_idx = s_prev
+        if found_idx is None:
+            for s_idx in range(search_start, len(event_sentences)):
+                prev_sent = (
+                    event_sentences[s_idx - 1]
+                    if (
+                        ev_idx > 0
+                        and s_idx > 0
+                        and matched_sentence_indices
+                        and matched_sentence_indices[-1] == s_idx - 1
+                    )
+                    else None
+                )
+                next_sent = (
+                    event_sentences[s_idx + 1]
+                    if s_idx + 1 < len(event_sentences)
+                    else None
+                )
+                if _sentence_matches_event(
+                    event_sentences[s_idx],
+                    ev,
+                    world.noise_threshold,
+                    world=world,
+                    prev_sentence=prev_sent,
+                    prev_event=prev_ev,
+                    next_sentence=next_sent,
+                    next_event=next_ev,
+                ) and not (
+                    ev.kind == "leave"
+                    and ev_idx + 1 < len(world.events)
+                    and world.events[ev_idx + 1].kind == "enter"
+                    and world.events[ev_idx + 1].actor == ev.actor
+                    and (
+                        (
+                            s_idx > search_start
+                            and s_idx - 1 not in matched_sentence_indices
+                            and ev.actor.lower() in event_sentences[s_idx - 1].lower()
+                            and _sentence_matches_folded_leave_enter(
+                                event_sentences[s_idx],
+                                ev,
+                                world.events[ev_idx + 1],
+                                world.noise_threshold,
+                                world=world,
+                            )
+                        )
+                        or (
+                            any(
+                                i not in matched_sentence_indices
+                                and _sentence_matches_event(
+                                    event_sentences[i],
+                                    ev,
+                                    world.noise_threshold,
+                                    world=world,
+                                )
+                                and not _sentence_matches_folded_leave_enter(
+                                    event_sentences[i],
+                                    ev,
+                                    world.events[ev_idx + 1],
+                                    world.noise_threshold,
+                                    world=world,
+                                )
+                                for i in range(0, search_start)
+                            )
+                            and _sentence_matches_folded_leave_enter(
+                                event_sentences[s_idx],
+                                ev,
+                                world.events[ev_idx + 1],
+                                world.noise_threshold,
+                                world=world,
+                            )
+                        )
+                    )
+                ):
+                    found_idx = s_idx
+                    break
+        if found_idx is None:
+            earlier_idx = next(
+                (
+                    i
+                    for i in range(0, search_start)
+                    if i not in matched_sentence_indices
+                    and _sentence_matches_event(event_sentences[i], ev, world.noise_threshold, world=world)
+                ),
+                None,
+            )
+            if earlier_idx is not None:
+                matched_sentence_indices.append(earlier_idx)
+                continue
+            cand_sent = (
+                event_sentences[search_start]
+                if search_start < len(event_sentences)
+                else "no candidate sentence"
+            )
+            next_ev_matches_search_start = (
+                search_start < len(event_sentences)
+                and ev_idx + 1 < len(world.events)
+                and _sentence_matches_event(
+                    event_sentences[search_start],
+                    world.events[ev_idx + 1],
+                    world.noise_threshold,
+                    world=world,
+                )
+            )
+            missing_ev_kind = (
+                "absent"
+                if cand_sent == "no candidate sentence" or next_ev_matches_search_start
+                else "altered"
+            )
+            if missing_ev_kind == "altered" and search_start < len(event_sentences):
+                matched_sentence_indices.append(search_start)
+                search_start += 1
+            continue
+        seq_matched[ev_idx] = found_idx
+        seq_status[ev_idx] = "PASS"
+        matched_sentence_indices.append(found_idx)
+        search_start = found_idx + 1
+
+    # 2. Anchor + sequence alignment
+    aligned_indices: list[int | None] = [None] * n_events
+    split_events: set[int] = set()
+    if all(st == "PASS" for st in seq_status):
+        aligned_indices = list(seq_matched)
+    else:
+        anchored: dict[int, int] = {}
+        split_consumed_sentences: set[int] = set()
+        reserved_anchors: set[int] = set()
+
+        for ev_idx, ev in enumerate(world.events):
+            if ev.kind not in ("say", "message"):
+                continue
+            utt_core = (ev.utterance or "").rstrip(".!?").lower()
+            # Check for split across two adjacent sentences (s_idx, s_idx + 1)
+            found_split = False
+            if ev.kind == "say" and utt_core:
+                db_str = f"{ev.noise_level} db"
+                for s_idx in range(len(event_sentences) - 1):
+                    if s_idx in reserved_anchors or (s_idx + 1) in reserved_anchors:
+                        continue
+                    s_a = event_sentences[s_idx]
+                    s_b = event_sentences[s_idx + 1]
+                    s_a_low = s_a.lower()
+                    s_b_low = s_b.lower()
+                    a_has_db = db_str in s_a_low and utt_core not in s_a_low
+                    b_has_utt = utt_core in s_b_low and db_str not in s_b_low
+                    a_has_utt = utt_core in s_a_low and db_str not in s_a_low
+                    b_has_db = db_str in s_b_low and utt_core not in s_b_low
+                    if (a_has_db and b_has_utt) or (a_has_utt and b_has_db):
+                        combined = f"{s_a} {s_b}"
+                        comb_sub = evaluate_event_subrules(combined, ev, world)
+                        if all(
+                            (not comb_sub[k] if k == "pronoun_before_verb" else comb_sub[k])
+                            for k in DIAGNOSTIC_SUBRULE_NAMES
+                        ):
+                            anchored[ev_idx] = s_idx
+                            split_events.add(ev_idx)
+                            split_consumed_sentences.add(s_idx)
+                            split_consumed_sentences.add(s_idx + 1)
+                            reserved_anchors.add(s_idx)
+                            reserved_anchors.add(s_idx + 1)
+                            found_split = True
+                            break
+            if found_split:
+                continue
+
+            # Single-sentence anchor by verbatim quote (+ exact_db preference for say)
+            if utt_core:
+                best_s: int | None = None
+                for s_idx, sent in enumerate(event_sentences):
+                    if s_idx in reserved_anchors:
+                        continue
+                    s_low = sent.lower()
+                    if utt_core in s_low:
+                        if ev.kind != "say" or f"{ev.noise_level} db" in s_low:
+                            best_s = s_idx
+                            break
+                        if best_s is None:
+                            best_s = s_idx
+                if best_s is not None:
+                    anchored[ev_idx] = best_s
+                    reserved_anchors.add(best_s)
+
+        for ev_idx, s_idx in anchored.items():
+            aligned_indices[ev_idx] = s_idx
+
+        s_cursor = 0
+        consumed: set[int] = set(reserved_anchors) | set(split_consumed_sentences)
+        for ev_idx, ev in enumerate(world.events):
+            if ev_idx in anchored:
+                if aligned_indices[ev_idx] == s_cursor:
+                    while s_cursor in consumed:
+                        s_cursor += 1
+                continue
+
+            while s_cursor in consumed:
+                s_cursor += 1
+
+            prev_ev = world.events[ev_idx - 1] if ev_idx > 0 else None
+            next_ev = world.events[ev_idx + 1] if ev_idx + 1 < n_events else None
+            s_prev = aligned_indices[ev_idx - 1] if ev_idx > 0 else None
+            prev_was_split = (
+                ev_idx > 0
+                and (ev_idx - 1) in split_events
+                and s_prev is not None
+                and s_prev + 1 < len(event_sentences)
+            )
+            effective_prev_sent = (
+                f"{event_sentences[s_prev]} {event_sentences[s_prev + 1]}"  # type: ignore[index]
+                if prev_was_split
+                else (event_sentences[s_prev] if s_prev is not None and 0 <= s_prev < len(event_sentences) else None)
+            )
+
+            # Check folded leave+enter or arrival-half enter
+            if ev.kind == "enter" and prev_ev is not None and s_prev is not None and effective_prev_sent is not None:
+                if s_cursor < len(event_sentences) and _sentence_matches_event(
+                    event_sentences[s_cursor],
+                    ev,
+                    world.noise_threshold,
+                    world=world,
+                    prev_sentence=effective_prev_sent,
+                    prev_event=prev_ev,
+                ):
+                    aligned_indices[ev_idx] = s_cursor
+                    consumed.add(s_cursor)
+                    s_cursor += 1
+                    continue
+                if not prev_was_split and _sentence_matches_folded_leave_enter(
+                    effective_prev_sent,
+                    prev_ev,
+                    ev,
+                    world.noise_threshold,
+                    world=world,
+                ):
+                    aligned_indices[ev_idx] = s_prev
+                    continue
+
+            if s_cursor >= len(event_sentences):
+                aligned_indices[ev_idx] = None
+                continue
+
+            next_sent = (
+                event_sentences[s_cursor + 1]
+                if s_cursor + 1 < len(event_sentences)
+                else None
+            )
+            prev_sent_for_enter = (
+                effective_prev_sent
+                if (
+                    ev.kind == "enter"
+                    and s_prev is not None
+                    and (s_prev == s_cursor - 1 or (prev_was_split and s_prev == s_cursor - 2))
+                )
+                else None
+            )
+            if _sentence_matches_event(
+                event_sentences[s_cursor],
+                ev,
+                world.noise_threshold,
+                world=world,
+                prev_sentence=prev_sent_for_enter,
+                prev_event=prev_ev if prev_sent_for_enter is not None else None,
+                next_sentence=next_sent if ev.kind == "leave" else None,
+                next_event=next_ev if ev.kind == "leave" else None,
+            ):
+                aligned_indices[ev_idx] = s_cursor
+                consumed.add(s_cursor)
+                s_cursor += 1
+                continue
+
+            # Check if a leave or enter event is split across two consecutive sentences (s_cursor, s_cursor + 1):
+            # required parts (actor + verb, source room, destination room) satisfied across the pair but not within one.
+            if (
+                ev.kind in ("leave", "enter")
+                and s_cursor + 1 < len(event_sentences)
+                and (s_cursor + 1) not in consumed
+            ):
+                s_a = event_sentences[s_cursor]
+                s_b = event_sentences[s_cursor + 1]
+                sub_a = evaluate_event_subrules(
+                    s_a,
+                    ev,
+                    world,
+                    prev_sentence=prev_sent_for_enter,
+                    prev_event=prev_ev if prev_sent_for_enter is not None else None,
+                )
+                sub_b = evaluate_event_subrules(
+                    s_b,
+                    ev,
+                    world,
+                    prev_sentence=prev_sent_for_enter,
+                    prev_event=prev_ev if prev_sent_for_enter is not None else None,
+                )
+                a_passes_alone = all(
+                    (not sub_a[k] if k == "pronoun_before_verb" else sub_a[k])
+                    for k in DIAGNOSTIC_SUBRULE_NAMES
+                )
+                b_passes_alone = all(
+                    (not sub_b[k] if k == "pronoun_before_verb" else sub_b[k])
+                    for k in DIAGNOSTIC_SUBRULE_NAMES
+                )
+                if not a_passes_alone and not b_passes_alone:
+                    comb_sub = evaluate_event_subrules(
+                        f"{s_a} {s_b}",
+                        ev,
+                        world,
+                        prev_sentence=prev_sent_for_enter,
+                        prev_event=prev_ev if prev_sent_for_enter is not None else None,
+                    )
+                    comb_passes = all(
+                        (not comb_sub[k] if k == "pronoun_before_verb" else comb_sub[k])
+                        for k in DIAGNOSTIC_SUBRULE_NAMES
+                    )
+                    b_is_arrival_only_for_leave = bool(
+                        ev.kind == "leave"
+                        and re.search(r"\b(?:entered|arrived\s+in)\b", s_b.lower())
+                        and not sub_b["allowed_verb_present"]
+                    )
+                    b_needed_for_next = b_is_arrival_only_for_leave
+                    if (
+                        not b_needed_for_next
+                        and next_ev is not None
+                        and (len(event_sentences) - (s_cursor + 2)) < (n_events - (ev_idx + 1))
+                    ):
+                        sub_b_next = evaluate_event_subrules(
+                            s_b,
+                            next_ev,
+                            world,
+                            prev_sentence=s_a,
+                            prev_event=ev,
+                        )
+                        if (
+                            _sentence_matches_event(
+                                s_b,
+                                next_ev,
+                                world.noise_threshold,
+                                world=world,
+                                prev_sentence=s_a,
+                                prev_event=ev,
+                            )
+                            or (sub_b_next["allowed_verb_present"] and sub_b_next["destination_room"])
+                        ):
+                            b_needed_for_next = True
+                    if comb_passes and not b_needed_for_next:
+                        aligned_indices[ev_idx] = s_cursor
+                        split_events.add(ev_idx)
+                        consumed.add(s_cursor)
+                        consumed.add(s_cursor + 1)
+                        s_cursor += 2
+                        continue
+
+            # If current sentence does not match `ev`, check whether `ev` was omitted and `s_cursor` matches a subsequent event
+            if ev.kind in ("say", "message"):
+                # Unanchored say/message where neither quote nor dB appeared in s_cursor and s_cursor matches next_ev
+                if next_ev is not None and _sentence_matches_event(
+                    event_sentences[s_cursor],
+                    next_ev,
+                    world.noise_threshold,
+                    world=world,
+                ):
+                    aligned_indices[ev_idx] = None
+                    continue
+
+            if (
+                next_ev is not None
+                and (len(event_sentences) - s_cursor) < (n_events - ev_idx)
+                and _sentence_matches_event(
+                    event_sentences[s_cursor],
+                    next_ev,
+                    world.noise_threshold,
+                    world=world,
+                )
+            ):
+                aligned_indices[ev_idx] = None
+                continue
+
+            aligned_indices[ev_idx] = s_cursor
+            consumed.add(s_cursor)
+            s_cursor += 1
+
+    # 3. Compute route_pair_repeat_idx, subrules, copy detection, and diagnostic_class per event
+    route_counts_by_kind: Counter[tuple[str, frozenset[str]]] = Counter()
+    norm_sents = [_normalize_sentence_for_copy_check(s) for s in event_sentences]
+    records: list[EventDiagnosticRecord] = []
+
+    for ev_idx, ev in enumerate(world.events):
+        rel_pos = round(ev_idx / (n_events - 1), 6) if n_events > 1 else 0.0
+        same_actor_as_prev = bool(ev_idx > 0 and world.events[ev_idx - 1].actor == ev.actor)
+        if ev.kind in ("leave", "enter") and ev.from_location and ev.to_location:
+            pair_key = (ev.kind, frozenset({ev.from_location.lower(), ev.to_location.lower()}))
+            route_pair_repeat_idx: int | None = route_counts_by_kind[pair_key]
+            route_counts_by_kind[pair_key] += 1
+        else:
+            route_pair_repeat_idx = None
+
+        s_idx = aligned_indices[ev_idx]
+        prev_ev = world.events[ev_idx - 1] if ev_idx > 0 else None
+        s_prev = aligned_indices[ev_idx - 1] if ev_idx > 0 else None
+        if (
+            ev_idx > 0
+            and (ev_idx - 1) in split_events
+            and s_prev is not None
+            and 0 <= s_prev < len(event_sentences) - 1
+        ):
+            prev_sent: str | None = f"{event_sentences[s_prev]} {event_sentences[s_prev + 1]}"
+        else:
+            prev_sent = (
+                event_sentences[s_prev]
+                if (s_prev is not None and 0 <= s_prev < len(event_sentences))
+                else None
+            )
+
+        if s_idx is None or s_idx < 0 or s_idx >= len(event_sentences):
+            subrules = {name: False for name in DIAGNOSTIC_SUBRULE_NAMES}
+            failed_subrules = tuple(
+                name for name in DIAGNOSTIC_SUBRULE_NAMES if name != "pronoun_before_verb"
+            )
+            is_copy_of: int | None = None
+            diag_class = "TRUE_OMISSION"
+        else:
+            cand_sent = event_sentences[s_idx]
+            subrules = evaluate_event_subrules(
+                cand_sent,
+                ev,
+                world,
+                prev_sentence=prev_sent if ev.kind == "enter" else None,
+                prev_event=prev_ev if ev.kind == "enter" else None,
+            )
+            failed_subrules = tuple(
+                name
+                for name in DIAGNOSTIC_SUBRULE_NAMES
+                if (subrules[name] if name == "pronoun_before_verb" else not subrules[name])
+            )
+
+            # Check if cand_sent is byte-identical or normalized-identical to an earlier sentence that rendered a different event
+            is_copy_of = None
+            cand_norm = norm_sents[s_idx]
+            for earlier_ev_idx in range(ev_idx):
+                earlier_s_idx = aligned_indices[earlier_ev_idx]
+                if (
+                    earlier_s_idx is not None
+                    and earlier_s_idx != s_idx
+                    and 0 <= earlier_s_idx < len(event_sentences)
+                    and norm_sents[earlier_s_idx] == cand_norm
+                ):
+                    is_copy_of = earlier_s_idx
+                    break
+
+            if ev_idx in split_events:
+                diag_class = "SPLIT_ACROSS_SENTENCES"
+            elif is_copy_of is not None and (failed_subrules or seq_status[ev_idx] == "FAIL"):
+                diag_class = "EXACT_COPY_LOOP"
+            elif failed_subrules:
+                diag_class = "MALFORMED_SINGLE_SENTENCE"
+            else:
+                # Sentence satisfies all subrules for `ev`
+                reordered_ahead = any(
+                    aligned_indices[later_idx] is not None
+                    and aligned_indices[later_idx] < s_idx  # type: ignore[operator]
+                    for later_idx in range(ev_idx + 1, n_events)
+                )
+                if reordered_ahead:
+                    diag_class = "TRUE_REORDERING"
+                elif seq_status[ev_idx] == "FAIL":
+                    diag_class = "CASCADE_VICTIM"
+                else:
+                    diag_class = "VALID"
+
+        records.append(
+            EventDiagnosticRecord(
+                scenario_id=world.scenario_id,
+                rendering_index=rendering_index,
+                n_events=n_events,
+                event_index=ev_idx,
+                rel_pos=rel_pos,
+                event_kind=ev.kind,
+                actor=ev.actor,
+                same_actor_as_prev=same_actor_as_prev,
+                route_pair_repeat_idx=route_pair_repeat_idx,
+                seq_checker_status=seq_status[ev_idx],
+                actor_name_present=subrules["actor_name_present"],
+                pronoun_before_verb=subrules["pronoun_before_verb"],
+                allowed_verb_present=subrules["allowed_verb_present"],
+                actor_before_verb=subrules["actor_before_verb"],
+                no_intervening_party=subrules["no_intervening_party"],
+                source_room=subrules["source_room"],
+                destination_room=subrules["destination_room"],
+                source_before_destination=subrules["source_before_destination"],
+                no_third_room=subrules["no_third_room"],
+                exact_db=subrules["exact_db"],
+                verbatim_quote=subrules["verbatim_quote"],
+                aligned_sentence_index=s_idx,
+                failed_subrules=failed_subrules,
+                is_copy_of_sentence_index=is_copy_of,
+                diagnostic_class=diag_class,
+            )
+        )
+
+    return tuple(records)
+
+
+def write_sealed_diagnostics(
+    sealed_diagnostics_path: Path,
+    records: Sequence[EventDiagnosticRecord],
+) -> None:
+    """Write per-event `EventDiagnosticRecord` rows to `sealed_store/diagnostics.sealed.jsonl`."""
+    sealed_diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = "".join(_canonical_json_line(r.to_dict()) + "\n" for r in records)
+    _atomic_write_bytes(sealed_diagnostics_path, lines.encode("utf-8"))
+
+
+def summarize_diagnostics_public(
+    records: Sequence[EventDiagnosticRecord | Mapping[str, Any]],
+) -> dict[str, object]:
+    """Build a public counts-only summary (per `class x kind` and per `sub-rule x kind`), with no text or hashes."""
+    by_class_and_kind: dict[str, Counter[str]] = {
+        cls_name: Counter() for cls_name in DIAGNOSTIC_CLASS_ORDER
+    }
+    by_subrule_and_kind: dict[str, Counter[str]] = {
+        sub_name: Counter() for sub_name in DIAGNOSTIC_SUBRULE_NAMES
+    }
+    class_totals: Counter[str] = Counter()
+    subrule_totals: Counter[str] = Counter()
+    rendering_keys: set[tuple[str, int]] = set()
+
+    for item in records:
+        d = item.to_dict() if isinstance(item, EventDiagnosticRecord) else dict(item)
+        scen_id = str(d.get("scenario_id") or "")
+        r_idx = int(d.get("rendering_index") or 0)
+        rendering_keys.add((scen_id, r_idx))
+        ev_kind = str(d.get("event_kind") or "")
+        diag_cls = str(d.get("diagnostic_class") or "VALID")
+        by_class_and_kind.setdefault(diag_cls, Counter())[ev_kind] += 1
+        class_totals[diag_cls] += 1
+        for sub_name in d.get("failed_subrules") or ():
+            sub_str = str(sub_name)
+            by_subrule_and_kind.setdefault(sub_str, Counter())[ev_kind] += 1
+            subrule_totals[sub_str] += 1
+
+    return {
+        "schema_version": "udlab.diagnostics_summary.v1",
+        "total_renderings": len(rendering_keys),
+        "total_events": len(records),
+        "class_totals": {
+            cls_name: int(class_totals.get(cls_name, 0))
+            for cls_name in DIAGNOSTIC_CLASS_ORDER
+            if class_totals.get(cls_name, 0) > 0
+        },
+        "subrule_failure_totals": {
+            sub_name: int(subrule_totals.get(sub_name, 0))
+            for sub_name in DIAGNOSTIC_SUBRULE_NAMES
+            if subrule_totals.get(sub_name, 0) > 0
+        },
+        "by_class_and_kind": {
+            cls_name: dict(sorted(by_class_and_kind[cls_name].items()))
+            for cls_name in DIAGNOSTIC_CLASS_ORDER
+        },
+        "by_subrule_and_kind": {
+            sub_name: dict(sorted(by_subrule_and_kind[sub_name].items()))
+            for sub_name in DIAGNOSTIC_SUBRULE_NAMES
+        },
+    }
+
+
+def diagnose_paired_run(
+    paired_run: Path | Mapping[str, Any],
+    *,
+    sealed_responses_path: Path | None = None,
+    sealed_diagnostics_path: Path | None = None,
+    public_summary_out: Path | None = None,
+) -> dict[str, object]:
+    """Run the diagnostic alignment pass offline (CPU only, no model) over a sealed paired run."""
+    if isinstance(paired_run, Path):
+        if paired_run.is_dir():
+            run_dir = paired_run
+            candidates = sorted(run_dir.glob("*.json"))
+            paired_json_path = next(
+                (p for p in candidates if p.name not in (CHECKPOINT_FILENAME,)),
+                None,
+            )
+            if paired_json_path is None:
+                raise ValueError(f"No paired run JSON file found in directory '{run_dir}'.")
+            run_doc: Mapping[str, Any] = json.loads(paired_json_path.read_text(encoding="utf-8"))
+        else:
+            run_dir = paired_run.parent
+            run_doc = json.loads(paired_run.read_text(encoding="utf-8"))
+    else:
+        run_dir = Path(".")
+        run_doc = paired_run
+
+    resolved_sealed_resp = (
+        sealed_responses_path
+        if sealed_responses_path is not None
+        else (run_dir / "sealed_store" / SEALED_RESPONSES_FILENAME)
+    )
+    if not resolved_sealed_resp.is_file():
+        raise ValueError(
+            f"Sealed responses file not found at '{resolved_sealed_resp}'; cannot diagnose paired run offline."
+        )
+    resolved_sealed_diag = (
+        sealed_diagnostics_path
+        if sealed_diagnostics_path is not None
+        else (resolved_sealed_resp.parent / SEALED_DIAGNOSTICS_FILENAME)
+    )
+
+    sealed_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    for raw_line in resolved_sealed_resp.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        key = (str(row.get("scenario_id") or ""), int(row.get("rendering_index") or 0))
+        sealed_by_key[key] = row
+
+    renderings = run_doc.get("renderings")
+    if not isinstance(renderings, list):
+        raise ValueError("Paired run document is missing 'renderings' list.")
+
+    all_records: list[EventDiagnosticRecord] = []
+    for r_row in renderings:
+        if not isinstance(r_row, Mapping):
+            continue
+        scen_idx = int(r_row["scenario_index"])
+        scen_seed = int(r_row["scenario_seed"])
+        scen_id = str(r_row["scenario_id"])
+        r_idx = int(r_row["rendering_index"])
+        focal_ag = str(r_row.get("focal_agent") or "")
+        world = world_from_scenario_seed(scen_seed, index=scen_idx)
+        sealed_entry = sealed_by_key.get((scen_id, r_idx))
+        if sealed_entry is None:
+            raise ValueError(
+                f"Missing sealed response for scenario_id={scen_id!r}, rendering_index={r_idx}."
+            )
+        raw_text = str(sealed_entry.get("response_text") or "")
+        recs = diagnose_rendered_prose(
+            raw_text,
+            world,
+            rendering_index=r_idx,
+            focal_agent=focal_ag,
+        )
+        all_records.extend(recs)
+
+    write_sealed_diagnostics(resolved_sealed_diag, all_records)
+    summary = summarize_diagnostics_public(all_records)
+    if public_summary_out is not None:
+        public_summary_out.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(public_summary_out, _canonical_json_doc(summary))
+    return summary
 
 
 def mcnemar_exact_p_value(b: int, c: int) -> float:
@@ -6987,6 +8165,7 @@ def run_paired_seed_bank(
     goal_mode: str = DEFAULT_GOAL_MODE,
     output_path: Path | None = None,
     sealed_responses_path: Path | None = None,
+    sealed_diagnostics_path: Path | None = None,
     model_pin: PinnedWriterModelSpec = DEFAULT_WRITER_MODEL_PIN,
     base_url: str = DEFAULT_OLLAMA_BASE_URL,
     num_predict: int | None = None,
@@ -6998,17 +8177,41 @@ def run_paired_seed_bank(
     vram_probe: Callable[[], int] | None = None,
     prompt_token_counter: PromptTokenCounter | None = None,
     commit_sha: str | None = None,
+    server_port: int | None = None,
+    popen_factory: Callable[..., Any] | None = None,
+    presence_penalty: float | None = None,
 ) -> dict[str, object]:
     """Run attempt 0 only (`max_retries=0`) on a fixed seed bank in `goal_mode` (`copy` or `splice`).
 
     Writes per-rendering collect-all fault vectors plus mode, commit, model digest, and per-call seed.
-    Raw model drafts are never written to `output_path`; if `sealed_responses_path` is provided, raw
-    drafts are written there using the standard sealed response format.
+    Raw model drafts are never written to `output_path`; raw drafts are sealed inside `sealed_store`.
     """
     if goal_mode not in VALID_GOAL_MODES:
         raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
     seeds = _load_seed_bank_seeds(seed_bank)
     resolved_commit = commit_sha if commit_sha is not None else _resolve_git_commit_sha()
+
+    resolved_sealed_responses_path = (
+        sealed_responses_path
+        if sealed_responses_path is not None
+        else (
+            output_path.parent / "sealed_store" / SEALED_RESPONSES_FILENAME
+            if output_path is not None
+            else None
+        )
+    )
+    if resolved_sealed_responses_path is not None and resolved_sealed_responses_path.exists():
+        resolved_sealed_responses_path.unlink()
+
+    resolved_sealed_diagnostics_path = (
+        sealed_diagnostics_path
+        if sealed_diagnostics_path is not None
+        else (
+            resolved_sealed_responses_path.parent / SEALED_DIAGNOSTICS_FILENAME
+            if resolved_sealed_responses_path is not None
+            else None
+        )
+    )
 
     writer = OllamaWriter(
         model_pin=model_pin,
@@ -7020,14 +8223,19 @@ def run_paired_seed_bank(
         grant_id=grant_id,
         http_transport=http_transport,
         vram_probe=vram_probe,
-        sealed_responses_path=sealed_responses_path,
+        sealed_responses_path=resolved_sealed_responses_path,
         max_retries=0,
         short_circuit_dead_scenarios=False,
         goal_mode=goal_mode,
-        start_owned_server=False if http_transport is not None else None,
+        start_owned_server=False if (http_transport is not None and popen_factory is None) else True if popen_factory is not None else None,
+        popen_factory=popen_factory,
+        server_port=server_port,
         prompt_token_counter=prompt_token_counter,
+        presence_penalty=presence_penalty,
     )
     renderings_out: list[dict[str, object]] = []
+    all_diag_records: list[EventDiagnosticRecord] = []
+    diagnostics_error: str | None = None
     try:
         for idx, scen_seed in enumerate(seeds):
             world = world_from_scenario_seed(scen_seed, index=idx)
@@ -7040,6 +8248,7 @@ def run_paired_seed_bank(
                     goal_mode=goal_mode,
                 )
                 prev_len = len(writer.call_records)
+                prev_sealed_len = len(writer.sealed_responses)
                 prose_out = writer._chat_render(
                     world=world,
                     scenario_id=world.scenario_id,
@@ -7049,6 +8258,28 @@ def run_paired_seed_bank(
                     allow_refusal=True,
                 )
                 rec = writer.call_records[-1] if len(writer.call_records) > prev_len else None
+                sealed_rec = (
+                    writer.sealed_responses[-1]
+                    if len(writer.sealed_responses) > prev_sealed_len
+                    else None
+                )
+                raw_draft = (
+                    sealed_rec.response_text
+                    if sealed_rec is not None
+                    else (prose_out or "")
+                )
+                if diagnostics_error is None:
+                    try:
+                        all_diag_records.extend(
+                            diagnose_rendered_prose(
+                                raw_draft,
+                                world,
+                                rendering_index=r_idx,
+                                focal_agent=focal_agent,
+                            )
+                        )
+                    except Exception as diag_exc:
+                        diagnostics_error = type(diag_exc).__name__
                 call_seed = (
                     rec.seed
                     if rec is not None
@@ -7075,6 +8306,7 @@ def run_paired_seed_bank(
                         "model_layer_digest": writer.model_pin.model_layer_digest,
                         "attempt": 0,
                         "call_seed": int(call_seed),
+                        "presence_penalty": writer.presence_penalty,
                         "checks_passed": checks_passed,
                         "primary_check_id": rec.check_id if rec is not None else None,
                         "fault_check_ids": fault_check_ids,
@@ -7085,6 +8317,24 @@ def run_paired_seed_bank(
                 )
     finally:
         writer.close()
+
+    diag_summary: dict[str, object] | None = None
+    diagnostics_sealed_sha256: str | None = None
+    if diagnostics_error is None:
+        try:
+            if resolved_sealed_diagnostics_path is not None:
+                write_sealed_diagnostics(resolved_sealed_diagnostics_path, all_diag_records)
+                diag_bytes = (
+                    resolved_sealed_diagnostics_path.read_bytes()
+                    if resolved_sealed_diagnostics_path.is_file()
+                    else b""
+                )
+                diagnostics_sealed_sha256 = _sha256_bytes(diag_bytes)
+            diag_summary = summarize_diagnostics_public(all_diag_records)
+        except Exception as diag_exc:
+            diagnostics_error = type(diag_exc).__name__
+            diag_summary = None
+            diagnostics_sealed_sha256 = None
 
     total_renderings = len(renderings_out)
     passed_renderings = sum(1 for r in renderings_out if r["checks_passed"])
@@ -7101,12 +8351,14 @@ def run_paired_seed_bank(
             fault_counts[str(cid)] += 1
 
     report: dict[str, object] = {
-        "schema_version": "paired_seed_bank_run_v1",
+        "schema_version": PAIRED_SEED_BANK_SCHEMA_VERSION,
         "goal_mode": goal_mode,
         "commit": resolved_commit,
         "model": writer.ollama_tag,
         "manifest_digest": writer.manifest_digest,
         "model_layer_digest": writer.model_pin.model_layer_digest,
+        "presence_penalty": writer.presence_penalty,
+        "modelfile_parameters": writer.modelfile_parameters,
         "max_retries": 0,
         "num_scenarios": total_scenarios,
         "num_renderings": total_renderings,
@@ -7115,6 +8367,12 @@ def run_paired_seed_bank(
         "passed_scenarios": passed_scenarios,
         "scenario_pass_rate": round(passed_scenarios / total_scenarios, 6) if total_scenarios > 0 else 0.0,
         "fault_counts": dict(sorted(fault_counts.items())),
+        "diagnostics_sealed_file": (
+            SEALED_DIAGNOSTICS_FILENAME if resolved_sealed_diagnostics_path is not None else None
+        ),
+        "diagnostics_sealed_sha256": diagnostics_sealed_sha256,
+        "diagnostics_error": diagnostics_error,
+        "diagnostics_summary": diag_summary,
         "renderings": renderings_out,
     }
     if output_path is not None:
@@ -7144,6 +8402,20 @@ def compare_paired_runs(
     data_b: Mapping[str, Any] = (
         json.loads(run_b.read_text(encoding="utf-8")) if isinstance(run_b, Path) else run_b
     )
+    ver_a = str(data_a.get("schema_version") or PAIRED_SEED_BANK_SCHEMA_V1)
+    ver_b = str(data_b.get("schema_version") or PAIRED_SEED_BANK_SCHEMA_V1)
+    if (
+        ver_a not in VALID_PAIRED_SEED_BANK_SCHEMA_VERSIONS
+        or ver_b not in VALID_PAIRED_SEED_BANK_SCHEMA_VERSIONS
+    ):
+        raise ValueError(
+            f"Unsupported paired run schema_version: run_a={ver_a!r}, run_b={ver_b!r}; "
+            f"expected one of {sorted(VALID_PAIRED_SEED_BANK_SCHEMA_VERSIONS)}."
+        )
+    if ver_a != ver_b:
+        raise ValueError(
+            f"Paired run schema_version mismatch: cannot pair {ver_a!r} with {ver_b!r}."
+        )
     mode_a = str(data_a.get("goal_mode") or "mode_a")
     mode_b = str(data_b.get("goal_mode") or "mode_b")
     if mode_a == mode_b:
@@ -7270,6 +8542,7 @@ def compare_paired_runs(
 
     comparison: dict[str, object] = {
         "schema_version": "paired_seed_bank_comparison_v1",
+        "paired_run_schema_version": ver_a,
         "modes": {
             "a": label_a,
             "b": label_b,

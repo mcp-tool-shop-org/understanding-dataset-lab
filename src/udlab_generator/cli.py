@@ -35,9 +35,11 @@ from udlab_generator.render import (
     GENERATIONS_FILENAME,
     NUM_CTX_MARGIN_TOKENS,
     NUM_CTX_STEP_TOKENS,
+    SEALED_DIAGNOSTICS_FILENAME,
     SEALED_RESPONSES_FILENAME,
     VALID_GOAL_MODES,
     VALID_RETRY_FORMS,
+    EventDiagnosticRecord,
     GenerationCallRecord,
     LlamaTokenizeCounter,
     MaxNumCtxRefusalError,
@@ -60,6 +62,8 @@ from udlab_generator.render import (
     count_prompt_tokens_exact,
     decide_num_ctx,
     derive_call_seed,
+    diagnose_paired_run,
+    diagnose_rendered_prose,
     estimate_prompt_tokens,
     format_non_sealed_refusal_reason,
     kill_pid_tree,
@@ -67,7 +71,9 @@ from udlab_generator.render import (
     parse_generation_refusal_metadata,
     resolve_sealed_failing_sentence,
     run_paired_seed_bank,
+    summarize_diagnostics_public,
     summarize_fault_vector_counts,
+    write_sealed_diagnostics,
 )
 from udlab_generator.sealing import (
     SealingError,
@@ -706,9 +712,11 @@ def build_and_probe_dataset(
     multi_turn_retries: bool = False,
     short_circuit_dead_scenarios: bool = False,
     goal_mode: str = DEFAULT_GOAL_MODE,
+    presence_penalty: float | None = None,
     grant_id: str | None = None,
     resume: bool = False,
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
+    server_port: int | None = None,
     start_owned_server: bool | None = None,
     http_transport: OllamaHttpTransport | None = None,
     vram_probe: Callable[[], int] | None = None,
@@ -735,6 +743,7 @@ def build_and_probe_dataset(
             f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}."
         )
     resolved_goal_mode = str(goal_mode)
+    resolved_presence_penalty = float(presence_penalty) if presence_penalty is not None else None
     resolved_short_circuit = bool(short_circuit_dead_scenarios)
     dead_scenario_mode = (
         "short_circuit" if resolved_short_circuit else "continue_other_rendering"
@@ -781,6 +790,7 @@ def build_and_probe_dataset(
         short_circuit_dead_scenarios=resolved_short_circuit,
         retry_form=resolved_retry_form,
         goal_mode=resolved_goal_mode,
+        presence_penalty=resolved_presence_penalty,
     )
 
     if resume:
@@ -813,6 +823,7 @@ def build_and_probe_dataset(
         ollama_writer = OllamaWriter(
             model_pin=effective_writer_pin,
             base_url=ollama_base_url,
+            server_port=server_port,
             num_predict=resolved_num_predict,
             max_num_ctx=max_num_ctx,
             think=resolved_think,
@@ -828,6 +839,7 @@ def build_and_probe_dataset(
             retry_form=resolved_retry_form,
             short_circuit_dead_scenarios=resolved_short_circuit,
             goal_mode=resolved_goal_mode,
+            presence_penalty=resolved_presence_penalty,
             start_owned_server=should_own_server,
             popen_factory=popen_factory,
             prompt_token_counter=prompt_token_counter,
@@ -843,6 +855,7 @@ def build_and_probe_dataset(
                     allow_refusal=True,
                     short_circuit_dead_scenarios=resolved_short_circuit,
                 )
+                checkpoint.set_modelfile_parameters(ollama_writer.modelfile_parameters)
                 new_calls = ollama_writer.call_records[prev_calls:]
                 if pair is not None:
                     rendered_pairs.append(pair)
@@ -857,6 +870,7 @@ def build_and_probe_dataset(
         all_call_records: Sequence[GenerationCallRecord] = ollama_writer.call_records
         peak_vram_mib = ollama_writer.peak_vram_mib
         effective_grant_id = ollama_writer.grant_id
+        modelfile_parameters = ollama_writer.modelfile_parameters
         server_info = (
             ollama_writer.owned_server.to_dict()
             if ollama_writer.owned_server is not None
@@ -876,6 +890,11 @@ def build_and_probe_dataset(
             w = worlds[idx]
             t0 = time.perf_counter()
             pair = mock_writer.render_scenario_pair(w)
+            if resolved_presence_penalty is not None:
+                pair = (
+                    replace(pair[0], presence_penalty=resolved_presence_penalty),
+                    replace(pair[1], presence_penalty=resolved_presence_penalty),
+                )
             elapsed = max(0.0, time.perf_counter() - t0)
             scen_calls: list[GenerationCallRecord] = []
             for r_idx, rend in enumerate(pair):
@@ -937,6 +956,7 @@ def build_and_probe_dataset(
                     response_sha256=resp_sha,
                     thinking_sha256=think_sha,
                     goal_mode=resolved_goal_mode,
+                    presence_penalty=resolved_presence_penalty,
                 )
                 all_mock_calls.append(rec)
                 scen_calls.append(rec)
@@ -960,6 +980,7 @@ def build_and_probe_dataset(
                         response_sha256=resp_sha,
                         thinking_sha256=think_sha,
                         goal_mode=resolved_goal_mode,
+                        presence_penalty=resolved_presence_penalty,
                     ),
                 )
 
@@ -973,7 +994,44 @@ def build_and_probe_dataset(
         all_call_records = all_mock_calls
         peak_vram_mib = 0
         effective_grant_id = "cpu-mock"
+        modelfile_parameters = None
         server_info = None
+
+    diagnostics_error: str | None = None
+    diagnostics_summary: dict[str, object] | None = None
+    diagnostics_sealed_sha256: str | None = None
+    try:
+        worlds_by_sid = {w.scenario_id: w for w in worlds}
+        diag_records: list[EventDiagnosticRecord] = []
+        if sealed_responses_path.is_file():
+            final_sealed_by_rend: dict[tuple[str, int], dict[str, Any]] = {}
+            for sr_line in sealed_responses_path.read_text(encoding="utf-8").splitlines():
+                if sr_line.strip():
+                    sr_obj = json.loads(sr_line)
+                    if isinstance(sr_obj, dict):
+                        final_sealed_by_rend[(str(sr_obj["scenario_id"]), int(sr_obj["rendering_index"]))] = sr_obj
+            for (sid, r_idx), sr_obj in final_sealed_by_rend.items():
+                if sid in worlds_by_sid:
+                    diag_records.extend(
+                        diagnose_rendered_prose(
+                            str(sr_obj.get("response_text") or ""),
+                            worlds_by_sid[sid],
+                            rendering_index=r_idx,
+                            focal_agent=str(sr_obj.get("focal_agent") or ""),
+                            goal_mode=str(sr_obj.get("goal_mode") or resolved_goal_mode),
+                        )
+                    )
+        sealed_diagnostics_path = sealed_dir / SEALED_DIAGNOSTICS_FILENAME
+        write_sealed_diagnostics(sealed_diagnostics_path, diag_records)
+        diagnostics_bytes = (
+            sealed_diagnostics_path.read_bytes() if sealed_diagnostics_path.is_file() else b""
+        )
+        diagnostics_sealed_sha256 = hashlib.sha256(diagnostics_bytes).hexdigest()
+        diagnostics_summary = summarize_diagnostics_public(diag_records)
+    except Exception as diag_exc:
+        diagnostics_error = type(diag_exc).__name__
+        diagnostics_summary = None
+        diagnostics_sealed_sha256 = None
 
     generations_bytes = generations_path.read_bytes() if generations_path.is_file() else b""
     generations_sha256 = hashlib.sha256(generations_bytes).hexdigest()
@@ -986,6 +1044,8 @@ def build_and_probe_dataset(
         "writer": writer_kind,
         "writer_pin": effective_writer_pin.to_dict(),
         "goal_mode": resolved_goal_mode,
+        "presence_penalty": resolved_presence_penalty,
+        "modelfile_parameters": modelfile_parameters,
         "think": resolved_think,
         "num_predict": resolved_num_predict,
         "max_num_ctx": max_num_ctx,
@@ -1000,6 +1060,9 @@ def build_and_probe_dataset(
         "generations_sha256": generations_sha256,
         "responses_sealed_file": SEALED_RESPONSES_FILENAME,
         "responses_sealed_sha256": responses_sealed_sha256,
+        "diagnostics_sealed_file": SEALED_DIAGNOSTICS_FILENAME,
+        "diagnostics_sealed_sha256": diagnostics_sealed_sha256,
+        "diagnostics_error": diagnostics_error,
         "checkpoint_chain_head_sha256": checkpoint.chain_head_sha256,
     }
 
@@ -1032,6 +1095,8 @@ def build_and_probe_dataset(
         "writer": writer_kind,
         "writer_pin": effective_writer_pin.to_dict(),
         "goal_mode": resolved_goal_mode,
+        "presence_penalty": resolved_presence_penalty,
+        "modelfile_parameters": modelfile_parameters,
         "max_retries": max_retries,
         "retry_form": resolved_retry_form,
         "short_circuit_dead_scenarios": resolved_short_circuit,
@@ -1052,6 +1117,10 @@ def build_and_probe_dataset(
         "generations_sha256": generations_sha256,
         "responses_sealed_file": SEALED_RESPONSES_FILENAME,
         "responses_sealed_sha256": responses_sealed_sha256,
+        "diagnostics_sealed_file": SEALED_DIAGNOSTICS_FILENAME,
+        "diagnostics_sealed_sha256": diagnostics_sealed_sha256,
+        "diagnostics_error": diagnostics_error,
+        "diagnostics_summary": diagnostics_summary,
         "checkpoint_chain_head_sha256": checkpoint.chain_head_sha256,
         "recount_verification": recount_verification,
         "d_key_pattern_distribution": d_distribution,
@@ -1073,7 +1142,13 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     http_transport: OllamaHttpTransport | None = None,
+    vram_probe: Callable[[], int] | None = None,
+    popen_factory: Callable[..., Any] | None = None,
 ) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == "diagnose-paired":
+        raw_argv = ["--diagnose-paired", *raw_argv[1:]]
+
     parser = argparse.ArgumentParser(
         prog="udlab-gen",
         description="Generate, write, seal, verify, and probe udlab release-1 cognitive-empathy scenarios.",
@@ -1225,11 +1300,37 @@ def main(
         "--paired-out",
         type=Path,
         default=None,
-        help="Optional output JSON path for --paired-seed-bank or --paired-compare.",
+        help="Optional output JSON path for --paired-seed-bank, --paired-compare, or --diagnose-paired.",
     )
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "--diagnose-paired",
+        type=Path,
+        default=None,
+        help="Run the diagnostic alignment pass offline over a sealed paired run (CPU only, no model).",
+    )
+    parser.add_argument(
+        "--server-port",
+        type=int,
+        default=None,
+        help="Pin the port for the owned Ollama server.",
+    )
+    parser.add_argument(
+        "--presence-penalty",
+        type=float,
+        default=None,
+        help="Optional presence_penalty passed in Ollama request options (omitted when not set).",
+    )
+    args = parser.parse_args(raw_argv)
 
     try:
+        if args.diagnose_paired is not None:
+            diag_summary = diagnose_paired_run(
+                args.diagnose_paired,
+                public_summary_out=args.paired_out,
+            )
+            print(json.dumps(diag_summary, indent=2, sort_keys=True))
+            return 0
+
         if args.paired_compare is not None:
             comp = compare_paired_runs(
                 args.paired_compare[0],
@@ -1244,16 +1345,23 @@ def main(
                 prompt_token_counter = resolve_prompt_token_counter(args.llama_tokenize, args.writer_gguf)
             except (ValueError, FileNotFoundError) as exc:
                 parser.error(str(exc))
+            paired_base_dir = args.paired_out.parent if args.paired_out is not None else args.out_dir
+            paired_sealed_responses_path = paired_base_dir / "sealed_store" / SEALED_RESPONSES_FILENAME
             paired_res = run_paired_seed_bank(
                 seed_bank=args.paired_seed_bank,
                 goal_mode=args.goal_mode,
+                presence_penalty=args.presence_penalty,
                 output_path=args.paired_out,
+                sealed_responses_path=paired_sealed_responses_path,
+                server_port=args.server_port,
                 num_predict=args.num_predict,
                 max_num_ctx=args.max_num_ctx,
                 think=bool(args.think),
                 vram_halt_mib=args.vram_halt_mib,
                 grant_id=args.grant_id,
                 http_transport=http_transport,
+                vram_probe=vram_probe,
+                popen_factory=popen_factory,
                 prompt_token_counter=prompt_token_counter,
             )
             print(json.dumps(paired_res, indent=2, sort_keys=True))
@@ -1306,8 +1414,13 @@ def main(
             multi_turn_retries=bool(args.multi_turn_retries),
             short_circuit_dead_scenarios=bool(args.short_circuit_dead_scenarios),
             goal_mode=args.goal_mode,
+            presence_penalty=args.presence_penalty,
             grant_id=args.grant_id,
             resume=args.resume,
+            server_port=args.server_port,
+            http_transport=http_transport,
+            vram_probe=vram_probe,
+            popen_factory=popen_factory,
             prompt_token_counter=prompt_token_counter,
         )
         print(json.dumps(summary, indent=2, sort_keys=True))

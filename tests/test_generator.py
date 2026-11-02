@@ -11085,9 +11085,20 @@ def test_104_cli_paired_seed_bank_with_fake_transport(tmp_path: Path) -> None:
     assert rc == 0
     assert paired_out_file.is_file()
     out_doc = json.loads(paired_out_file.read_text(encoding="utf-8"))
-    assert out_doc["schema_version"] == "paired_seed_bank_run_v1"
+    import re
+    import subprocess
+
+    expected_head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(Path(__file__).resolve().parent),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert re.fullmatch(r"[0-9a-f]{40}", expected_head_sha) is not None
+    assert out_doc["schema_version"] == "paired_seed_bank_run_v2"
     assert out_doc["goal_mode"] == "splice"
-    assert isinstance(out_doc["commit"], str) and len(out_doc["commit"]) >= 7
+    assert out_doc["commit"] == expected_head_sha
     assert out_doc["manifest_digest"] == PINNED_WRITER_MANIFEST_DIGEST
     assert out_doc["max_retries"] == 0
     assert out_doc["num_scenarios"] == 2
@@ -11105,11 +11116,1479 @@ def test_104_cli_paired_seed_bank_with_fake_transport(tmp_path: Path) -> None:
         assert row["scenario_seed"] == scen_seed
         assert row["rendering_index"] == r_idx
         assert row["goal_mode"] == "splice"
-        assert row["commit"] == out_doc["commit"]
+        assert row["commit"] == expected_head_sha
         assert row["manifest_digest"] == PINNED_WRITER_MANIFEST_DIGEST
         assert row["call_seed"] == derive_call_seed(scen_seed, r_idx, 0)
         assert row["fault_check_ids"] == expected_faults[idx]
         assert row["checks_passed"] is (expected_faults[idx] == [])
+
+
+def test_105_diagnostic_alignment_pass_classes_cascade_and_non_gating(tmp_path: Path) -> None:
+    """Test 105 (Card udlab-diagnostics-presence, Build Item 1):
+    - Diagnostic alignment pass (never a gate) computes per-event records with all required fields,
+      11 atomic sub-rule booleans, anchor + sequence alignment, failed_subrules, is_copy_of_sentence_index,
+      and diagnostic_class in {VALID, CASCADE_VICTIM, SPLIT_ACROSS_SENTENCES, MALFORMED_SINGLE_SENTENCE,
+      EXACT_COPY_LOOP, TRUE_REORDERING, TRUE_OMISSION}.
+    - Constructed prose for each class with literal expected records, including a cascade case (one
+      malformed say followed by valid sentences) showing which later events the sequential checker refuses
+      and that the diagnostic marks them CASCADE_VICTIM.
+    - Writes sealed diagnostics JSONL inside sealed_store and a public summary with counts only (no text,
+      no sentence content, no hashes of sentences).
+    - Verifies checker verdicts are byte-identical with and without the diagnostic pass.
+    """
+    from dataclasses import replace
+    from udlab_generator import (
+        DIAGNOSTIC_SUBRULE_NAMES,
+        SEALED_DIAGNOSTICS_FILENAME,
+        VALID_DIAGNOSTIC_CLASSES,
+        RenderCheckError,
+        check_rendered_prose,
+        collect_prose_faults,
+        diagnose_rendered_prose,
+        render_world_template,
+        summarize_diagnostics_public,
+        write_sealed_diagnostics,
+    )
+
+    assert VALID_DIAGNOSTIC_CLASSES == frozenset(
+        {
+            "VALID",
+            "CASCADE_VICTIM",
+            "SPLIT_ACROSS_SENTENCES",
+            "MALFORMED_SINGLE_SENTENCE",
+            "EXACT_COPY_LOOP",
+            "TRUE_REORDERING",
+            "TRUE_OMISSION",
+        }
+    )
+    assert DIAGNOSTIC_SUBRULE_NAMES == (
+        "actor_name_present",
+        "pronoun_before_verb",
+        "allowed_verb_present",
+        "actor_before_verb",
+        "no_intervening_party",
+        "source_room",
+        "destination_room",
+        "source_before_destination",
+        "no_third_room",
+        "exact_db",
+        "verbatim_quote",
+    )
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    evs = (
+        Event(
+            step=1,
+            kind="say",
+            actor="Eva",
+            room="bindery room",
+            target_object="brass ledger",
+            from_location=None,
+            to_location="linen bin",
+            utterance="The brass ledger is stored in the linen bin.",
+            noise_level=60,
+        ),
+        Event(
+            step=2,
+            kind="leave",
+            actor="Eva",
+            room="bindery room",
+            from_location="bindery room",
+            to_location="sorting room",
+        ),
+        Event(
+            step=3,
+            kind="enter",
+            actor="Eva",
+            room="sorting room",
+            from_location="bindery room",
+            to_location="sorting room",
+        ),
+        Event(
+            step=4,
+            kind="leave",
+            actor="Eva",
+            room="sorting room",
+            from_location="sorting room",
+            to_location="bindery room",
+        ),
+        Event(
+            step=5,
+            kind="enter",
+            actor="Eva",
+            room="bindery room",
+            from_location="sorting room",
+            to_location="bindery room",
+        ),
+    )
+    w_diag = replace(w0, events=evs)
+    base_valid = render_world_template(w_diag, "Eva")
+    setup_p1, events_p2 = base_valid.split("\n\n", 1)
+
+    all_pass_subrules = {
+        "actor_name_present": True,
+        "pronoun_before_verb": False,
+        "allowed_verb_present": True,
+        "actor_before_verb": True,
+        "no_intervening_party": True,
+        "source_room": True,
+        "destination_room": True,
+        "source_before_destination": True,
+        "no_third_room": True,
+        "exact_db": True,
+        "verbatim_quote": True,
+    }
+
+    # 1. VALID class: all 5 events pass sequential checker and align 0..4
+    recs_valid = [r.to_dict() for r in diagnose_rendered_prose(base_valid, w_diag, rendering_index=0, focal_agent="Eva")]
+    expected_valid = [
+        {
+            "scenario_id": "scen_0000",
+            "rendering_index": 0,
+            "n_events": 5,
+            "event_index": 0,
+            "rel_pos": 0.0,
+            "event_kind": "say",
+            "actor": "Eva",
+            "same_actor_as_prev": False,
+            "route_pair_repeat_idx": None,
+            "seq_checker_status": "PASS",
+            **all_pass_subrules,
+            "subrules": dict(all_pass_subrules),
+            "aligned_sentence_index": 0,
+            "failed_subrules": [],
+            "is_copy_of_sentence_index": None,
+            "diagnostic_class": "VALID",
+        },
+        {
+            "scenario_id": "scen_0000",
+            "rendering_index": 0,
+            "n_events": 5,
+            "event_index": 1,
+            "rel_pos": 0.25,
+            "event_kind": "leave",
+            "actor": "Eva",
+            "same_actor_as_prev": True,
+            "route_pair_repeat_idx": 0,
+            "seq_checker_status": "PASS",
+            **all_pass_subrules,
+            "subrules": dict(all_pass_subrules),
+            "aligned_sentence_index": 1,
+            "failed_subrules": [],
+            "is_copy_of_sentence_index": None,
+            "diagnostic_class": "VALID",
+        },
+        {
+            "scenario_id": "scen_0000",
+            "rendering_index": 0,
+            "n_events": 5,
+            "event_index": 2,
+            "rel_pos": 0.5,
+            "event_kind": "enter",
+            "actor": "Eva",
+            "same_actor_as_prev": True,
+            "route_pair_repeat_idx": 0,
+            "seq_checker_status": "PASS",
+            **all_pass_subrules,
+            "subrules": dict(all_pass_subrules),
+            "aligned_sentence_index": 2,
+            "failed_subrules": [],
+            "is_copy_of_sentence_index": None,
+            "diagnostic_class": "VALID",
+        },
+        {
+            "scenario_id": "scen_0000",
+            "rendering_index": 0,
+            "n_events": 5,
+            "event_index": 3,
+            "rel_pos": 0.75,
+            "event_kind": "leave",
+            "actor": "Eva",
+            "same_actor_as_prev": True,
+            "route_pair_repeat_idx": 1,
+            "seq_checker_status": "PASS",
+            **all_pass_subrules,
+            "subrules": dict(all_pass_subrules),
+            "aligned_sentence_index": 3,
+            "failed_subrules": [],
+            "is_copy_of_sentence_index": None,
+            "diagnostic_class": "VALID",
+        },
+        {
+            "scenario_id": "scen_0000",
+            "rendering_index": 0,
+            "n_events": 5,
+            "event_index": 4,
+            "rel_pos": 1.0,
+            "event_kind": "enter",
+            "actor": "Eva",
+            "same_actor_as_prev": True,
+            "route_pair_repeat_idx": 1,
+            "seq_checker_status": "PASS",
+            **all_pass_subrules,
+            "subrules": dict(all_pass_subrules),
+            "aligned_sentence_index": 4,
+            "failed_subrules": [],
+            "is_copy_of_sentence_index": None,
+            "diagnostic_class": "VALID",
+        },
+    ]
+    assert recs_valid == expected_valid
+
+    # 2. CASCADE_VICTIM case: one malformed say (missing "60 dB") followed by valid sentences.
+    # The sequential checker refuses event_index=0 (1-based 1, say) AND cascades to refuse
+    # event_index=2 (1-based 3, enter) and event_index=3 (1-based 4, leave).
+    # The diagnostic pass marks event_index=0 as MALFORMED_SINGLE_SENTENCE and marks
+    # event_index=2 and event_index=3 as CASCADE_VICTIM.
+    cascade_p2 = (
+        'In the bindery room, Eva walked from the bindery room into the sorting room and said: '
+        '"The brass ledger is stored in the linen bin." '
+        "Eva exited the bindery room heading toward the sorting room. "
+        "Eva entered the sorting room. "
+        "Eva walked through the doorway from the sorting room into the bindery room."
+    )
+    cascade_prose = f"{setup_p1}\n\n{cascade_p2}"
+    seq_faults_cascade = collect_prose_faults(cascade_prose, w_diag, focal_agent="Eva")
+    assert [(f.check_id, f.event_index, f.event_kind) for f in seq_faults_cascade] == [
+        ("c_fidelity_missing_event", 1, "say"),
+        ("c_fidelity_missing_event", 3, "enter"),
+        ("c_fidelity_missing_event", 4, "leave"),
+    ]
+    recs_cascade = [r.to_dict() for r in diagnose_rendered_prose(cascade_prose, w_diag, rendering_index=0, focal_agent="Eva")]
+    no_db_subrules = {**all_pass_subrules, "no_third_room": False, "exact_db": False}
+    expected_cascade = [
+        {
+            **expected_valid[0],
+            "seq_checker_status": "FAIL",
+            **no_db_subrules,
+            "subrules": dict(no_db_subrules),
+            "aligned_sentence_index": 0,
+            "failed_subrules": ["no_third_room", "exact_db"],
+            "diagnostic_class": "MALFORMED_SINGLE_SENTENCE",
+        },
+        {
+            **expected_valid[1],
+            "seq_checker_status": "PASS",
+            "aligned_sentence_index": 1,
+            "diagnostic_class": "VALID",
+        },
+        {
+            **expected_valid[2],
+            "seq_checker_status": "FAIL",
+            "aligned_sentence_index": 2,
+            "diagnostic_class": "CASCADE_VICTIM",
+        },
+        {
+            **expected_valid[3],
+            "seq_checker_status": "FAIL",
+            "aligned_sentence_index": 3,
+            "diagnostic_class": "CASCADE_VICTIM",
+        },
+        {
+            **expected_valid[4],
+            "seq_checker_status": "PASS",
+            "aligned_sentence_index": 3,
+            "diagnostic_class": "VALID",
+        },
+    ]
+    assert recs_cascade == expected_cascade
+
+    # 3. SPLIT_ACROSS_SENTENCES: event 0 (say) split across s0 (has 60 dB, missing quote) and s1 (has quote, missing 60 dB)
+    split_p2 = (
+        "From Eva's station, in the bindery room at 60 dB, Eva spoke. "
+        'Eva said: "The brass ledger is stored in the linen bin." '
+        "From Eva's station, Eva exited the bindery room heading toward the sorting room. "
+        "From Eva's station, Eva walked through the doorway from the bindery room into the sorting room. "
+        "From Eva's station, Eva exited the sorting room heading toward the bindery room. "
+        "From Eva's station, Eva walked through the doorway from the sorting room into the bindery room."
+    )
+    split_prose = f"{setup_p1}\n\n{split_p2}"
+    recs_split = [r.to_dict() for r in diagnose_rendered_prose(split_prose, w_diag, rendering_index=0, focal_agent="Eva")]
+    split_s0_subrules = {**all_pass_subrules, "verbatim_quote": False}
+    assert recs_split == [
+        {
+            **expected_valid[0],
+            "seq_checker_status": "FAIL",
+            **split_s0_subrules,
+            "subrules": dict(split_s0_subrules),
+            "aligned_sentence_index": 0,
+            "failed_subrules": ["verbatim_quote"],
+            "diagnostic_class": "SPLIT_ACROSS_SENTENCES",
+        },
+        {**expected_valid[1], "aligned_sentence_index": 2},
+        {**expected_valid[2], "aligned_sentence_index": 3},
+        {**expected_valid[3], "aligned_sentence_index": 4},
+        {**expected_valid[4], "aligned_sentence_index": 5},
+    ]
+
+    # 4. MALFORMED_SINGLE_SENTENCE: event 4 (enter) uses pronoun "she" before verb instead of actor "Eva"
+    malformed_p2 = events_p2.replace(
+        "From Eva's station, Eva walked through the doorway from the sorting room into the bindery room.",
+        "Next, she walked through the doorway from the sorting room into the bindery room.",
+    )
+    malformed_prose = f"{setup_p1}\n\n{malformed_p2}"
+    recs_malformed = [
+        r.to_dict() for r in diagnose_rendered_prose(malformed_prose, w_diag, rendering_index=0, focal_agent="Eva")
+    ]
+    pronoun_subrules = {
+        **all_pass_subrules,
+        "actor_name_present": False,
+        "pronoun_before_verb": True,
+        "actor_before_verb": False,
+    }
+    assert recs_malformed == [
+        expected_valid[0],
+        expected_valid[1],
+        expected_valid[2],
+        expected_valid[3],
+        {
+            **expected_valid[4],
+            "seq_checker_status": "FAIL",
+            **pronoun_subrules,
+            "subrules": dict(pronoun_subrules),
+            "aligned_sentence_index": 4,
+            "failed_subrules": ["actor_name_present", "pronoun_before_verb", "actor_before_verb"],
+            "diagnostic_class": "MALFORMED_SINGLE_SENTENCE",
+        },
+    ]
+
+    # 5. EXACT_COPY_LOOP: event 3 (leave sorting -> bindery) repeats s1 (leave bindery -> sorting) verbatim
+    copy_loop_p2 = events_p2.replace(
+        "From Eva's station, Eva exited the sorting room heading toward the bindery room.",
+        "From Eva's station, Eva exited the bindery room heading toward the sorting room.",
+    )
+    copy_loop_prose = f"{setup_p1}\n\n{copy_loop_p2}"
+    recs_copy_loop = [
+        r.to_dict() for r in diagnose_rendered_prose(copy_loop_prose, w_diag, rendering_index=0, focal_agent="Eva")
+    ]
+    copy_subrules = {
+        **all_pass_subrules,
+        "source_before_destination": False,
+    }
+    assert recs_copy_loop == [
+        expected_valid[0],
+        expected_valid[1],
+        expected_valid[2],
+        {
+            **expected_valid[3],
+            "seq_checker_status": "FAIL",
+            **copy_subrules,
+            "subrules": dict(copy_subrules),
+            "aligned_sentence_index": 3,
+            "failed_subrules": ["source_before_destination"],
+            "is_copy_of_sentence_index": 1,
+            "diagnostic_class": "EXACT_COPY_LOOP",
+        },
+        expected_valid[4],
+    ]
+
+    # 6. TRUE_REORDERING: event 0 (say) is placed at sentence index 2 (after events 1 and 2)
+    reordered_p2 = (
+        "From Eva's station, Eva exited the bindery room heading toward the sorting room. "
+        "From Eva's station, Eva walked through the doorway from the bindery room into the sorting room. "
+        'From Eva\'s station, in the bindery room at 60 dB (at or above the 50 dB doorway threshold, audible in the room and doorway-adjacent rooms), Eva said: "The brass ledger is stored in the linen bin." '
+        "From Eva's station, Eva exited the sorting room heading toward the bindery room. "
+        "From Eva's station, Eva walked through the doorway from the sorting room into the bindery room."
+    )
+    reordered_prose = f"{setup_p1}\n\n{reordered_p2}"
+    recs_reordered = [
+        r.to_dict() for r in diagnose_rendered_prose(reordered_prose, w_diag, rendering_index=0, focal_agent="Eva")
+    ]
+    assert recs_reordered == [
+        {
+            **expected_valid[0],
+            "seq_checker_status": "PASS",
+            "aligned_sentence_index": 2,
+            "diagnostic_class": "TRUE_REORDERING",
+        },
+        {
+            **expected_valid[1],
+            "seq_checker_status": "FAIL",
+            "aligned_sentence_index": 0,
+            "diagnostic_class": "CASCADE_VICTIM",
+        },
+        {
+            **expected_valid[2],
+            "seq_checker_status": "FAIL",
+            "aligned_sentence_index": 1,
+            "diagnostic_class": "CASCADE_VICTIM",
+        },
+        expected_valid[3],
+        expected_valid[4],
+    ]
+
+    # 7. TRUE_OMISSION: event 0 (say) sentence is completely omitted from the prose
+    omitted_p2 = (
+        "From Eva's station, Eva exited the bindery room heading toward the sorting room. "
+        "From Eva's station, Eva walked through the doorway from the bindery room into the sorting room. "
+        "From Eva's station, Eva exited the sorting room heading toward the bindery room. "
+        "From Eva's station, Eva walked through the doorway from the sorting room into the bindery room."
+    )
+    omitted_prose = f"{setup_p1}\n\n{omitted_p2}"
+    recs_omitted = [
+        r.to_dict() for r in diagnose_rendered_prose(omitted_prose, w_diag, rendering_index=0, focal_agent="Eva")
+    ]
+    omitted_subrules = {name: False for name in DIAGNOSTIC_SUBRULE_NAMES}
+    assert recs_omitted == [
+        {
+            **expected_valid[0],
+            "seq_checker_status": "FAIL",
+            **omitted_subrules,
+            "subrules": dict(omitted_subrules),
+            "aligned_sentence_index": None,
+            "failed_subrules": [name for name in DIAGNOSTIC_SUBRULE_NAMES if name != "pronoun_before_verb"],
+            "is_copy_of_sentence_index": None,
+            "diagnostic_class": "TRUE_OMISSION",
+        },
+        {**expected_valid[1], "aligned_sentence_index": 0},
+        {**expected_valid[2], "aligned_sentence_index": 1},
+        {**expected_valid[3], "aligned_sentence_index": 2},
+        {**expected_valid[4], "aligned_sentence_index": 3},
+    ]
+
+    # 8. Sealed diagnostics JSONL inside sealed_store and public counts-only summary
+    all_diag_records = (
+        list(diagnose_rendered_prose(base_valid, w_diag, rendering_index=0, focal_agent="Eva"))
+        + list(diagnose_rendered_prose(cascade_prose, w_diag, rendering_index=1, focal_agent="Eva"))
+    )
+    sealed_diag_path = tmp_path / "sealed_store" / SEALED_DIAGNOSTICS_FILENAME
+    write_sealed_diagnostics(sealed_diag_path, all_diag_records)
+    assert sealed_diag_path.is_file()
+    loaded_lines = [json.loads(line) for line in sealed_diag_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(loaded_lines) == 10
+
+    pub_summary = summarize_diagnostics_public(all_diag_records)
+    pub_summary_json = json.dumps(pub_summary, sort_keys=True)
+    assert "linen bin" not in pub_summary_json
+    assert "bindery room" not in pub_summary_json
+    assert "Eva" not in pub_summary_json
+    assert "sha256" not in pub_summary_json
+    assert pub_summary["total_renderings"] == 2
+    assert pub_summary["total_events"] == 10
+    assert pub_summary["by_class_and_kind"]["VALID"] == {"enter": 3, "leave": 3, "say": 1}
+    assert pub_summary["by_class_and_kind"]["CASCADE_VICTIM"] == {"enter": 1, "leave": 1}
+    assert pub_summary["by_class_and_kind"]["MALFORMED_SINGLE_SENTENCE"] == {"say": 1}
+    assert pub_summary["by_subrule_and_kind"]["exact_db"] == {"say": 1}
+    assert pub_summary["by_subrule_and_kind"]["no_third_room"] == {"say": 1}
+
+    # 9. Authoritative checker verdicts are byte-identical with and without the diagnostic pass
+    for sample_prose in (base_valid, cascade_prose, split_prose, malformed_prose, copy_loop_prose, reordered_prose, omitted_prose):
+        faults_before = [f.to_dict() for f in collect_prose_faults(sample_prose, w_diag, focal_agent="Eva")]
+        try:
+            verdict_before: object = check_rendered_prose(sample_prose, w_diag, focal_agent="Eva")
+        except RenderCheckError as exc_b:
+            verdict_before = (exc_b.check_id, str(exc_b), exc_b.event_index, exc_b.event_kind, exc_b.failure_kind)
+
+        _ = diagnose_rendered_prose(sample_prose, w_diag, rendering_index=0, focal_agent="Eva")
+
+        faults_after = [f.to_dict() for f in collect_prose_faults(sample_prose, w_diag, focal_agent="Eva")]
+        try:
+            verdict_after: object = check_rendered_prose(sample_prose, w_diag, focal_agent="Eva")
+        except RenderCheckError as exc_a:
+            verdict_after = (exc_a.check_id, str(exc_a), exc_a.event_index, exc_a.event_kind, exc_a.failure_kind)
+
+        assert faults_before == faults_after
+        assert verdict_before == verdict_after
+
+
+def test_106_paired_seed_bank_seals_raw_drafts_and_offline_diagnose_cli(tmp_path: Path) -> None:
+    """Test 106 (Card udlab-diagnostics-presence, Build Item 2):
+    - `--paired-seed-bank` always passes a sealed-responses path inside the run's `sealed_store`,
+      keeping raw drafts sealed for offline diagnosis with no raw text in the public paired output.
+    - CLI subcommand (`--diagnose-paired` and `diagnose-paired`) runs the diagnostic pass offline
+      over a sealed paired run and writes the sealed diagnostics JSONL + public counts summary (CPU only, no model).
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+        SEALED_RESPONSES_FILENAME,
+        render_world_template_goal_tokens,
+        world_from_scenario_seed,
+    )
+    from udlab_generator.cli import main as cli_main
+
+    seeds = [20261110, 20261111]
+    seed_bank_file = tmp_path / "seed_bank_106.json"
+    seed_bank_file.write_text(json.dumps(seeds), encoding="utf-8")
+    run_dir = tmp_path / "paired_run_106"
+    paired_out_file = run_dir / "paired_out.json"
+
+    worlds = [world_from_scenario_seed(s, index=i) for i, s in enumerate(seeds)]
+    secret_draft_marker = "I am certain the brass ledger was moved into the cedar shelf."
+    r0_w0 = render_world_template_goal_tokens(worlds[0], worlds[0].agents[0])
+    assert secret_draft_marker in r0_w0
+    # Make scenario 1 rendering 0 have a malformed move (pronoun "she" instead of non-focal actor name)
+    r0_w1_valid = render_world_template_goal_tokens(worlds[1], worlds[1].agents[0])
+    p1_w1, p2_w1 = r0_w1_valid.split("\n\n", 1)
+    non_focal_move_actor = next(
+        e.actor for e in worlds[1].events if e.kind == "move" and e.actor != worlds[1].agents[0]
+    )
+    p2_w1_malformed = p2_w1.replace(f", {non_focal_move_actor} moved", ", she moved", 1)
+    r0_w1_malformed = f"{p1_w1}\n\n{p2_w1_malformed}"
+
+    responses = [
+        r0_w0,
+        render_world_template_goal_tokens(worlds[0], worlds[0].agents[1]),
+        r0_w1_malformed,
+        render_world_template_goal_tokens(worlds[1], worlds[1].agents[1]),
+    ]
+    call_idx = 0
+
+    def _fake_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal call_idx
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            txt = responses[call_idx]
+            call_idx += 1
+            return {
+                "message": {"role": "assistant", "content": txt},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3020,
+                "eval_count": 750,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    rc = cli_main(
+        [
+            "--paired-seed-bank",
+            str(seed_bank_file),
+            "--goal-mode",
+            "splice",
+            "--grant-id",
+            "test-grant-106",
+            "--paired-out",
+            str(paired_out_file),
+        ],
+        http_transport=_fake_transport,
+    )
+    assert rc == 0
+    assert paired_out_file.is_file()
+    public_paired_raw = paired_out_file.read_text(encoding="utf-8")
+    assert secret_draft_marker not in public_paired_raw
+    assert "response_text" not in public_paired_raw
+
+    sealed_resp_file = run_dir / "sealed_store" / SEALED_RESPONSES_FILENAME
+    assert sealed_resp_file.is_file()
+    sealed_rows = [json.loads(line) for line in sealed_resp_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(sealed_rows) == 4
+    assert sealed_rows[0]["response_text"] == r0_w0
+
+    # Run offline diagnostic CLI subcommand (CPU only, no http_transport / no model)
+    summary_out_file = run_dir / "diagnostics_summary.json"
+    rc_diag = cli_main(
+        [
+            "diagnose-paired",
+            str(paired_out_file),
+            "--paired-out",
+            str(summary_out_file),
+        ]
+    )
+    assert rc_diag == 0
+    from udlab_generator import SEALED_DIAGNOSTICS_FILENAME
+
+    sealed_diag_file = run_dir / "sealed_store" / SEALED_DIAGNOSTICS_FILENAME
+    assert sealed_diag_file.is_file()
+    diag_rows = [json.loads(line) for line in sealed_diag_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    expected_total_events = sum(len(w.events) * 2 for w in worlds)
+    assert len(diag_rows) == expected_total_events
+    assert any(
+        r["diagnostic_class"] == "MALFORMED_SINGLE_SENTENCE" and "pronoun_before_verb" in r["failed_subrules"]
+        for r in diag_rows
+    )
+
+    assert summary_out_file.is_file()
+    summary_raw = summary_out_file.read_text(encoding="utf-8")
+    assert secret_draft_marker not in summary_raw
+    assert "sha256" not in summary_raw
+    summary_doc = json.loads(summary_raw)
+    assert summary_doc["total_renderings"] == 4
+    assert summary_doc["total_events"] == expected_total_events
+    assert summary_doc["by_class_and_kind"]["MALFORMED_SINGLE_SENTENCE"]["move"] >= 1
+    assert summary_doc["by_subrule_and_kind"]["pronoun_before_verb"]["move"] >= 1
+
+
+def test_107_owned_server_prints_base_url_to_stderr_and_cli_server_port(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Test 107 (Card udlab-diagnostics-presence, Build Item 3):
+    - Owned Ollama server prints its `base_url` (one line, to stderr, at start).
+    - `--server-port` CLI option (and function parameter) pins the owned server port.
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+        render_world_template_goal_tokens,
+        start_owned_ollama_server,
+        world_from_scenario_seed,
+    )
+    from udlab_generator.cli import main as cli_main
+
+    class _FakeProc:
+        pid = 43210
+        returncode = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def _version_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.2"}
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    capsys.readouterr()
+    srv = start_owned_ollama_server(
+        http_transport=_version_transport,
+        popen_factory=lambda *a, **kw: _FakeProc(),
+        port=11493,
+        pid_killer=lambda pid: None,
+    )
+    try:
+        err_out = capsys.readouterr().err
+        err_lines = [ln for ln in err_out.splitlines() if ln.strip()]
+        assert len(err_lines) == 1
+        assert "http://127.0.0.1:11493" in err_lines[0]
+        assert srv.base_url == "http://127.0.0.1:11493"
+        assert srv.port == 11493
+    finally:
+        srv.stop()
+
+    # Now test CLI `--server-port` pinning the port on `--paired-seed-bank`:
+    seeds = [20261110]
+    seed_bank_file = tmp_path / "seed_bank_107.json"
+    seed_bank_file.write_text(json.dumps(seeds), encoding="utf-8")
+    paired_out_file = tmp_path / "paired_107.json"
+    w0 = world_from_scenario_seed(seeds[0], index=0)
+    seen_urls: list[str] = []
+
+    def _pinned_port_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        seen_urls.append(url)
+        if url.endswith("/api/version"):
+            return {"version": "0.6.2"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            prompt_txt = payload["messages"][-1]["content"]
+            focal = prompt_txt.split("Focal Agent: ", 1)[1].splitlines()[0].strip()
+            return {
+                "message": {"role": "assistant", "content": render_world_template_goal_tokens(w0, focal)},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3000,
+                "eval_count": 700,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    capsys.readouterr()
+    rc = cli_main(
+        [
+            "--paired-seed-bank",
+            str(seed_bank_file),
+            "--goal-mode",
+            "splice",
+            "--server-port",
+            "11494",
+            "--grant-id",
+            "test-grant-107",
+            "--paired-out",
+            str(paired_out_file),
+        ],
+        http_transport=_pinned_port_transport,
+        popen_factory=lambda *a, **kw: _FakeProc(),
+    )
+    assert rc == 0
+    cli_err = capsys.readouterr().err
+    cli_err_lines = [ln for ln in cli_err.splitlines() if ln.strip()]
+    assert len(cli_err_lines) == 1
+    assert "http://127.0.0.1:11494" in cli_err_lines[0]
+    assert all(u.startswith("http://127.0.0.1:11494/") for u in seen_urls)
+
+
+def test_108_presence_penalty_option_copy_identity_and_modelfile_parameters(tmp_path: Path) -> None:
+    """Test 108 (Card udlab-diagnostics-presence, Build Item 4):
+    - `--presence-penalty FLOAT` option (and function parameter): when given, sent in request `options`;
+      when not given, payload is unchanged.
+    - Recorded per row (`presence_penalty: null` when not sent).
+    - Copy-identity test: with option absent, attempt-0 payloads are byte-identical to 36ddbc82
+      (pinned literal SHA-256 digests computed at 36ddbc82).
+    - Model's Modelfile parameters from `/api/show` recorded in each run header.
+    """
+    from typing import Any
+    from udlab_generator import (
+        OllamaWriter,
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+        render_world_template,
+        render_world_template_goal_tokens,
+    )
+    from udlab_generator.cli import build_and_probe_dataset, main as cli_main
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+
+    # 1. Copy-identity test at 36ddbc82 when presence_penalty is absent (None):
+    for mode, expected_hashes in (
+        (
+            "copy",
+            [
+                "029615ed90403f100152055f5f15107e9c56feda867c68546553a22978b9d2b8",
+                "8aba5e2c4cda48c0a4b2dffe8078ce997d12c7f39802712203b49f3ee2255a59",
+            ],
+        ),
+        (
+            "splice",
+            [
+                "64a5990a83a6a175df1e5fa960d66c2787d796b2e1e3aa2e9d91c570df0031cd",
+                "0e23af89468f2ff1943d2be92c8f8949d22750f0505eb1fe46ff549af6ba84bb",
+            ],
+        ),
+    ):
+        captured: list[dict[str, Any]] = []
+
+        def _identity_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+            if url.endswith("/api/version"):
+                return {"version": "0.6.0"}
+            if url.endswith("/api/tags"):
+                return {
+                    "models": [
+                        {
+                            "name": PINNED_WRITER_MODEL_TAG,
+                            "model": PINNED_WRITER_MODEL_TAG,
+                            "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                        }
+                    ]
+                }
+            if url.endswith("/api/show"):
+                return {"parameters": "temperature 0.6\ntop_p 0.95\nrepeat_penalty 1.0"}
+            if url.endswith("/api/chat"):
+                if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                    return {"done": True}
+                assert payload is not None
+                idx = len(captured)
+                captured.append(json.loads(json.dumps(payload)))
+                fn = render_world_template if mode == "copy" else render_world_template_goal_tokens
+                return {
+                    "message": {"role": "assistant", "content": fn(w0, w0.agents[idx])},
+                    "done": True,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 3100,
+                    "eval_count": 780,
+                }
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        wr_absent = OllamaWriter(
+            grant_id="test-grant-36ddbc82",
+            http_transport=_identity_transport,
+            start_owned_server=False,
+            goal_mode=mode,
+        )
+        assert wr_absent.presence_penalty is None
+        pair_absent = wr_absent.render_scenario_pair(w0)
+        assert pair_absent is not None and len(captured) == 2
+        got_hashes = [
+            hashlib.sha256(json.dumps(p, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            for p in captured
+        ]
+        assert got_hashes == expected_hashes
+        assert "presence_penalty" not in captured[0]["options"]
+        assert "presence_penalty" not in captured[1]["options"]
+        assert pair_absent[0].presence_penalty is None
+        assert pair_absent[1].presence_penalty is None
+        assert wr_absent.call_records[0].to_dict()["presence_penalty"] is None
+        assert wr_absent.sealed_responses[0].to_dict()["presence_penalty"] is None
+        assert wr_absent.modelfile_parameters == {
+            "repeat_penalty": 1.0,
+            "temperature": 0.6,
+            "top_p": 0.95,
+        }
+
+    # 2. With presence_penalty=1.25 in build_and_probe_dataset and CLI --presence-penalty:
+    seen_build_payloads: list[dict[str, Any]] = []
+
+    def _build_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/show"):
+            return {"parameters": "temperature 0.6\ntop_p 0.95\nrepeat_penalty 1.0"}
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            assert payload is not None
+            seen_build_payloads.append(json.loads(json.dumps(payload)))
+            prompt_txt = payload["messages"][-1]["content"]
+            focal = prompt_txt.split("Focal Agent: ", 1)[1].splitlines()[0].strip()
+            return {
+                "message": {"role": "assistant", "content": render_world_template_goal_tokens(w0, focal)},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3020,
+                "eval_count": 750,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    out_dir = tmp_path / "build_pp"
+    summary = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        private_seed_hex="ab" * 32,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        goal_mode="splice",
+        presence_penalty=1.25,
+        grant_id="test-grant-pp",
+        start_owned_server=False,
+        http_transport=_build_transport,
+    )
+    assert len(seen_build_payloads) == 2
+    assert seen_build_payloads[0]["options"]["presence_penalty"] == 1.25
+    assert seen_build_payloads[1]["options"]["presence_penalty"] == 1.25
+    assert summary["presence_penalty"] == 1.25
+    assert summary["modelfile_parameters"] == {
+        "repeat_penalty": 1.0,
+        "temperature": 0.6,
+        "top_p": 0.95,
+    }
+    sealing_doc = json.loads((out_dir / "sealed_store" / "sealing.sealed.json").read_text(encoding="utf-8"))
+    assert sealing_doc["writer_provenance"]["presence_penalty"] == 1.25
+    assert sealing_doc["writer_provenance"]["modelfile_parameters"] == {
+        "repeat_penalty": 1.0,
+        "temperature": 0.6,
+        "top_p": 0.95,
+    }
+    ckpt_doc = json.loads((out_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    assert ckpt_doc["header"]["presence_penalty"] == 1.25
+    assert ckpt_doc["header"]["modelfile_parameters"] == {
+        "repeat_penalty": 1.0,
+        "temperature": 0.6,
+        "top_p": 0.95,
+    }
+    for gen_line in (out_dir / "generations.jsonl").read_text(encoding="utf-8").splitlines():
+        if gen_line.strip():
+            assert json.loads(gen_line)["presence_penalty"] == 1.25
+    for sr_line in (out_dir / "sealed_store" / "responses.sealed.jsonl").read_text(encoding="utf-8").splitlines():
+        if sr_line.strip():
+            assert json.loads(sr_line)["presence_penalty"] == 1.25
+    for item_line in (out_dir / "part_public" / "items.jsonl").read_text(encoding="utf-8").splitlines():
+        if item_line.strip():
+            assert json.loads(item_line)["presence_penalty"] == 1.25
+
+    # 3. CLI `--presence-penalty` with `--paired-seed-bank`:
+    seed_bank_file = tmp_path / "seeds_108.json"
+    seed_bank_file.write_text(json.dumps([w0.seed]), encoding="utf-8")
+    paired_out_file = tmp_path / "paired_108.json"
+    rc = cli_main(
+        [
+            "--paired-seed-bank",
+            str(seed_bank_file),
+            "--goal-mode",
+            "splice",
+            "--presence-penalty",
+            "0.75",
+            "--grant-id",
+            "test-grant-pp-cli",
+            "--paired-out",
+            str(paired_out_file),
+        ],
+        http_transport=_build_transport,
+    )
+    assert rc == 0
+    paired_doc = json.loads(paired_out_file.read_text(encoding="utf-8"))
+    assert paired_doc["presence_penalty"] == 0.75
+    assert paired_doc["modelfile_parameters"] == {
+        "repeat_penalty": 1.0,
+        "temperature": 0.6,
+        "top_p": 0.95,
+    }
+    assert all(r["presence_penalty"] == 0.75 for r in paired_doc["renderings"])
+
+
+def test_109_commit_sha_exact_40_hex_and_unknown_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test 109 (Card udlab-diagnostics-presence, Build Item 5):
+    - `_resolve_git_commit_sha` returns the exact 40-hex git SHA when git is available,
+      and returns `'unknown'` when outside a git repo or when git is unavailable/fails.
+    """
+    import inspect
+    import re
+    import subprocess
+    from udlab_generator.render import _resolve_git_commit_sha
+
+    src_104 = inspect.getsource(test_104_cli_paired_seed_bank_with_fake_transport)
+    assert "len(out_doc[\"commit\"]) >= 7" not in src_104
+
+    expected_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(Path(__file__).resolve().parent),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert re.fullmatch(r"[0-9a-f]{40}", expected_sha) is not None
+    assert _resolve_git_commit_sha() == expected_sha
+
+    # Fallback 1: non-git directory
+    non_git_dir = tmp_path / "not_a_git_repo"
+    non_git_dir.mkdir(parents=True, exist_ok=True)
+    assert _resolve_git_commit_sha(cwd=non_git_dir) == "unknown"
+
+    # Fallback 2: git executable unavailable (FileNotFoundError)
+    def _raise_enoent(*args: object, **kwargs: object) -> object:
+        raise FileNotFoundError("git not found")
+
+    monkeypatch.setattr(subprocess, "run", _raise_enoent)
+    assert _resolve_git_commit_sha() == "unknown"
+
+
+def test_110_split_across_sentences_for_leave_and_enter_and_malformed_leave_stays_single() -> None:
+    """Test 110 (Card udlab-diagnostics-fix1, Item 1):
+    - `SPLIT_ACROSS_SENTENCES` detects `leave` and `enter` events whose required parts (actor + verb,
+      source room, destination room) are satisfied across two consecutive sentences but not within one.
+    - Constructed prose (no model text) for a split `leave` and a split `enter` with literal expected records.
+    - A genuinely malformed `leave` (destination missing everywhere) stays `MALFORMED_SINGLE_SENTENCE`.
+    """
+    from dataclasses import replace
+    from udlab_generator import (
+        diagnose_rendered_prose,
+        render_world_template,
+    )
+
+    w0 = generate_world(make_balanced_configs(1, base_seed=20261030)[0])
+    evs = (
+        Event(
+            step=1,
+            kind="say",
+            actor="Eva",
+            room="bindery room",
+            target_object="brass ledger",
+            from_location=None,
+            to_location="linen bin",
+            utterance="The brass ledger is stored in the linen bin.",
+            noise_level=60,
+        ),
+        Event(
+            step=2,
+            kind="leave",
+            actor="Eva",
+            room="bindery room",
+            from_location="bindery room",
+            to_location="sorting room",
+        ),
+        Event(
+            step=3,
+            kind="enter",
+            actor="Eva",
+            room="sorting room",
+            from_location="bindery room",
+            to_location="sorting room",
+        ),
+        Event(
+            step=4,
+            kind="leave",
+            actor="Eva",
+            room="sorting room",
+            from_location="sorting room",
+            to_location="bindery room",
+        ),
+        Event(
+            step=5,
+            kind="enter",
+            actor="Eva",
+            room="bindery room",
+            from_location="sorting room",
+            to_location="bindery room",
+        ),
+    )
+    w_diag = replace(w0, events=evs)
+    base_valid = render_world_template(w_diag, "Eva")
+    setup_p1, _ = base_valid.split("\n\n", 1)
+
+    all_pass_subrules = {
+        "actor_name_present": True,
+        "pronoun_before_verb": False,
+        "allowed_verb_present": True,
+        "actor_before_verb": True,
+        "no_intervening_party": True,
+        "source_room": True,
+        "destination_room": True,
+        "source_before_destination": True,
+        "no_third_room": True,
+        "exact_db": True,
+        "verbatim_quote": True,
+    }
+    base_recs = [r.to_dict() for r in diagnose_rendered_prose(base_valid, w_diag, rendering_index=0, focal_agent="Eva")]
+
+    # 1. Split leave: event 1 (leave bindery room -> sorting room) split across s1 (actor+verb+source) and s2 (destination)
+    split_leave_p2 = (
+        'From Eva\'s station, in the bindery room at 60 dB (at or above the 50 dB doorway threshold, audible in the room and doorway-adjacent rooms), Eva said: "The brass ledger is stored in the linen bin." '
+        "From Eva's station, Eva exited the bindery room. "
+        "Next, Eva headed toward the sorting room. "
+        "From Eva's station, Eva walked through the doorway from the bindery room into the sorting room. "
+        "From Eva's station, Eva exited the sorting room heading toward the bindery room. "
+        "From Eva's station, Eva walked through the doorway from the sorting room into the bindery room."
+    )
+    split_leave_prose = f"{setup_p1}\n\n{split_leave_p2}"
+    recs_split_leave = [
+        r.to_dict() for r in diagnose_rendered_prose(split_leave_prose, w_diag, rendering_index=0, focal_agent="Eva")
+    ]
+    missing_dest_subrules = {
+        **all_pass_subrules,
+        "destination_room": False,
+        "source_before_destination": False,
+    }
+    assert recs_split_leave == [
+        base_recs[0],
+        {
+            **base_recs[1],
+            "seq_checker_status": "FAIL",
+            **missing_dest_subrules,
+            "subrules": dict(missing_dest_subrules),
+            "aligned_sentence_index": 1,
+            "failed_subrules": ["destination_room", "source_before_destination"],
+            "is_copy_of_sentence_index": None,
+            "diagnostic_class": "SPLIT_ACROSS_SENTENCES",
+        },
+        {**base_recs[2], "aligned_sentence_index": 3},
+        {**base_recs[3], "aligned_sentence_index": 4},
+        {**base_recs[4], "aligned_sentence_index": 5},
+    ]
+
+    # 2. Split enter: event 2 (enter sorting room from bindery room) split across s2 (actor+verb+source) and s3 (destination)
+    split_enter_p2 = (
+        'From Eva\'s station, in the bindery room at 60 dB (at or above the 50 dB doorway threshold, audible in the room and doorway-adjacent rooms), Eva said: "The brass ledger is stored in the linen bin." '
+        "From Eva's station, Eva exited the bindery room heading toward the sorting room. "
+        "From Eva's station, Eva walked through the doorway from the bindery room. "
+        "Her path led into the sorting room. "
+        "From Eva's station, Eva exited the sorting room heading toward the bindery room. "
+        "From Eva's station, Eva walked through the doorway from the sorting room into the bindery room."
+    )
+    split_enter_prose = f"{setup_p1}\n\n{split_enter_p2}"
+    recs_split_enter = [
+        r.to_dict() for r in diagnose_rendered_prose(split_enter_prose, w_diag, rendering_index=0, focal_agent="Eva")
+    ]
+    assert recs_split_enter == [
+        base_recs[0],
+        base_recs[1],
+        {
+            **base_recs[2],
+            "seq_checker_status": "FAIL",
+            **missing_dest_subrules,
+            "subrules": dict(missing_dest_subrules),
+            "aligned_sentence_index": 2,
+            "failed_subrules": ["destination_room", "source_before_destination"],
+            "is_copy_of_sentence_index": None,
+            "diagnostic_class": "SPLIT_ACROSS_SENTENCES",
+        },
+        {**base_recs[3], "aligned_sentence_index": 4},
+        {**base_recs[4], "aligned_sentence_index": 5},
+    ]
+
+    # 3. Genuinely malformed leave (destination missing everywhere for event 3 leave): stays MALFORMED_SINGLE_SENTENCE
+    malformed_leave_p2 = (
+        'From Eva\'s station, in the bindery room at 60 dB (at or above the 50 dB doorway threshold, audible in the room and doorway-adjacent rooms), Eva said: "The brass ledger is stored in the linen bin." '
+        "From Eva's station, Eva exited the bindery room heading toward the sorting room. "
+        "From Eva's station, Eva walked through the doorway from the bindery room into the sorting room. "
+        "From Eva's station, Eva exited the sorting room. "
+        "From Eva's station, Eva entered the bindery room."
+    )
+    malformed_leave_prose = f"{setup_p1}\n\n{malformed_leave_p2}"
+    recs_malformed_leave = [
+        r.to_dict()
+        for r in diagnose_rendered_prose(malformed_leave_prose, w_diag, rendering_index=0, focal_agent="Eva")
+    ]
+    assert recs_malformed_leave[3] == {
+        **base_recs[3],
+        "seq_checker_status": "FAIL",
+        **missing_dest_subrules,
+        "subrules": dict(missing_dest_subrules),
+        "aligned_sentence_index": 3,
+        "failed_subrules": ["destination_room", "source_before_destination"],
+        "is_copy_of_sentence_index": None,
+        "diagnostic_class": "MALFORMED_SINGLE_SENTENCE",
+    }
+
+
+def test_111_paired_seed_bank_schema_version_v2_and_compare_guard(tmp_path: Path) -> None:
+    """Test 111 (Card udlab-diagnostics-fix1, Item 2):
+    - `run_paired_seed_bank` outputs `schema_version == 'paired_seed_bank_run_v2'`.
+    - `compare_paired_runs` accepts both `paired_seed_bank_run_v1` (when both are v1) and
+      `paired_seed_bank_run_v2` (when both are v2), and refuses to pair runs of different versions
+      with a clear ValueError.
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+        compare_paired_runs,
+        render_world_template,
+        render_world_template_goal_tokens,
+        run_paired_seed_bank,
+        world_from_scenario_seed,
+    )
+
+    seeds = [20261110]
+    w0 = world_from_scenario_seed(seeds[0], index=0)
+
+    def _make_transport(mode: str) -> Any:
+        def _transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+            if url.endswith("/api/version"):
+                return {"version": "0.6.0"}
+            if url.endswith("/api/tags"):
+                return {
+                    "models": [
+                        {
+                            "name": PINNED_WRITER_MODEL_TAG,
+                            "model": PINNED_WRITER_MODEL_TAG,
+                            "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                        }
+                    ]
+                }
+            if url.endswith("/api/show"):
+                return {"parameters": "temperature 0.6"}
+            if url.endswith("/api/chat"):
+                if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                    return {"done": True}
+                assert payload is not None
+                prompt_txt = payload["messages"][-1]["content"]
+                focal = prompt_txt.split("Focal Agent: ", 1)[1].splitlines()[0].strip()
+                fn = render_world_template if mode == "copy" else render_world_template_goal_tokens
+                return {
+                    "message": {"role": "assistant", "content": fn(w0, focal)},
+                    "done": True,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 3000,
+                    "eval_count": 700,
+                }
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        return _transport
+
+    run_v2_a = run_paired_seed_bank(
+        seed_bank=seeds,
+        goal_mode="copy",
+        output_path=tmp_path / "v2_a.json",
+        grant_id="test-grant-111",
+        http_transport=_make_transport("copy"),
+    )
+    run_v2_b = run_paired_seed_bank(
+        seed_bank=seeds,
+        goal_mode="splice",
+        output_path=tmp_path / "v2_b.json",
+        grant_id="test-grant-111",
+        http_transport=_make_transport("splice"),
+    )
+    assert run_v2_a["schema_version"] == "paired_seed_bank_run_v2"
+    assert run_v2_b["schema_version"] == "paired_seed_bank_run_v2"
+
+    # Pairing two v2 runs succeeds
+    comp_v2 = compare_paired_runs(run_v2_a, run_v2_b)
+    assert comp_v2["paired_run_schema_version"] == "paired_seed_bank_run_v2"
+
+    # Pairing two v1 runs succeeds
+    run_v1_a = {**run_v2_a, "schema_version": "paired_seed_bank_run_v1"}
+    run_v1_b = {**run_v2_b, "schema_version": "paired_seed_bank_run_v1"}
+    comp_v1 = compare_paired_runs(run_v1_a, run_v1_b)
+    assert comp_v1["paired_run_schema_version"] == "paired_seed_bank_run_v1"
+
+    # Pairing v1 with v2 is refused with a clear error
+    with pytest.raises(
+        ValueError,
+        match=r"schema_version mismatch.*paired_seed_bank_run_v1.*paired_seed_bank_run_v2",
+    ):
+        compare_paired_runs(run_v1_a, run_v2_b)
+
+
+def test_112_resume_guard_refuses_presence_penalty_and_goal_mode_mismatch(tmp_path: Path) -> None:
+    """Test 112 (Card udlab-diagnostics-fix1, Item 3):
+    - `--resume` refuses when `presence_penalty` or `goal_mode` differs from the interrupted run's checkpoint header.
+    """
+    from udlab_generator.cli import build_and_probe_dataset
+
+    out_dir = tmp_path / "resume_guard_112"
+    build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        private_seed_hex="cd" * 32,
+        output_dir=out_dir,
+        writer_kind="mock",
+        goal_mode="copy",
+        presence_penalty=0.5,
+    )
+
+    # Resume with different presence_penalty (None vs 0.5 and 1.25 vs 0.5) must be refused
+    with pytest.raises(ValueError, match=r"Cannot --resume: checkpoint header.*presence_penalty"):
+        build_and_probe_dataset(
+            count=1,
+            base_seed=20261030,
+            output_dir=out_dir,
+            writer_kind="mock",
+            goal_mode="copy",
+            presence_penalty=None,
+            resume=True,
+        )
+    with pytest.raises(ValueError, match=r"Cannot --resume: checkpoint header.*presence_penalty"):
+        build_and_probe_dataset(
+            count=1,
+            base_seed=20261030,
+            output_dir=out_dir,
+            writer_kind="mock",
+            goal_mode="copy",
+            presence_penalty=1.25,
+            resume=True,
+        )
+
+    # Resume with different goal_mode ('splice' vs 'copy') must be refused
+    with pytest.raises(ValueError, match=r"Cannot --resume: checkpoint header.*goal_mode"):
+        build_and_probe_dataset(
+            count=1,
+            base_seed=20261030,
+            output_dir=out_dir,
+            writer_kind="mock",
+            goal_mode="splice",
+            presence_penalty=0.5,
+            resume=True,
+        )
+
+    # Resume with matching presence_penalty and goal_mode succeeds
+    resumed = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        output_dir=out_dir,
+        writer_kind="mock",
+        goal_mode="copy",
+        presence_penalty=0.5,
+        resume=True,
+    )
+    assert resumed["presence_penalty"] == 0.5
+    assert resumed["goal_mode"] == "copy"
+
+
+def test_113_diagnostics_sealed_sha256_integrity_link(tmp_path: Path) -> None:
+    """Test 113 (Card udlab-diagnostics-fix1, Item 4):
+    - `diagnostics_sealed_sha256` (the SHA-256 of `sealed_store/diagnostics.sealed.jsonl`) is recorded
+      in the run header / build summary (`build_summary.json`, `sealing.sealed.json` `writer_provenance`,
+      paired-run output, and `diagnose_paired_run` summary), matching the file's actual SHA-256.
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+        SEALED_DIAGNOSTICS_FILENAME,
+        diagnose_paired_run,
+        render_world_template_goal_tokens,
+        run_paired_seed_bank,
+        world_from_scenario_seed,
+    )
+    from udlab_generator.cli import build_and_probe_dataset
+
+    out_dir = tmp_path / "build_113"
+    summary = build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        private_seed_hex="ef" * 32,
+        output_dir=out_dir,
+        writer_kind="mock",
+    )
+    diag_file = out_dir / "sealed_store" / SEALED_DIAGNOSTICS_FILENAME
+    assert diag_file.is_file()
+    expected_diag_sha = hashlib.sha256(diag_file.read_bytes()).hexdigest()
+
+    assert summary["diagnostics_sealed_file"] == SEALED_DIAGNOSTICS_FILENAME
+    assert summary["diagnostics_sealed_sha256"] == expected_diag_sha
+    assert summary["diagnostics_error"] is None
+
+    sealing_meta = json.loads((out_dir / "sealed_store" / "sealing.sealed.json").read_text(encoding="utf-8"))
+    assert sealing_meta["writer_provenance"]["diagnostics_sealed_file"] == SEALED_DIAGNOSTICS_FILENAME
+    assert sealing_meta["writer_provenance"]["diagnostics_sealed_sha256"] == expected_diag_sha
+    assert sealing_meta["writer_provenance"]["diagnostics_error"] is None
+
+    # Also verify paired-run header and diagnose_paired_run record diagnostics_sealed_sha256:
+    seeds = [20261110]
+    w0 = world_from_scenario_seed(seeds[0], index=0)
+
+    def _paired_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/show"):
+            return {"parameters": "temperature 0.6"}
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            assert payload is not None
+            prompt_txt = payload["messages"][-1]["content"]
+            focal = prompt_txt.split("Focal Agent: ", 1)[1].splitlines()[0].strip()
+            return {
+                "message": {"role": "assistant", "content": render_world_template_goal_tokens(w0, focal)},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3000,
+                "eval_count": 700,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    paired_out = tmp_path / "paired_113" / "paired_out.json"
+    paired_rep = run_paired_seed_bank(
+        seed_bank=seeds,
+        goal_mode="splice",
+        output_path=paired_out,
+        grant_id="test-grant-113",
+        http_transport=_paired_transport,
+    )
+    paired_diag_file = paired_out.parent / "sealed_store" / SEALED_DIAGNOSTICS_FILENAME
+    expected_paired_diag_sha = hashlib.sha256(paired_diag_file.read_bytes()).hexdigest()
+    assert paired_rep["diagnostics_sealed_file"] == SEALED_DIAGNOSTICS_FILENAME
+    assert paired_rep["diagnostics_sealed_sha256"] == expected_paired_diag_sha
+    assert paired_rep["diagnostics_error"] is None
+
+    _ = diagnose_paired_run(paired_out)
+    assert hashlib.sha256(paired_diag_file.read_bytes()).hexdigest() == expected_paired_diag_sha
+
+
+def test_114_diagnostic_pass_exception_isolation_records_type_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test 114 (Card udlab-diagnostics-fix1, Item 5):
+    - When the diagnostic pass raises an exception, `diagnostics_error` records only the exception type
+      (no exception message text) and the run continues with its verdicts and outputs intact.
+    """
+    from typing import Any
+    from udlab_generator import (
+        PINNED_WRITER_MANIFEST_DIGEST,
+        PINNED_WRITER_MODEL_TAG,
+        render_world_template_goal_tokens,
+        run_paired_seed_bank,
+        world_from_scenario_seed,
+    )
+    import udlab_generator.cli as cli_mod
+    import udlab_generator.render as render_mod
+
+    secret_err_msg = "SENSITIVE_DRAFT_FRAGMENT_DO_NOT_LEAK"
+
+    def _boom_diagnose(*args: object, **kwargs: object) -> object:
+        raise RuntimeError(secret_err_msg)
+
+    monkeypatch.setattr(render_mod, "diagnose_rendered_prose", _boom_diagnose)
+    monkeypatch.setattr(cli_mod, "diagnose_rendered_prose", _boom_diagnose)
+
+    # 1. build_and_probe_dataset continues and records diagnostics_error == "RuntimeError" with no message text
+    out_dir = tmp_path / "build_114"
+    summary = cli_mod.build_and_probe_dataset(
+        count=1,
+        base_seed=20261030,
+        private_seed_hex="ab" * 32,
+        output_dir=out_dir,
+        writer_kind="mock",
+    )
+    assert summary["num_scenarios"] == 1
+    assert summary["num_items"] == 2
+    assert summary["scenarios_kept"] == 1
+    assert summary["diagnostics_error"] == "RuntimeError"
+    assert summary["diagnostics_summary"] is None
+    assert summary["diagnostics_sealed_sha256"] is None
+    assert (out_dir / "part_public" / "items.jsonl").is_file()
+    assert (out_dir / "sealed_store" / "keys.sealed.jsonl").is_file()
+    summary_raw = (out_dir / "build_summary.json").read_text(encoding="utf-8")
+    assert secret_err_msg not in summary_raw
+
+    # 2. run_paired_seed_bank continues and records diagnostics_error == "RuntimeError" with no message text
+    seeds = [20261110]
+    w0 = world_from_scenario_seed(seeds[0], index=0)
+
+    def _paired_transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if url.endswith("/api/version"):
+            return {"version": "0.6.0"}
+        if url.endswith("/api/tags"):
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/show"):
+            return {"parameters": "temperature 0.6"}
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                return {"done": True}
+            assert payload is not None
+            prompt_txt = payload["messages"][-1]["content"]
+            focal = prompt_txt.split("Focal Agent: ", 1)[1].splitlines()[0].strip()
+            return {
+                "message": {"role": "assistant", "content": render_world_template_goal_tokens(w0, focal)},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3000,
+                "eval_count": 700,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    paired_out = tmp_path / "paired_114" / "paired_out.json"
+    paired_rep = run_paired_seed_bank(
+        seed_bank=seeds,
+        goal_mode="splice",
+        output_path=paired_out,
+        grant_id="test-grant-114",
+        http_transport=_paired_transport,
+    )
+    assert paired_rep["passed_renderings"] == 2
+    assert paired_rep["passed_scenarios"] == 1
+    assert paired_rep["diagnostics_error"] == "RuntimeError"
+    assert paired_rep["diagnostics_summary"] is None
+    assert paired_rep["diagnostics_sealed_sha256"] is None
+    paired_raw = paired_out.read_text(encoding="utf-8")
+    assert secret_err_msg not in paired_raw
+
+
 
 
 
