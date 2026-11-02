@@ -1438,6 +1438,53 @@ def unpack_uploaded_tars(
                 pass
 
 
+def is_kernel_env(argv: list[str] | None = None) -> bool:
+    """Return True when running inside a Jupyter/Colab kernel."""
+    if "ipykernel" in sys.modules or "google.colab" in sys.modules:
+        return True
+    check_argv = sys.argv if argv is None else argv
+    if check_argv:
+        prog = Path(str(check_argv[0])).name.lower()
+        if "kernel_launcher" in prog or "ipykernel" in prog:
+            return True
+        if (
+            len(check_argv) >= 3
+            and str(check_argv[1]) == "-f"
+            and str(check_argv[2]).lower().endswith(".json")
+        ):
+            return True
+    return False
+
+
+def write_vm_status_file(
+    status_path: Path | None,
+    *,
+    step: str,
+    rc: int,
+    reason: str,
+    status: str | None = None,
+    failure_class: str | None = None,
+) -> None:
+    """Write final VM execution status (step, rc, reason) to status_path."""
+    if status_path is None:
+        return
+    ensure_not_drive_path(status_path)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        "step": step,
+        "rc": int(rc),
+        "status": status or ("ok" if rc == 0 else "refused"),
+        "reason": scrub_log_text(reason),
+    }
+    if failure_class is not None:
+        payload["failure_class"] = failure_class
+    status_path.write_text(
+        json.dumps(payload, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     env_or = lambda key, default=None: os.environ.get(key) or default
     env_int = lambda key, default: int(os.environ[key]) if os.environ.get(key) else default
@@ -1531,27 +1578,73 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=env_path("UDLAB_RESULT_TAR", Path("/content/result.tar.gz")),
     )
     parser.add_argument(
+        "--status-file",
+        type=Path,
+        default=env_path("UDLAB_STATUS_FILE", None),
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         default=(os.environ.get("UDLAB_RESUME") == "1"),
     )
-    parser.add_argument("--dryrun", action="store_true")
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--dryrun",
+        action="store_true",
+        default=(os.environ.get("VM_DRYRUN") == "1" or os.environ.get("UDLAB_DRYRUN") == "1"),
+    )
+    if argv is None or is_kernel_env(argv):
+        effective_argv: list[str] = []
+    else:
+        effective_argv = list(argv)
+    return parser.parse_args(effective_argv)
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+    try:
+        args = parse_args(argv)
+    except SystemExit as exc:
+        rc_val = int(exc.code) if isinstance(exc.code, int) and exc.code != 0 else 2
+        env_status = os.environ.get("UDLAB_STATUS_FILE")
+        if env_status:
+            try:
+                write_vm_status_file(
+                    Path(env_status),
+                    step="parse_args",
+                    rc=rc_val,
+                    reason="PARSE_ARGS_ERROR: missing or invalid environment configuration",
+                    status="refused",
+                    failure_class="PARSE_ARGS_ERROR",
+                )
+            except Exception:
+                pass
+        return rc_val
+
     if args.step == "gate":
         import platform
 
+        if args.status_file is not None:
+            write_vm_status_file(
+                args.status_file,
+                step="gate",
+                rc=0,
+                reason="VM_GATE_OK",
+                status="ok",
+            )
         print(f"VM_GATE_OK {platform.platform()}", flush=True)
         return 0
 
     for p in (args.repo_dir, args.prompts_dir, args.run_dir, args.work_dir, args.result_tar):
         ensure_not_drive_path(p)
-    for opt_p in (args.prompts_tar, args.repo_tar, args.resume_tar):
+    for opt_p in (args.prompts_tar, args.repo_tar, args.resume_tar, args.status_file):
         if opt_p is not None:
             ensure_not_drive_path(opt_p)
+
+    status_path: Path = args.status_file or (args.result_tar.parent / "vm_status.json")
+    if status_path.is_file():
+        try:
+            status_path.unlink()
+        except OSError:
+            pass
 
     args.run_dir.mkdir(parents=True, exist_ok=True)
     logs_dir = args.run_dir / "logs"
@@ -1728,6 +1821,13 @@ def main(argv: list[str] | None = None) -> int:
             prompt_line_hashes=prompt_line_hashes,
         )
         build_allowlisted_result_tar(args.run_dir, args.result_tar)
+        write_vm_status_file(
+            status_path,
+            step=current_step,
+            rc=0,
+            reason="ok",
+            status="ok",
+        )
         return 0
 
     except RefusalError as err:
@@ -1756,6 +1856,17 @@ def main(argv: list[str] | None = None) -> int:
             scrub_log_file_in_place(log_file)
         try:
             build_allowlisted_result_tar(args.run_dir, args.result_tar)
+        except Exception:
+            pass
+        try:
+            write_vm_status_file(
+                status_path,
+                step=current_step,
+                rc=2,
+                reason=f"{err.failure_class}: {scrub_log_text(err.detail)}",
+                status="refused",
+                failure_class=err.failure_class,
+            )
         except Exception:
             pass
         sys.stderr.write(f"{err.failure_class}: {scrub_log_text(err.detail)}\n")
@@ -1793,6 +1904,17 @@ def main(argv: list[str] | None = None) -> int:
             build_allowlisted_result_tar(args.run_dir, args.result_tar)
         except Exception:
             pass
+        try:
+            write_vm_status_file(
+                status_path,
+                step=current_step,
+                rc=2,
+                reason=f"UNEXPECTED_ERROR: {detail}",
+                status="refused",
+                failure_class="UNEXPECTED_ERROR",
+            )
+        except Exception:
+            pass
         sys.stderr.write(f"UNEXPECTED_ERROR: {detail}\n")
         return 2
 
@@ -1807,4 +1929,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    _rc = main()
+    if not is_kernel_env():
+        raise SystemExit(_rc)

@@ -78,8 +78,10 @@ def test_scripts_utf8_lf_zero_cr_and_bash_syntax() -> None:
 
     proc = subprocess.run(
         ["bash", "-n", _to_wsl_path(LAUNCH_SH)],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
+        timeout=30,
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
@@ -382,15 +384,24 @@ raw_args = sys.argv[1:]
 # Parse optional global flags before subcommand
 idx = 0
 GLOBAL_VALUE_FLAGS = {{"--auth", "--client-oauth-config", "-c", "--config"}}
+top_help_requested = False
 while idx < len(raw_args) and raw_args[idx].startswith("-"):
     gopt = raw_args[idx].split("=", 1)[0]
     if gopt not in global_options:
         sys.stderr.write(f"No such global option: {{raw_args[idx]}}\\n")
         raise SystemExit(2)
+    if gopt in ("-h", "--help"):
+        top_help_requested = True
     if gopt in GLOBAL_VALUE_FLAGS and "=" not in raw_args[idx]:
         idx += 2
     else:
         idx += 1
+
+if top_help_requested and idx >= len(raw_args):
+    print("Usage: colab [OPTIONS] COMMAND [ARGS]...")
+    print(f"Options: {{' '.join(sorted(global_options))}}")
+    print(f"Commands: {{' '.join(sorted(commands_contract.keys()))}}")
+    raise SystemExit(0)
 
 if idx >= len(raw_args):
     sys.stderr.write("Missing command.\\n")
@@ -398,6 +409,10 @@ if idx >= len(raw_args):
 
 subcmd = raw_args[idx]
 args = raw_args[idx + 1:]
+
+if subcmd == "version":
+    print(f"Version: {{contract['version'].lstrip('v')}}")
+    raise SystemExit(0)
 
 if subcmd not in commands_contract:
     sys.stderr.write(f"No such command '{{subcmd}}' in {{contract['cli']}} {{contract['version']}}.\\n")
@@ -450,6 +465,11 @@ while i < len(args):
         positionals.append(tok)
         i += 1
 
+if "-h" in parsed_opts or "--help" in parsed_opts:
+    print(f"Usage: colab {{subcmd}} [OPTIONS]")
+    print(f"Options: {{' '.join(sorted(allowed_opts))}}")
+    raise SystemExit(0)
+
 def _get_opt(*names: str) -> str | None:
     for n in names:
         vals = parsed_opts.get(n)
@@ -498,6 +518,12 @@ if subcmd == "new":
         sys.stderr.write(f"Got unexpected extra arguments ({{' '.join(positionals)}})\\n")
         raise SystemExit(2)
     sid = _get_opt("-s", "--session") or "sess-udlab-test-001"
+    if os.environ.get("FAKE_COLAB_FAIL_NEW") == "1":
+        sys.stderr.write(f"Failed to create session [{{sid}}]\\n")
+        raise SystemExit(1)
+    if any(s.get("session_id") == sid for s in sessions):
+        sys.stderr.write(f"Session [{{sid}}] already exists\\n")
+        raise SystemExit(1)
     gpu = _get_opt("--gpu") or "CPU"
     sessions.append({{"session_id": sid, "gpu": gpu}})
     sessions_file.write_text(json.dumps(sessions), encoding="utf-8", newline="\\n")
@@ -545,8 +571,6 @@ if subcmd == "download":
         sessions_now = json.loads(sessions_file.read_text(encoding="utf-8"))
         if not any(s.get("session_id") == sid for s in sessions_now):
             raise SystemExit(1)
-    elif fetch_sleep_s > 0:
-        time.sleep(fetch_sleep_s)
     if not vm_src.is_file():
         sys.stderr.write(f"Remote file not found: {{src}}\\n")
         raise SystemExit(1)
@@ -593,13 +617,17 @@ if subcmd == "exec":
     step = exec_env.get("UDLAB_STEP", "run")
     try:
         if step == "run" and sleep_s > 0:
-            if sleep_s > timeout_s:
-                time.sleep(timeout_s)
-                sys.stderr.write(f"Execution timed out after {{timeout_s}}s\\n")
-                raise SystemExit(124)
             time.sleep(sleep_s)
+            sys.stderr.write(f"Execution timed out after {{timeout_s}}s\\n")
+            raise SystemExit(124)
+        kernel_code = (
+            "import sys,runpy; "
+            "sys.argv=['colab_kernel_launcher.py','-f','/tmp/kernel-fake.json']; "
+            f"runpy.run_path({{str(py_path)!r}}, run_name='__main__')"
+        )
         proc = subprocess.run(
-            ["python3", str(py_path)],
+            ["python3", "-c", kernel_code],
+            stdin=subprocess.DEVNULL,
             env=exec_env,
             timeout=timeout_s,
             check=False,
@@ -607,6 +635,10 @@ if subcmd == "exec":
     except subprocess.TimeoutExpired:
         sys.stderr.write(f"Execution timed out after {{timeout_s}}s\\n")
         raise SystemExit(124)
+    if os.environ.get("FAKE_COLAB_DELETE_STATUS_FILE") == "1":
+        status_env = exec_env.get("UDLAB_STATUS_FILE")
+        if status_env and Path(status_env).is_file():
+            Path(status_env).unlink()
     raise SystemExit(proc.returncode)
 
 if subcmd == "stop":
@@ -649,6 +681,7 @@ raise SystemExit(2)
     fake_colab_sh.chmod(fake_colab_sh.stat().st_mode | stat.S_IEXEC)
 
     os.environ["COLAB_RECONCILE_SH"] = _to_wsl_path(state_dir / "nonexistent_reconcile.sh")
+    os.environ["WSLENV"] = "COLAB_RECONCILE_SH/u"
 
     return {
         "fake_bin": fake_bin,
@@ -688,7 +721,7 @@ def test_launch_sh_stub_trap_ordering_and_outcome_with_fake_colab(tmp_path: Path
         f"export VM_DRYRUN=1; "
         f"bash '{wsl_launch}' --stub --out-dir '{wsl_out_dir}' --run-id test-stub-window"
     )
-    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
 
     # Real colab sentinel was never called
@@ -775,7 +808,7 @@ def test_launch_sh_trap_stops_session_on_refusal_failure(tmp_path: Path) -> None
         f"export UDLAB_FAKE_API_PS_JSON='{{\"models\":[]}}'; "
         f"bash '{wsl_launch}' --grant-id test-grant-01 --out-dir '{wsl_out_dir}' --run-id test-gpu-refusal"
     )
-    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc.returncode != 0
     assert not env_paths["sentinel_called"].exists()
 
@@ -823,7 +856,7 @@ def test_launch_sh_wall_timeout_stops_own_session_and_writes_outcome(tmp_path: P
         f"export FAKE_COLAB_EXEC_SLEEP=5; "
         f"bash '{wsl_launch}' --stub --out-dir '{wsl_out_dir}' --run-id test-wall-timeout"
     )
-    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc.returncode != 0
     assert not env_paths["sentinel_called"].exists()
 
@@ -952,7 +985,7 @@ def test_receipt_and_outcome_carry_gpu_name_with_fake_nvidia_smi(tmp_path: Path)
         f"export VM_DRYRUN=1; "
         f"bash '{wsl_launch}' --grant-id test-grant-gpu-01 --out-dir '{wsl_out_dir}' --run-id test-gpu-receipt"
     )
-    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     assert not env_paths["sentinel_called"].exists()
 
@@ -975,8 +1008,10 @@ def test_receipt_and_outcome_carry_gpu_name_with_fake_nvidia_smi(tmp_path: Path)
 
 def test_stub_mode_records_cpu_and_absence_of_gpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # 1. Direct unit check with empty PATH (no nvidia-smi present): must not fail
+    orig_path = os.environ.get("PATH", "")
     monkeypatch.setenv("PATH", str(tmp_path))
     gpu_info = vm_udlab.probe_vm_gpu("stub")
+    monkeypatch.setenv("PATH", orig_path)
     assert gpu_info["hardware"] == "CPU"
     assert gpu_info["gpu_name"] == "CPU"
     assert gpu_info["gpu_present"] is False
@@ -1008,7 +1043,7 @@ def test_stub_mode_records_cpu_and_absence_of_gpu(tmp_path: Path, monkeypatch: p
         f"export VM_DRYRUN=1; "
         f"bash '{wsl_launch}' --stub --out-dir '{wsl_out_dir}' --run-id test-stub-cpu-receipt"
     )
-    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     assert not env_paths["sentinel_called"].exists()
 
@@ -1125,7 +1160,7 @@ def test_partial_offload_refusal_on_fake_api_ps(tmp_path: Path) -> None:
         f"export UDLAB_FAKE_API_PS_JSON='{partial_ps_json}'; "
         f"bash '{wsl_launch}' --grant-id test-grant-partial --out-dir '{wsl_out_dir}' --run-id test-partial-offload"
     )
-    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc.returncode != 0
     assert not env_paths["sentinel_called"].exists()
 
@@ -1218,7 +1253,7 @@ def test_finding2_receipt_records_raw_sha256_deleted_and_absent_verified(tmp_pat
         f"export VM_DRYRUN=1; "
         f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir)}' --run-id test-f2-receipt"
     )
-    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     assert not env_paths["sentinel_called"].exists()
 
@@ -1371,8 +1406,8 @@ def test_finding3b_unexpected_exception_writes_refusal_receipt_and_result_tar(
     py_inject_dir = tmp_path / "py_inject"
     py_inject_dir.mkdir(parents=True, exist_ok=True)
     (py_inject_dir / "sitecustomize.py").write_text(
-        "import shutil, sys\n"
-        "if sys.argv and str(sys.argv[0]).endswith('vm_udlab.py'):\n"
+        "import os, shutil\n"
+        "if os.environ.get('UDLAB_STEP') == 'run':\n"
         f"    shutil.disk_usage = lambda _p: (_ for _ in ()).throw(RuntimeError({secret_leak_msg!r}))\n",
         encoding="utf-8",
         newline="\n",
@@ -1388,7 +1423,7 @@ def test_finding3b_unexpected_exception_writes_refusal_receipt_and_result_tar(
         f"export VM_DRYRUN=1; "
         f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir)}' --run-id test-f3b-unexpected"
     )
-    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc.returncode == 2
     assert not env_paths["sentinel_called"].exists()
 
@@ -1435,7 +1470,7 @@ def test_finding4_watchdog_fetches_before_stop_and_bounds_hanging_fetch(tmp_path
         f"export FAKE_COLAB_EXEC_SLEEP=4; "
         f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir)}' --run-id test-f4-order"
     )
-    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc.returncode != 0
     assert not env_paths["sentinel_called"].exists()
 
@@ -1470,7 +1505,7 @@ def test_finding4_watchdog_fetches_before_stop_and_bounds_hanging_fetch(tmp_path
         f"export FAKE_COLAB_FETCH_SLEEP=30; "
         f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir_hang)}' --run-id test-f4-hang"
     )
-    proc_hang = subprocess.run(["bash", "-c", cmd_hang], capture_output=True, text=True, check=False)
+    proc_hang = subprocess.run(["bash", "-c", cmd_hang], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc_hang.returncode != 0
     assert not env_paths_hang["sentinel_called"].exists()
 
@@ -1568,7 +1603,7 @@ def test_finding6_launch_sh_refuses_drive_path_for_exact_ctx_prompts(tmp_path: P
             f"export VM_DRYRUN=1; "
             f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir)}' --run-id test-f6-drive"
         )
-        proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+        proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
         assert proc.returncode == 2
         assert "FORBIDDEN_STORAGE_PATH" in proc.stderr
         assert not env_paths["sentinel_called"].exists()
@@ -1598,7 +1633,7 @@ def test_fetch_race_watchdog_waits_for_in_progress_main_fetch_before_stop(
         f"export FAKE_COLAB_FETCH_SLEEP=2.5; "
         f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir)}' --run-id test-fetch-race"
     )
-    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert not env_paths["sentinel_called"].exists()
 
     calls = [
@@ -1791,7 +1826,7 @@ def test_fake_colab_enforces_contract_and_rejects_unknown_commands_and_flags(tmp
             f"export UDLAB_OPEN_LOCK='{wsl_lock_file}'; "
             f"'{wsl_fake_colab}' {args_str}"
         )
-        return subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+        return subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
 
     # Rejects unknown subcommand `cp`
     res_cp = _run_fake("cp -s udlab-1 /content/a /tmp/b")
@@ -1842,7 +1877,7 @@ def test_launch_sh_dry_mode_prints_expected_command_sequence_without_secrets(tmp
         f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
         f"bash '{wsl_launch}' --stub --dry --out-dir '{wsl_out_dir}' --run-id dry-stub-01"
     )
-    proc_stub = subprocess.run(["bash", "-c", cmd_stub], capture_output=True, text=True, check=False)
+    proc_stub = subprocess.run(["bash", "-c", cmd_stub], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc_stub.returncode == 0, proc_stub.stderr
     assert not env_paths["sentinel_called"].exists()
     assert not env_paths["calls_log"].exists()
@@ -1857,12 +1892,14 @@ def test_launch_sh_dry_mode_prints_expected_command_sequence_without_secrets(tmp
         (
             f"colab exec -s udlab-dry-stub-01 --env UDLAB_STEP=run --env UDLAB_MODE=stub --env UDLAB_WRITER=mock "
             f"--env UDLAB_COUNT=3 --env UDLAB_SEED=5 --env UDLAB_GRANT_ID=cpu-stub-none-no-gpu "
-            f"--env UDLAB_VRAM_HALT_MIB=0 --env UDLAB_WALL_SECONDS=7200 --env UDLAB_REPO_DIR=/content/udlab "
+            f"--env UDLAB_VRAM_HALT_MIB=0 --env UDLAB_WALL_SECONDS=6900 --env UDLAB_REPO_DIR=/content/udlab "
             f"--env UDLAB_REPO_TAR=/content/repo_bundle.tar.gz --env UDLAB_PROMPTS_DIR=/content/udlab_prompts "
             f"--env UDLAB_PROMPTS_TAR=/content/exact_ctx_prompts.tar.gz --env UDLAB_RUN_DIR=/content/udlab_run "
-            f"--env UDLAB_RESULT_TAR=/content/result.tar.gz --env UDLAB_RESUME=0 -f {wsl_vm_py} --timeout 7200"
+            f"--env UDLAB_RESULT_TAR=/content/result.tar.gz --env UDLAB_STATUS_FILE=/content/vm_status.json "
+            f"--env UDLAB_RESUME=0 -f {wsl_vm_py} --timeout 6960"
         ),
         f"colab download -s udlab-dry-stub-01 /content/result.tar.gz {wsl_out_dir}/result.tar.gz",
+        f"colab download -s udlab-dry-stub-01 /content/vm_status.json {wsl_out_dir}/vm_status.json",
         f"colab download -s udlab-dry-stub-01 /content/udlab_run/vm_receipt.json {wsl_out_dir}/vm_receipt.json",
         "colab stop -s udlab-dry-stub-01",
     ]
@@ -1872,13 +1909,45 @@ def test_launch_sh_dry_mode_prints_expected_command_sequence_without_secrets(tmp
         f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
         f"bash '{wsl_launch}' --dry --grant-id grant-a100-xyz --out-dir '{wsl_out_dir}' --run-id dry-gpu-01"
     )
-    proc_gpu = subprocess.run(["bash", "-c", cmd_gpu], capture_output=True, text=True, check=False)
+    proc_gpu = subprocess.run(["bash", "-c", cmd_gpu], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc_gpu.returncode == 0, proc_gpu.stderr
     lines_gpu = [ln.strip() for ln in proc_gpu.stdout.splitlines() if ln.strip()]
-    assert lines_gpu[0] == "colab sessions"
-    assert lines_gpu[1] == "colab new --gpu A100 -s udlab-dry-gpu-01"
-    assert f"-f {wsl_vm_py} --timeout 5400" in lines_gpu[5]
-    assert lines_gpu[-1] == "colab stop -s udlab-dry-gpu-01"
+    assert lines_gpu == [
+        "colab sessions",
+        "colab new --gpu A100 -s udlab-dry-gpu-01",
+        f"colab exec -s udlab-dry-gpu-01 --env UDLAB_STEP=gate -f {wsl_vm_py} --timeout 180",
+        f"colab upload -s udlab-dry-gpu-01 {wsl_out_dir}/stage/repo_bundle.tar.gz /content/repo_bundle.tar.gz",
+        f"colab upload -s udlab-dry-gpu-01 {wsl_out_dir}/stage/exact_ctx_prompts.tar.gz /content/exact_ctx_prompts.tar.gz",
+        (
+            f"colab exec -s udlab-dry-gpu-01 --env UDLAB_STEP=run --env UDLAB_MODE=gpu --env UDLAB_WRITER=ollama "
+            f"--env UDLAB_COUNT=3 --env UDLAB_SEED=5 --env UDLAB_GRANT_ID=grant-a100-xyz "
+            f"--env UDLAB_VRAM_HALT_MIB=26000 --env UDLAB_WALL_SECONDS=5100 --env UDLAB_REPO_DIR=/content/udlab "
+            f"--env UDLAB_REPO_TAR=/content/repo_bundle.tar.gz --env UDLAB_PROMPTS_DIR=/content/udlab_prompts "
+            f"--env UDLAB_PROMPTS_TAR=/content/exact_ctx_prompts.tar.gz --env UDLAB_RUN_DIR=/content/udlab_run "
+            f"--env UDLAB_RESULT_TAR=/content/result.tar.gz --env UDLAB_STATUS_FILE=/content/vm_status.json "
+            f"--env UDLAB_RESUME=0 -f {wsl_vm_py} --timeout 5160"
+        ),
+        f"colab download -s udlab-dry-gpu-01 /content/result.tar.gz {wsl_out_dir}/result.tar.gz",
+        f"colab download -s udlab-dry-gpu-01 /content/vm_status.json {wsl_out_dir}/vm_status.json",
+        f"colab download -s udlab-dry-gpu-01 /content/udlab_run/vm_receipt.json {wsl_out_dir}/vm_receipt.json",
+        "colab stop -s udlab-dry-gpu-01",
+    ]
+
+    # 3. Session-smoke dry output
+    cmd_smoke = (
+        f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"bash '{wsl_launch}' --session-smoke --dry --out-dir '{wsl_out_dir}' --run-id smoke-01"
+    )
+    proc_smoke = subprocess.run(["bash", "-c", cmd_smoke], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
+    assert proc_smoke.returncode == 0, proc_smoke.stderr
+    lines_smoke = [ln.strip() for ln in proc_smoke.stdout.splitlines() if ln.strip()]
+    assert lines_smoke == [
+        "colab sessions",
+        "colab new -s udlab-smoke-01",
+        "colab sessions",
+        "colab stop -s udlab-smoke-01",
+        "colab sessions",
+    ]
 
 
 def test_launch_sh_session_smoke_mode_with_fake_colab(tmp_path: Path) -> None:
@@ -1894,7 +1963,7 @@ def test_launch_sh_session_smoke_mode_with_fake_colab(tmp_path: Path) -> None:
         f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file)}'; "
         f"bash '{_to_wsl_path(LAUNCH_SH)}' --session-smoke --out-dir '{_to_wsl_path(out_dir)}' --run-id smoke-01"
     )
-    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     assert not env_paths["sentinel_called"].exists()
 
@@ -1922,6 +1991,295 @@ def test_launch_sh_session_smoke_mode_with_fake_colab(tmp_path: Path) -> None:
     assert outcome["id"] == "smoke-01"
     assert outcome["hardware"] == "CPU"
     assert outcome["outcome"] == "ok"
+
+
+def test_fix5_1_and_3_kernel_argv_entry_and_honest_fake_exec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import runpy
+
+    # 1. Verify kernel-style sys.argv is ignored by parse_args() and runpy.run_path(__main__)
+    kernel_argv = [
+        "/usr/local/lib/python3.11/dist-packages/google/colab/_ipython_kernel_launcher.py",
+        "-f",
+        "/root/.local/share/jupyter/runtime/kernel-abc.json",
+    ]
+    monkeypatch.setattr(sys, "argv", kernel_argv)
+    monkeypatch.setenv("UDLAB_STEP", "gate")
+    status_gate = tmp_path / "gate_status.json"
+    monkeypatch.setenv("UDLAB_STATUS_FILE", str(status_gate))
+
+    assert vm_udlab.is_kernel_env() is True
+    parsed_gate = vm_udlab.parse_args()
+    assert parsed_gate.step == "gate"
+
+    # Run vm_udlab.py via runpy.run_path(..., run_name='__main__') with kernel sys.argv
+    runpy.run_path(str(VM_UDLAB_PY), run_name="__main__")
+    gate_data = json.loads(status_gate.read_text(encoding="utf-8"))
+    assert gate_data["step"] == "gate"
+    assert gate_data["rc"] == 0
+
+    # 2. Run full dryrun step via kernel-style subprocess (exact command from card Fix 3)
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+    run_dir = tmp_path / "kernel_run"
+    result_tar = tmp_path / "kernel_result.tar.gz"
+    status_run = tmp_path / "kernel_status.json"
+
+    kernel_env = os.environ.copy()
+    kernel_env.update(
+        {
+            "UDLAB_STEP": "run",
+            "UDLAB_MODE": "stub",
+            "UDLAB_WRITER": "mock",
+            "UDLAB_COUNT": "3",
+            "UDLAB_SEED": "5",
+            "UDLAB_GRANT_ID": "cpu-stub-none-no-gpu",
+            "UDLAB_VRAM_HALT_MIB": "0",
+            "UDLAB_WALL_SECONDS": "60",
+            "UDLAB_REPO_DIR": str(REPO_ROOT),
+            "UDLAB_INDEX_PATH": str(index_json),
+            "UDLAB_PROMPTS_DIR": str(prompts_dir),
+            "UDLAB_RUN_DIR": str(run_dir),
+            "UDLAB_RESULT_TAR": str(result_tar),
+            "UDLAB_STATUS_FILE": str(status_run),
+            "VM_DRYRUN": "1",
+        }
+    )
+    kernel_cmd = [
+        sys.executable,
+        "-c",
+        (
+            "import sys,runpy; "
+            "sys.argv=['colab_kernel_launcher.py','-f','/tmp/kernel-fake.json']; "
+            f"runpy.run_path({str(VM_UDLAB_PY)!r}, run_name='__main__')"
+        ),
+    ]
+    proc = subprocess.run(kernel_cmd, env=kernel_env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert status_run.is_file()
+    status_data = json.loads(status_run.read_text(encoding="utf-8"))
+    assert status_data == {
+        "step": "verify_logs_and_pack_tar",
+        "rc": 0,
+        "status": "ok",
+        "reason": "ok",
+    }
+    assert result_tar.is_file()
+
+
+def test_fix5_2_status_file_decides_outcome_when_exec_exits_zero_and_missing_status_fails(
+    tmp_path: Path,
+) -> None:
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+
+    # Part A: VM script refuses (rc=2 in vm_status.json), fake `colab exec` exits 0 (kernel swallows SystemExit),
+    # and launch.sh still fails with exit code 2 from vm_status.json.
+    env_a = _setup_fake_colab_env(tmp_path / "case_a")
+    out_a = tmp_path / "out_a"
+    lock_a = tmp_path / "lock_a.lock"
+    cmd_a = (
+        f"export PATH='{_to_wsl_path(env_a['fake_bin'])}:{_to_wsl_path(env_a['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_a['state_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_a)}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{_to_wsl_path(prompts_dir)}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{_to_wsl_path(index_json)}'; "
+        f"export VM_DRYRUN=1; "
+        f"export UDLAB_FAKE_API_PS_JSON='{{\"models\":[]}}'; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --grant-id grant-a100-status --out-dir '{_to_wsl_path(out_a)}' --run-id status-refusal-01"
+    )
+    proc_a = subprocess.run(["bash", "-c", cmd_a], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
+    assert proc_a.returncode == 2
+    assert (out_a / "vm_status.json").is_file()
+    status_a = json.loads((out_a / "vm_status.json").read_text(encoding="utf-8"))
+    assert status_a["rc"] == 2
+    assert status_a["status"] == "refused"
+    assert status_a["failure_class"] == "MODEL_PARTIAL_OFFLOAD"
+    outcome_a = json.loads((out_a / "outcome.draft.json").read_text(encoding="utf-8"))
+    assert outcome_a["outcome"] == "fail"
+    assert "MODEL_PARTIAL_OFFLOAD" in outcome_a["why"]
+
+    # Part B: VM script succeeds and builds result.tar.gz, `colab exec` exits 0, but vm_status.json is missing.
+    # launch.sh must treat missing vm_status.json as failure (exit non-zero).
+    env_b = _setup_fake_colab_env(tmp_path / "case_b")
+    out_b = tmp_path / "out_b"
+    lock_b = tmp_path / "lock_b.lock"
+    cmd_b = (
+        f"export PATH='{_to_wsl_path(env_b['fake_bin'])}:{_to_wsl_path(env_b['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_b['state_dir'])}'; "
+        f"export FAKE_COLAB_DELETE_STATUS_FILE=1; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_b)}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{_to_wsl_path(prompts_dir)}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{_to_wsl_path(index_json)}'; "
+        f"export VM_DRYRUN=1; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_b)}' --run-id status-missing-01"
+    )
+    proc_b = subprocess.run(["bash", "-c", cmd_b], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
+    assert proc_b.returncode != 0
+    assert not (out_b / "vm_status.json").exists()
+    assert (out_b / "result.tar.gz").is_file()
+    outcome_b = json.loads((out_b / "outcome.draft.json").read_text(encoding="utf-8"))
+    assert outcome_b["outcome"] == "fail"
+    assert "vm_status.json missing" in outcome_b["why"]
+
+
+def test_fix5_4_timeout_hierarchy_margins_and_single_wall_derivation(tmp_path: Path) -> None:
+    env_paths = _setup_fake_colab_env(tmp_path)
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+    out_dir = tmp_path / "run_timeout_order"
+    lock_file = tmp_path / "colab-open-timeout-order.lock"
+
+    cmd = (
+        f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_paths['state_dir'])}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file)}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{_to_wsl_path(prompts_dir)}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{_to_wsl_path(index_json)}'; "
+        f"export VM_DRYRUN=1; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_dir)}' --run-id timeout-order-01"
+    )
+    proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+
+    cli_log = (out_dir / "colab-cli.log").read_text(encoding="utf-8")
+    # Stub WALL_SECONDS=7200 -> VM_WALL_SECONDS=6900 < EXEC_TIMEOUT_SECONDS=6960 < WATCHDOG_SLEEP_SECONDS=7020 < RIG_TIMEOUT=7205
+    assert (
+        "wall_s=7200 vm_wall_s=6900 exec_timeout_s=6960 watchdog_sleep_s=7020 rig_timeout_s=7205"
+        in cli_log
+    )
+    assert 6900 < 6960 < 7020 < 7205
+    assert (6960 - 6900) == 60
+    assert (7020 - 6960) == 60
+    assert (7200 - 7020) == 180
+    assert (7205 - 7020) == 185
+
+    # Verify custom single wall value derives all 4 values with the exact same margins
+    out_custom = tmp_path / "run_timeout_custom"
+    cmd_custom = (
+        f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+        f"export UDLAB_WALL_SECONDS=3600; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --dry --out-dir '{_to_wsl_path(out_custom)}' --run-id timeout-custom-01"
+    )
+    proc_custom = subprocess.run(["bash", "-c", cmd_custom], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
+    assert proc_custom.returncode == 0
+    assert "--env UDLAB_WALL_SECONDS=3300" in proc_custom.stdout
+    assert "--timeout 3360" in proc_custom.stdout
+
+
+def test_fix5_5_session_name_reuse_refused_before_new_and_failed_new_does_not_stop_existing(
+    tmp_path: Path,
+) -> None:
+    prompts_dir, index_json = _make_synthetic_prompts_fixture(tmp_path)
+
+    # Case 1: Session name `udlab-reuse-01` already listed in `colab sessions` before `new` (normal mode & smoke mode)
+    for mode_arg in ("--stub", "--session-smoke"):
+        sub_tmp = tmp_path / f"reuse_{mode_arg.lstrip('-')}"
+        env_paths = _setup_fake_colab_env(sub_tmp)
+        existing_sessions = [
+            {"session_id": "sess-neighbour-keep", "gpu": "T4"},
+            {"session_id": "udlab-reuse-01", "gpu": "CPU"},
+        ]
+        env_paths["sessions_file"].write_text(
+            json.dumps(existing_sessions),
+            encoding="utf-8",
+            newline="\n",
+        )
+        existing_lock = env_paths["colab_locks_dir"] / "udlab-reuse-01.lock"
+        existing_lock.write_text("99999\n", encoding="utf-8", newline="\n")
+
+        out_dir = sub_tmp / "out"
+        lock_file = sub_tmp / "open.lock"
+        cmd = (
+            f"export PATH='{_to_wsl_path(env_paths['fake_bin'])}:{_to_wsl_path(env_paths['sentinel_bin'])}':\"$PATH\"; "
+            f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_paths['state_dir'])}'; "
+            f"export COLAB_LOCK_DIR='{_to_wsl_path(env_paths['colab_locks_dir'])}'; "
+            f"export COLAB_RECONCILE_SH='{_to_wsl_path(env_paths['state_dir'] / 'nonexistent_reconcile.sh')}'; "
+            f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_file)}'; "
+            f"export UDLAB_EXACT_CTX_PROMPTS='{_to_wsl_path(prompts_dir)}'; "
+            f"export UDLAB_EXACT_CTX_INDEX='{_to_wsl_path(index_json)}'; "
+            f"export VM_DRYRUN=1; "
+            f"bash '{_to_wsl_path(LAUNCH_SH)}' {mode_arg} --out-dir '{_to_wsl_path(out_dir)}' --run-id reuse-01"
+        )
+        proc = subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
+        assert proc.returncode != 0
+        assert "SESSION_NAME_IN_USE" in proc.stderr
+
+        calls = [
+            json.loads(line)
+            for line in env_paths["calls_log"].read_text(encoding="utf-8").splitlines()
+        ]
+        # Only `sessions` was called; neither `new` nor `stop` was called
+        assert [c["subcmd"] for c in calls] == ["sessions"]
+        assert not env_paths["stopped_file"].exists()
+        # Both existing sessions and the existing lock file remain untouched
+        after_sessions = json.loads(env_paths["sessions_file"].read_text(encoding="utf-8"))
+        assert [s["session_id"] for s in after_sessions] == ["sess-neighbour-keep", "udlab-reuse-01"]
+        assert existing_lock.is_file()
+        assert existing_lock.read_text(encoding="utf-8").strip() == "99999"
+
+    # Case 2: `colab sessions` does not list the name, but `colab new` fails (`FAKE_COLAB_FAIL_NEW=1`).
+    # The EXIT trap must NOT call `colab stop` and must NOT remove any lock file because `NEW_SUCCEEDED` is 0.
+    sub_fail = tmp_path / "fail_new"
+    env_fail = _setup_fake_colab_env(sub_fail)
+    concurrent_lock = env_fail["colab_locks_dir"] / "udlab-failnew-01.lock"
+    concurrent_lock.write_text("88888\n", encoding="utf-8", newline="\n")
+
+    out_fail = sub_fail / "out"
+    lock_fail = sub_fail / "open.lock"
+    cmd_fail = (
+        f"export PATH='{_to_wsl_path(env_fail['fake_bin'])}:{_to_wsl_path(env_fail['sentinel_bin'])}':\"$PATH\"; "
+        f"export FAKE_COLAB_STATE_DIR='{_to_wsl_path(env_fail['state_dir'])}'; "
+        f"export FAKE_COLAB_FAIL_NEW=1; "
+        f"export COLAB_LOCK_DIR='{_to_wsl_path(env_fail['colab_locks_dir'])}'; "
+        f"export COLAB_RECONCILE_SH='{_to_wsl_path(env_fail['state_dir'] / 'nonexistent_reconcile.sh')}'; "
+        f"export UDLAB_OPEN_LOCK='{_to_wsl_path(lock_fail)}'; "
+        f"export UDLAB_EXACT_CTX_PROMPTS='{_to_wsl_path(prompts_dir)}'; "
+        f"export UDLAB_EXACT_CTX_INDEX='{_to_wsl_path(index_json)}'; "
+        f"export VM_DRYRUN=1; "
+        f"bash '{_to_wsl_path(LAUNCH_SH)}' --stub --out-dir '{_to_wsl_path(out_fail)}' --run-id failnew-01"
+    )
+    proc_fail = subprocess.run(["bash", "-c", cmd_fail], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
+    assert proc_fail.returncode != 0
+    calls_fail = [
+        json.loads(line)
+        for line in env_fail["calls_log"].read_text(encoding="utf-8").splitlines()
+    ]
+    assert [c["subcmd"] for c in calls_fail] == ["sessions", "new"]
+    assert not env_fail["stopped_file"].exists()
+    assert concurrent_lock.is_file()
+    assert concurrent_lock.read_text(encoding="utf-8").strip() == "88888"
+
+
+def test_fix5_6_fake_colab_help_flag_prints_and_exits_zero_with_no_side_effects(
+    tmp_path: Path,
+) -> None:
+    env_paths = _setup_fake_colab_env(tmp_path)
+    wsl_fake_colab = _to_wsl_path(env_paths["fake_bin"] / "colab")
+    wsl_state_dir = _to_wsl_path(env_paths["state_dir"])
+    before_sessions = env_paths["sessions_file"].read_text(encoding="utf-8")
+
+    def _run_help(args_str: str) -> subprocess.CompletedProcess[str]:
+        cmd = f"export FAKE_COLAB_STATE_DIR='{wsl_state_dir}'; '{wsl_fake_colab}' {args_str}"
+        return subprocess.run(["bash", "-c", cmd], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
+
+    for top_flag in ("-h", "--help"):
+        res = _run_help(top_flag)
+        assert res.returncode == 0
+        assert "Usage: colab" in res.stdout
+
+    contract_data = json.loads(CLI_CONTRACT_JSON.read_text(encoding="utf-8"))
+    for subcmd, spec in contract_data["commands"].items():
+        for hflag in ("-h", "--help"):
+            res = _run_help(f"{subcmd} {hflag}")
+            assert res.returncode == 0, f"{subcmd} {hflag} failed: {res.stderr}"
+            assert f"Usage: colab {subcmd}" in res.stdout
+            for opt in spec["options"]:
+                assert opt in res.stdout
+
+    # Zero side effects: no calls logged, sessions unchanged, no sessions stopped
+    assert not env_paths["calls_log"].exists()
+    assert env_paths["sessions_file"].read_text(encoding="utf-8") == before_sessions
+    assert not env_paths["stopped_file"].exists()
+
 
 
 
