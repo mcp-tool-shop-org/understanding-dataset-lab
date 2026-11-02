@@ -1,4 +1,11 @@
-"""Deterministic third-person perspective renderer, writer prompt, prose checks, and OllamaWriter."""
+"""Deterministic third-person perspective renderer, writer prompt, prose checks, and OllamaWriter.
+
+Note (2026-11-02): In `check_prose_render_fidelity`, sequential-checker fault attribution changed, verdicts did not.
+When event `ev` fails `_sentence_matches_event`, `next_ev_matches_search_start` also checks whether
+`event_sentences[search_start]` satisfies `_event_content_present` for `world.events[ev_idx + 1]` and not for `ev`,
+preserving that candidate sentence for `ev_idx + 1` so a misshapen sentence's fault (`form_not_accepted`) is
+attributed to the event whose content it carries rather than consumed as an `altered` fault on an omitted earlier event.
+"""
 
 from __future__ import annotations
 
@@ -4548,7 +4555,7 @@ def _event_content_present(
     all_objects = (
         {o.lower() for o in world.objects}
         if world is not None
-        else {o.lower() for dom in DOMAINS.values() for o in dom.objects}
+        else {o.lower() for dom in DOMAINS for o in dom.objects}
     )
     allowed_objects = (
         {ev.target_object.lower()} if (ev.kind in ("move", "see") and ev.target_object) else set()
@@ -4566,15 +4573,19 @@ def _event_content_present(
         for other_f in all_fixtures:
             if other_f not in allowed_fixtures and re.search(rf"\b{re.escape(other_f)}\b", frame_low) is not None:
                 return False
-        all_occluders = {o.lower() for o in world.occluders_by_room.values() if o}
-        allowed_occluders: set[str] = set()
-        if ev.occluded and ev.occluder:
-            allowed_occluders.add(ev.occluder.lower())
-        if is_station_move and ev.target_object:
-            allowed_occluders.add(ev.target_object.lower())
-        for other_occ in all_occluders:
-            if other_occ not in allowed_occluders and re.search(rf"\b{re.escape(other_occ)}\b", frame_low) is not None:
-                return False
+    all_occluders = (
+        {o.lower() for o in world.occluders_by_room.values() if o}
+        if world is not None
+        else {o.lower() for dom in DOMAINS for o in dom.occluders}
+    )
+    allowed_occluders: set[str] = set()
+    if ev.occluded and ev.occluder:
+        allowed_occluders.add(ev.occluder.lower())
+    if is_station_move and ev.target_object:
+        allowed_occluders.add(ev.target_object.lower())
+    for other_occ in all_occluders:
+        if other_occ not in allowed_occluders and re.search(rf"\b{re.escape(other_occ)}\b", frame_low) is not None:
+            return False
 
     if _has_bundled_or_reordered_clause(frame_low, ev.actor):
         return False
@@ -4680,12 +4691,30 @@ def _event_content_present(
 
     if ev.kind == "move":
         if is_station_move:
-            return _sentence_matches_station_move(
-                s_low,
-                ev,
-                all_parties,
-                checker_profile=checker_profile,
-            )
+            if not (ev.target_object and ev.from_location and ev.to_location):
+                return False
+            if _occluder_is_direct_object_of_move_verb(frame_low, ev.target_object):
+                return False
+            occ_esc = re.escape(ev.target_object.lower())
+            if re.search(rf"\b{occ_esc}\b", frame_low) is None:
+                return False
+            if not any(
+                re.search(rf"\b{re.escape(v)}\b", frame_low) is not None
+                for v in STATION_CHANGE_PERSON_VERBS
+            ):
+                return False
+            to_esc = re.escape(ev.to_location.lower())
+            from_esc = re.escape(ev.from_location.lower())
+            if re.search(rf"\b{to_esc}\b", frame_low) is None:
+                return False
+            if (
+                re.search(rf"\b(?:to|into|toward|towards|onto)\s+{_ARTICLE_OPT_RE}{from_esc}\b", frame_low)
+                is not None
+                or re.search(rf"\b(?:from|out of)\s+{_ARTICLE_OPT_RE}{to_esc}\b", frame_low)
+                is not None
+            ):
+                return False
+            return True
         if not (ev.target_object and ev.from_location and ev.to_location):
             return False
         target_esc = re.escape(ev.target_object.lower())
@@ -5521,13 +5550,6 @@ def check_prose_render_fidelity(
             )
 
     current_domain = next((d for d in DOMAINS if d.name == world.domain_name), None)
-    world_own_phrases = {
-        *(r.lower() for r in world.rooms if r),
-        *(o.lower() for o in world.objects if o),
-        *(c.lower() for pair in world.containers_by_room.values() for c in pair if c),
-        *(occ.lower() for occ in world.occluders_by_room.values() if occ),
-        *(fix.lower() for fix in world.fixtures_by_room.values() if fix),
-    }
     for dom in DOMAINS:
         if dom.name == world.domain_name:
             continue
@@ -5542,8 +5564,6 @@ def check_prose_render_fidelity(
             *dom.side_reasons,
         )
         for phrase in foreign_phrases:
-            if phrase.lower() in world_own_phrases:
-                continue
             if phrase.lower() in prose_low:
                 cand = _find_sentence_with_substring(prose, phrase)
                 _raise_prose_check_error(
@@ -5762,6 +5782,12 @@ def check_prose_render_fidelity(
                 if search_start < len(event_sentences)
                 else "no candidate sentence"
             )
+            # Deliberate attribution change (2026-11-02): fault attribution changed, verdicts did not.
+            # When `event_sentences[search_start]` does not match `ev`, check not only whether it matches
+            # `world.events[ev_idx + 1]` in accepted form (`_sentence_matches_event`), but also whether
+            # `_event_content_present` ties its content to `world.events[ev_idx + 1]` and not to `ev`.
+            # That marks `ev` as `absent` (`c_fidelity_missing_event`) and preserves `event_sentences[search_start]`
+            # for `ev_idx + 1` so a misshapen sentence's fault (`form_not_accepted`) is attributed to the right event.
             next_ev_matches_search_start = (
                 search_start < len(event_sentences)
                 and ev_idx + 1 < len(world.events)
@@ -6024,7 +6050,13 @@ def collect_prose_faults(
     goal_mode: str = DEFAULT_GOAL_MODE,
     checker_profile: str = DEFAULT_CHECKER_PROFILE,
 ) -> tuple[ProseFaultRecord, ...]:
-    """Run all prose checks (a)-(d) in collect-all mode and return every `ProseFaultRecord` (with no text)."""
+    """Run all prose checks (a)-(d) in collect-all mode and return every `ProseFaultRecord` (with no text).
+
+    Note (2026-11-02): fault attribution changed, verdicts did not. In `check_prose_render_fidelity`,
+    `next_ev_matches_search_start` also preserves `event_sentences[search_start]` for `world.events[ev_idx + 1]`
+    when `_event_content_present` ties the candidate sentence to `ev_idx + 1` rather than `ev`, moving a misshapen
+    sentence's fault to the event whose content it carries without changing scene-level pass/fail verdicts.
+    """
     if goal_mode not in VALID_GOAL_MODES:
         raise ValueError(f"goal_mode must be one of {sorted(VALID_GOAL_MODES)}, got {goal_mode!r}")
     if checker_profile not in VALID_CHECKER_PROFILES:

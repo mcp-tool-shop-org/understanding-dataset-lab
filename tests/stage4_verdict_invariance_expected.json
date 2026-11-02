@@ -1,0 +1,1104 @@
+{
+  "schema_version": 1,
+  "base_commit": "856df86ec04cf66e789c6346db6c2448a44289ba",
+  "description": "Base pass/fail verdicts and fault lists recorded against 856df86ec04cf66e789c6346db6c2448a44289ba for the 32-scene multi-event verdict-invariance battery.",
+  "scenes": [
+    {
+      "id": "v01_valid_say_move_see",
+      "category": "valid",
+      "events": [
+        "say",
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": true,
+        "faults": []
+      },
+      "profile_d": {
+        "passed": true,
+        "faults": []
+      }
+    },
+    {
+      "id": "v02_valid_station_occ_return",
+      "category": "valid",
+      "events": [
+        "station_to_alcove",
+        "see_occ",
+        "station_to_bay"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": true,
+        "faults": []
+      },
+      "profile_d": {
+        "passed": true,
+        "faults": []
+      }
+    },
+    {
+      "id": "v03_valid_leave_enter_say",
+      "category": "valid",
+      "events": [
+        "leave_ab",
+        "enter_ab",
+        "say"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": true,
+        "faults": []
+      },
+      "profile_d": {
+        "passed": true,
+        "faults": []
+      }
+    },
+    {
+      "id": "v04_valid_profile_d_widenings",
+      "category": "valid_d_only",
+      "events": [
+        "say",
+        "move",
+        "see_occ",
+        "see_clear"
+      ],
+      "num_sentences": 4,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "m3_by_agent",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 3,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "v2_hid",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 4,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "p1_phrase",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": true,
+        "faults": []
+      }
+    },
+    {
+      "id": "v05_valid_four_events_canonical",
+      "category": "valid",
+      "events": [
+        "say",
+        "see_clear",
+        "move",
+        "station_to_alcove"
+      ],
+      "num_sentences": 4,
+      "profile_c": {
+        "passed": true,
+        "faults": []
+      },
+      "profile_d": {
+        "passed": true,
+        "faults": []
+      }
+    },
+    {
+      "id": "v06_valid_folded_leave_enter_move",
+      "category": "valid",
+      "events": [
+        "leave_ab",
+        "enter_ab",
+        "move"
+      ],
+      "num_sentences": 2,
+      "profile_c": {
+        "passed": true,
+        "faults": []
+      },
+      "profile_d": {
+        "passed": true,
+        "faults": []
+      }
+    },
+    {
+      "id": "fna07_first_say_split",
+      "category": "form_bad",
+      "events": [
+        "say",
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "missing_quote",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "missing_quote",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fna08_first_say_inverted",
+      "category": "form_bad",
+      "events": [
+        "say",
+        "move"
+      ],
+      "num_sentences": 2,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fna09_second_say_indirect",
+      "category": "form_bad",
+      "events": [
+        "move",
+        "say",
+        "see_clear"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "missing_quote",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "missing_quote",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fna10_second_move_cleft",
+      "category": "form_bad",
+      "events": [
+        "say",
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fna11_third_move_to_first",
+      "category": "form_bad",
+      "events": [
+        "say",
+        "see_clear",
+        "move"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 3,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "from_after_to",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 3,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "from_after_to",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fna12_first_move_obj_fronted",
+      "category": "form_bad",
+      "events": [
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 2,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_1_object",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_1_object",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fna13_second_see_passive",
+      "category": "form_bad",
+      "events": [
+        "move",
+        "see_clear",
+        "say"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "fix_no_fronted_container_see",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "fix_no_fronted_container_see",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fna14_third_see_cleft",
+      "category": "form_bad",
+      "events": [
+        "say",
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 3,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 3,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fna15_second_see_occ_passive",
+      "category": "form_bad",
+      "events": [
+        "station_to_alcove",
+        "see_occ",
+        "station_to_bay"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "fix_no_fronted_container_see",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "fix_no_fronted_container_see",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fna16_station_move_cleft",
+      "category": "form_bad",
+      "events": [
+        "station_to_alcove",
+        "see_occ"
+      ],
+      "num_sentences": 2,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mean17_wrong_actor_and_valid",
+      "category": "meaning_bad",
+      "events": [
+        "say",
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "fix_no_fronted_bystander",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "fix_no_fronted_bystander",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mean18_wrong_room_and_fna",
+      "category": "meaning_bad",
+      "events": [
+        "say",
+        "move"
+      ],
+      "num_sentences": 2,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "other_room",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "other_room",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mean19_reversed_move_and_valid",
+      "category": "meaning_bad",
+      "events": [
+        "say",
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "from_after_to",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "from_after_to",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mean20_negated_move_and_hedged_see",
+      "category": "meaning_bad",
+      "events": [
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 2,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "negation_or_hedge",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "negation_or_hedge",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mean21_wrong_occluder_and_clear_occ",
+      "category": "meaning_bad",
+      "events": [
+        "station_to_alcove",
+        "see_occ"
+      ],
+      "num_sentences": 2,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "other_event_fidelity",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "fix_no_fronted_container_see",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "other_event_fidelity",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "fix_no_fronted_container_see",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "omit22_review_scene_a",
+      "category": "omitted_and_form_bad",
+      "events": [
+        "say",
+        "see_clear",
+        "move"
+      ],
+      "num_sentences": 2,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "wrong_verb",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 3,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "wrong_verb",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 3,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          }
+        ]
+      }
+    },
+    {
+      "id": "omit23_omit_ev1_then_fna_ev2_valid_ev3",
+      "category": "omitted_and_form_bad",
+      "events": [
+        "say",
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 2,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "missing_quote",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "missing_quote",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          }
+        ]
+      }
+    },
+    {
+      "id": "omit24_omit_ev1_then_valid_ev2_valid_ev3",
+      "category": "omitted",
+      "events": [
+        "say",
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 2,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          }
+        ]
+      }
+    },
+    {
+      "id": "omit25_omit_ev3_after_valid_and_fna",
+      "category": "omitted_and_form_bad",
+      "events": [
+        "say",
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 2,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "from_after_to",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 3,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "from_after_to",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 3,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          }
+        ]
+      }
+    },
+    {
+      "id": "omit26_omit_middle_meaning_bad_last",
+      "category": "omitted_and_meaning_bad",
+      "events": [
+        "say",
+        "see_clear",
+        "move"
+      ],
+      "num_sentences": 2,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "wrong_verb",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 3,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "wrong_verb",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 3,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          }
+        ]
+      }
+    },
+    {
+      "id": "reord27_review_scene_b",
+      "category": "reordered_form_bad",
+      "events": [
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 2,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "wrong_verb",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "wrong_verb",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "wrong_verb",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "wrong_verb",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "reord28_swap_valid_say_move",
+      "category": "reordered",
+      "events": [
+        "say",
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_event_order",
+            "rule_id": "c_fidelity_event_order",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_event_order",
+            "rule_id": "c_fidelity_event_order",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "reord29_swap_valid_and_fna",
+      "category": "reordered_and_form_bad",
+      "events": [
+        "move",
+        "see_clear",
+        "say"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          },
+          {
+            "event_index": null,
+            "check_id": "c_fidelity_unlogged_event",
+            "rule_id": "c_fidelity_unlogged_event",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          },
+          {
+            "event_index": null,
+            "check_id": "c_fidelity_unlogged_event",
+            "rule_id": "c_fidelity_unlogged_event",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "bund30_bundled_move_and_see_one_sent",
+      "category": "bundled",
+      "events": [
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 1,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "bundled_event",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "bundled_event",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "c_fidelity_missing_event",
+            "failure_kind": "absent"
+          }
+        ]
+      }
+    },
+    {
+      "id": "bund31_bundled_with_trailing_valid",
+      "category": "bundled",
+      "events": [
+        "say",
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 3,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "bundled_event",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "bundled_event",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mix32_fna_meaning_extra_unlogged",
+      "category": "mixed",
+      "events": [
+        "say",
+        "move",
+        "see_clear"
+      ],
+      "num_sentences": 4,
+      "profile_c": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": null,
+            "check_id": "c_fidelity_unlogged_event",
+            "rule_id": "c_fidelity_unlogged_event",
+            "failure_kind": "altered"
+          }
+        ]
+      },
+      "profile_d": {
+        "passed": false,
+        "faults": [
+          {
+            "event_index": 1,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": 2,
+            "check_id": "c_fidelity_missing_event",
+            "rule_id": "defect_4_actor_subject",
+            "failure_kind": "altered"
+          },
+          {
+            "event_index": null,
+            "check_id": "c_fidelity_unlogged_event",
+            "rule_id": "c_fidelity_unlogged_event",
+            "failure_kind": "altered"
+          }
+        ]
+      }
+    }
+  ]
+}
