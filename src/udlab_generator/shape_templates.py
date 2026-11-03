@@ -966,6 +966,72 @@ def render_control_scene(
     return say_res.prose
 
 
+def _can_complete_stage5_plan_block(
+    rem_counts: Mapping[str, int],
+    last_1: str | None,
+    last_2: str | None,
+    remaining_len: int,
+) -> bool:
+    """Return True iff `rem_counts` (summing to `remaining_len`) has at least one no-3-in-a-row completion after `(last_1, last_2)`."""
+    if remaining_len == 0:
+        return True
+    for form_id, count in rem_counts.items():
+        if count <= 0:
+            continue
+        others = remaining_len - count
+        if last_1 is not None and last_1 == last_2 == form_id:
+            cap = 2 * others
+        elif last_2 == form_id:
+            cap = 2 * others + 1
+        else:
+            cap = 2 * (others + 1)
+        if count > cap:
+            return False
+    return True
+
+
+def _sample_stage5_plan_block(
+    forms: tuple[str, ...],
+    quotas: Mapping[str, int],
+    last_two: tuple[str | None, str | None],
+    rng: random.Random,
+    *,
+    stream_name: str,
+    block_idx: int,
+) -> list[str]:
+    """Sample a valid block arrangement via seeded constructive backtracking over positions, or raise `STAGE5_PLAN_GENERATION_FAILED`."""
+    rem: dict[str, int] = {f: int(quotas.get(f, 0)) for f in forms}
+    total_len = sum(rem.values())
+    if total_len == 0:
+        return []
+
+    out: list[str] = []
+
+    def _bt(pos: int, l1: str | None, l2: str | None) -> bool:
+        if pos == total_len:
+            return True
+        forbidden = l2 if (l1 is not None and l1 == l2) else None
+        candidates = [f for f in forms if rem[f] > 0 and f != forbidden]
+        rng.shuffle(candidates)
+        remaining_after = total_len - pos - 1
+        for cand in candidates:
+            rem[cand] -= 1
+            if _can_complete_stage5_plan_block(rem, l2, cand, remaining_after):
+                out.append(cand)
+                if _bt(pos + 1, l2, cand):
+                    return True
+                out.pop()
+            rem[cand] += 1
+        return False
+
+    if not _bt(0, last_two[0], last_two[1]):
+        raise RuntimeError(
+            f"STAGE5_PLAN_GENERATION_FAILED: no valid shape-plan arrangement exists "
+            f"(stream={stream_name}, block={block_idx})."
+        )
+    return out
+
+
 def generate_stage5_shape_plan(
     worlds: Sequence[World],
     *,
@@ -974,12 +1040,17 @@ def generate_stage5_shape_plan(
 ) -> dict[str, object]:
     """Generate a deterministic Stage 5 shape plan across `worlds` (`MOVE_1..4`, `SEE_1..2`, `SEE_3..5`, `SAY_1..4`).
 
-    Uses the Stage 4 block-of-20 quota balance (spread <= 1) and no-3-in-a-row rejection rule, with `SAY_5` excluded
-    from the `say` pool (`SAY_1`–`SAY_4` only) and `MOVE_0` assigned to `move_station_change`.
+    Applies the registered Stage 4/5 block and balance rules per variant stream in bank order:
+    - Each variant stream (`move_normal`, `move_occluded`, `see_unoccluded`, `see_occluded`, `say`) is cut into
+      consecutive blocks of `block_size` (20) events plus any final tail block (`n mod block_size` events).
+    - Within every full block and any tail/short block, form counts differ by at most 1 (spread <= 1).
+    - Remainder uses (`m mod k`) advance along a single per-stream rotation so global counts stay within 1 (spread <= 1).
+    - No three identical forms in a row anywhere in a stream (including across scenario and block boundaries).
+    - `SAY_5` is excluded from the `say` pool (`SAY_1`–`SAY_4` only) and `MOVE_0` is assigned to `move_station_change`.
     """
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise TypeError(f"seed must be an int, got {seed!r}")
-    if block_size <= 0:
+    if isinstance(block_size, bool) or not isinstance(block_size, int) or block_size <= 0:
         raise ValueError(f"block_size must be >= 1, got {block_size}")
 
     assigned_variants: dict[str, tuple[str, ...]] = {
@@ -989,124 +1060,77 @@ def generate_stage5_shape_plan(
         "see_occluded": SEE_OCCLUDED_FORMS,
         "say": SAY_FORMS,
     }
-    stream_defs: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("move_normal", ("move_normal",)),
-        ("move_occluded", ("move_occluded",)),
-        ("see_unoccluded", ("see_unoccluded",)),
-        ("see_occluded", ("see_occluded",)),
-        ("say", ("say",)),
-    )
+
+    stream_counts: Counter[str] = Counter()
+    for w in worlds:
+        for ev in w.events:
+            v = event_shape_plan_variant(ev, w)
+            if v in assigned_variants:
+                stream_counts[v] += 1
+
+    drawn_by_stream: dict[str, list[str]] = {}
+    for stream_name, forms in assigned_variants.items():
+        n_events = stream_counts[stream_name]
+        if n_events == 0:
+            drawn_by_stream[stream_name] = []
+            continue
+
+        stream_seed_bytes = hashlib.blake2b(
+            f"udlab.stage5.shape_plan.v1:{seed}:{stream_name}".encode("utf-8"),
+            digest_size=8,
+        ).digest()
+        stream_rng = random.Random(int.from_bytes(stream_seed_bytes, "big"))
+        k = len(forms)
+        rotation_order: tuple[str, ...] = tuple(stream_rng.sample(forms, k))
+        rot_cursor = 0
+        last_two: tuple[str | None, str | None] = (None, None)
+        stream_draws: list[str] = []
+
+        for block_idx, b_start in enumerate(range(0, n_events, block_size)):
+            m = min(block_size, n_events - b_start)
+            base_q = m // k
+            rem = m % k
+            extra_forms = {rotation_order[(rot_cursor + i) % k] for i in range(rem)}
+            rot_cursor = (rot_cursor + rem) % k
+            quotas = {f: base_q + (1 if f in extra_forms else 0) for f in forms}
+            block_draws = _sample_stage5_plan_block(
+                forms,
+                quotas,
+                last_two,
+                stream_rng,
+                stream_name=stream_name,
+                block_idx=block_idx,
+            )
+            for form_id in block_draws:
+                last_two = (last_two[1], form_id)
+                stream_draws.append(form_id)
+
+        drawn_by_stream[stream_name] = stream_draws
 
     plan_by_scenario_id: dict[str, list[dict[str, object]]] = {}
     all_records: list[dict[str, object]] = []
+    stream_cursors: Counter[str] = Counter()
 
-    for block_idx, b_start in enumerate(range(0, len(worlds), block_size)):
-        block_worlds = worlds[b_start : b_start + block_size]
-        has_both_move_variants = (
-            any(event_shape_plan_variant(ev, w) == "move_normal" for w in block_worlds for ev in w.events)
-            and any(event_shape_plan_variant(ev, w) == "move_occluded" for w in block_worlds for ev in w.events)
-        )
-        effective_streams: tuple[tuple[str, tuple[str, ...]], ...] = (
-            (
-                ("move", ("move_normal", "move_occluded")),
-                ("see_unoccluded", ("see_unoccluded",)),
-                ("see_occluded", ("see_occluded",)),
-                ("say", ("say",)),
-            )
-            if has_both_move_variants
-            else stream_defs
-        )
-
-        drawn_by_scene_variant: dict[tuple[int, str], list[str]] = {}
-
-        for stream_name, stream_variants in effective_streams:
-            stream_seed_bytes = hashlib.blake2b(
-                f"udlab.stage5.shape_plan.v1:{seed}:block_{block_idx}:{stream_name}".encode("utf-8"),
-                digest_size=8,
-            ).digest()
-            stream_rng = random.Random(int.from_bytes(stream_seed_bytes, "big"))
-            v_counts: Counter[str] = Counter()
-            for w in block_worlds:
-                for ev in w.events:
-                    v = event_shape_plan_variant(ev, w)
-                    if v in stream_variants:
-                        v_counts[v] += 1
-            if sum(v_counts.values()) == 0:
-                continue
-
-            succeeded = False
-            for _attempt in range(10_000):
-                quotas: dict[str, dict[str, int]] = {}
-                for v in stream_variants:
-                    forms = assigned_variants[v]
-                    m = v_counts[v]
-                    k = len(forms)
-                    base_q = m // k
-                    rem = m % k
-                    extra = set(stream_rng.sample(forms, rem)) if rem else set()
-                    quotas[v] = {f: base_q + (1 if f in extra else 0) for f in forms}
-
-                ok = True
-                candidate_draws: dict[tuple[int, str], list[str]] = {}
-                for s_off, w in enumerate(block_worlds):
-                    last_kind_forms: list[str] = []
-                    for ev in w.events:
-                        v = event_shape_plan_variant(ev, w)
-                        if v == "move_station_change" and "move_normal" in stream_variants:
-                            last_kind_forms.append("MOVE_0")
-                            continue
-                        if v not in stream_variants:
-                            continue
-                        forms = assigned_variants[v]
-                        forbidden = (
-                            last_kind_forms[-1]
-                            if (len(last_kind_forms) >= 2 and last_kind_forms[-1] == last_kind_forms[-2])
-                            else None
-                        )
-                        avail = [f for f in forms if quotas[v][f] > 0 and f != forbidden]
-                        if not avail:
-                            ok = False
-                            break
-                        while True:
-                            cand = stream_rng.choice(forms)
-                            if cand in avail:
-                                break
-                        quotas[v][cand] -= 1
-                        last_kind_forms.append(cand)
-                        candidate_draws.setdefault((s_off, v), []).append(cand)
-                    if not ok:
-                        break
-                if ok:
-                    drawn_by_scene_variant.update(candidate_draws)
-                    succeeded = True
-                    break
-            if not succeeded:
-                raise RuntimeError(
-                    f"STOPPED: Stage 5 shape plan block-of-{block_size} balance infeasible "
-                    f"(block={block_idx}, stream={stream_name})."
-                )
-
-        for s_off, w in enumerate(block_worlds):
-            variant_cursors: Counter[str] = Counter()
-            scen_records: list[dict[str, object]] = []
-            for ev_idx, ev in enumerate(w.events, start=1):
-                v = event_shape_plan_variant(ev, w)
-                if v in assigned_variants:
-                    cur = variant_cursors[v]
-                    variant_cursors[v] += 1
-                    form_id = drawn_by_scene_variant[(s_off, v)][cur]
-                else:
-                    form_id = wildcard_form_id_for_event(ev, w)
-                rec: dict[str, object] = {
-                    "scenario_id": w.scenario_id,
-                    "event_index": ev_idx,
-                    "kind": ev.kind,
-                    "variant": v,
-                    "form_id": form_id,
-                }
-                scen_records.append(rec)
-                all_records.append(rec)
-            plan_by_scenario_id[w.scenario_id] = scen_records
+    for w in worlds:
+        scen_records: list[dict[str, object]] = []
+        for ev_idx, ev in enumerate(w.events, start=1):
+            v = event_shape_plan_variant(ev, w)
+            if v in assigned_variants:
+                cur = stream_cursors[v]
+                stream_cursors[v] += 1
+                form_id = drawn_by_stream[v][cur]
+            else:
+                form_id = wildcard_form_id_for_event(ev, w)
+            rec: dict[str, object] = {
+                "scenario_id": w.scenario_id,
+                "event_index": ev_idx,
+                "kind": ev.kind,
+                "variant": v,
+                "form_id": form_id,
+            }
+            scen_records.append(rec)
+            all_records.append(rec)
+        plan_by_scenario_id[w.scenario_id] = scen_records
 
     return {
         "seed": seed,

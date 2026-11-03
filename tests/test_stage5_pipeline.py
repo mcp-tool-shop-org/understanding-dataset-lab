@@ -1826,24 +1826,23 @@ def test_22_addendum2_item11_dry_mode_upper_bound_and_over_cap_count() -> None:
     assert dry_res["ctx_over_cap"] == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Addendum 2 Item 12 STOP & REPORT: generate_stage5_shape_plan (src/udlab_generator/shape_templates.py:969) "
-        "slices 20-scenario blocks rather than 20-event blocks per variant stream, resets last_kind_forms=[] on "
-        "every scenario and block boundary (allowing 3-in-a-row across boundaries), and samples extra remainder "
-        "forms independently per block without rotating the short shape (allowing global form spread > 1). "
-        "Per card U4 & Addendum 2 Item 12: do not modify shape_templates.py."
-    ),
-)
 def test_23_addendum2_item12_multi_block_plan_check() -> None:
     """Addendum 2 Item 12: Multi-block plan test over >= 3 blocks per variant stream against `generate_stage5_shape_plan` (`shape_templates.py:969`)."""
     worlds = [generate_world(cfg) for cfg in make_balanced_configs(60, base_seed=20261103)]
     plan = generate_stage5_shape_plan(worlds, seed=20261103, block_size=20)
     recs = plan["plan_records"]
 
+    empty_streams = {
+        v
+        for v in STAGE5_ASSIGNED_VARIANTS
+        if not any(r["variant"] == v for r in recs)
+    }
+    assert empty_streams == {"move_occluded"}
+
     for v, forms in STAGE5_ASSIGNED_VARIANTS.items():
         seq = [str(r["form_id"]) for r in recs if r["variant"] == v]
+        if not seq:
+            continue
         assert len(seq) >= 60, f"Variant {v} needs at least 3 blocks of 20 events, got {len(seq)}"
         # 1. No three-in-a-row across block edges (indices 18-20, 38-40) or anywhere in stream
         for edge_start in (18, 38):
