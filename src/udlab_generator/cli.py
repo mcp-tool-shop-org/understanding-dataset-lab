@@ -1544,9 +1544,16 @@ def main(
     )
     parser.add_argument(
         "--stage5-redo-b",
+        nargs="*",
+        default=None,
+        metavar="RENDERING",
+        help="Explicitly re-run B on --resume for --stage5 (all renderings if no argument is given, or specific scen_XXXX[:r] rendering(s)), resetting downstream fields.",
+    )
+    parser.add_argument(
+        "--stage5-redo-rung",
         action="store_true",
         default=False,
-        help="Explicitly re-run B on --resume for --stage5, resetting downstream rung and S fields.",
+        help="Explicitly reset and re-run the Stage 5 rewrite-input rung on --resume (reusing rung_seed).",
     )
     parser.add_argument(
         "--stage5-s-code",
@@ -1581,6 +1588,10 @@ def main(
                 if args.stage5_seed_bank is not None
                 else args.paired_seed_bank
             )
+            try:
+                prompt_token_counter = resolve_prompt_token_counter(args.llama_tokenize, args.writer_gguf)
+            except (ValueError, FileNotFoundError) as exc:
+                parser.error(str(exc))
             if args.dry:
                 dry_out = run_stage5_dry(
                     count=args.count,
@@ -1588,13 +1599,21 @@ def main(
                     seed_bank=resolved_stage5_seed_bank,
                     stage5_plan_seed=args.stage5_plan_seed,
                     max_retries=args.max_retries,
+                    num_predict=args.num_predict,
+                    max_num_ctx=args.max_num_ctx,
+                    think=bool(args.think),
+                    goal_mode=args.goal_mode,
+                    prompt_token_counter=prompt_token_counter,
                 )
                 print(json.dumps(dry_out, sort_keys=True))
                 return 0
-            try:
-                prompt_token_counter = resolve_prompt_token_counter(args.llama_tokenize, args.writer_gguf)
-            except (ValueError, FileNotFoundError) as exc:
-                parser.error(str(exc))
+            resolved_redo_b: bool | list[str]
+            if args.stage5_redo_b is None:
+                resolved_redo_b = False
+            elif len(args.stage5_redo_b) == 0:
+                resolved_redo_b = True
+            else:
+                resolved_redo_b = list(args.stage5_redo_b)
             stage5_rec = run_stage5_pipeline(
                 count=args.count,
                 base_seed=args.seed,
@@ -1603,7 +1622,8 @@ def main(
                 writer_kind=args.writer,
                 stage5_plan_seed=args.stage5_plan_seed,
                 stage5_rung_seed=args.stage5_rung_seed,
-                redo_b=bool(args.stage5_redo_b),
+                redo_b=resolved_redo_b,
+                redo_rung=bool(args.stage5_redo_rung),
                 s_code_say=bool(args.stage5_s_code),
                 vram_halt_mib=args.vram_halt_mib,
                 num_predict=args.num_predict,

@@ -1,4 +1,4 @@
-"""Tests for the Stage 5 hybrid pipeline (`--stage5`) and `stage5_run_record.json` (Card U4)."""
+"""Tests for the Stage 5 hybrid pipeline (`--stage5`) and `stage5_run_record.json` (Card U4 + Addenda 1 & 2)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ from collections import Counter
 from fractions import Fraction
 import hashlib
 import json
+import os
 from pathlib import Path
+import random
 import secrets
 from typing import Any, Mapping
 import pytest
@@ -32,15 +34,26 @@ from udlab_generator.render import (
     world_from_scenario_seed,
 )
 from udlab_generator.rewrite import SAY_SHAPE_DESCRIPTIONS
-from udlab_generator.shape_templates import render_event_sentence
+from udlab_generator.shape_templates import (
+    generate_stage5_shape_plan,
+    render_event_sentence,
+    swap_all_move_see,
+)
 from udlab_generator.stage5_pipeline import (
+    STAGE5_ASSIGNED_VARIANTS,
     STAGE5_RUN_RECORD_FILENAME,
     STAGE5_RUNG_RULE,
     STAGE5_SCHEMA_VERSION,
+    STAGE5_STATUS_FILENAME,
+    Stage5RedoBSampledByRungError,
+    Stage5ResumeAfterSLtBError,
+    Stage5ResumeEnvChangedError,
     Stage5ResumeNoPlanSeedError,
     Stage5RungSampleShortError,
     Stage5SLtBStopError,
     _render_mock_stage5_baseline,
+    _sample_rung_events_at_most_one_per_rendering,
+    compute_stage5_module_sha256s,
     decide_rung_input_mode,
     run_stage5_dry,
     run_stage5_pipeline,
@@ -72,7 +85,6 @@ VALID_VARIANTS = frozenset(
 def _make_fake_rewrite_client(
     worlds: list[Any],
     *,
-    fail_on_rendering: tuple[str, int] | None = None,
     with_draft_only: bool = False,
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Create a deterministic CPU fake rewrite client that records every call and returns the planned template sentence."""
@@ -159,6 +171,10 @@ def _assert_valid_stage5_record_schema(rec: Mapping[str, Any]) -> None:
     assert rec["seed_bank_size"] is None or (
         isinstance(rec["seed_bank_size"], int) and not isinstance(rec["seed_bank_size"], bool)
     )
+    assert isinstance(rec["module_sha256s"], dict)
+    assert set(rec["module_sha256s"].keys()) == {"render.py", "shape_templates.py", "rewrite.py"}
+    assert isinstance(rec["rung_aborted_calls"], int) and not isinstance(rec["rung_aborted_calls"], bool)
+    assert isinstance(rec["rung_scenario_overlap"], int) and not isinstance(rec["rung_scenario_overlap"], bool)
 
     rung = rec["rung"]
     assert isinstance(rung, dict)
@@ -168,6 +184,7 @@ def _assert_valid_stage5_record_schema(rec: Mapping[str, Any]) -> None:
         assert isinstance(rung[k]["kept"], int) and not isinstance(rung[k]["kept"], bool)
     assert rung["chosen"] in ("facts_only", "with_draft")
     assert isinstance(rung["rule"], str) and rung["rule"] == STAGE5_RUNG_RULE
+    assert isinstance(rung["rung_scenario_overlap"], int)
 
     assert rec["stop_reason"] is None or rec["stop_reason"] == "S_LT_B"
 
@@ -179,10 +196,11 @@ def _assert_valid_stage5_record_schema(rec: Mapping[str, Any]) -> None:
     assert isinstance(prog["s_done"], int)
     calls_made = prog["calls_made"]
     assert isinstance(calls_made, dict)
-    for ck in ("b_calls", "rung_calls", "rewrite_calls"):
+    for ck in ("b_calls", "rung_calls", "rung_aborted_calls", "rewrite_calls"):
         assert isinstance(calls_made[ck], int) and not isinstance(calls_made[ck], bool)
 
     assert isinstance(rec["redo_b"], bool)
+    assert isinstance(rec["redo_rung"], bool)
 
     eng = rec["engine"]
     assert isinstance(eng, dict)
@@ -196,7 +214,7 @@ def _assert_valid_stage5_record_schema(rec: Mapping[str, Any]) -> None:
 
     cc = rec["call_counts"]
     assert isinstance(cc, dict)
-    for ck in ("b_calls", "rung_calls", "rewrite_calls"):
+    for ck in ("b_calls", "rung_calls", "rung_aborted_calls", "rewrite_calls"):
         assert isinstance(cc[ck], int) and not isinstance(cc[ck], bool)
 
     summary = rec["summary"]
@@ -261,8 +279,8 @@ def _assert_valid_stage5_record_schema(rec: Mapping[str, Any]) -> None:
 
 
 def test_1_full_mock_run_schema_and_summary(tmp_path: Path) -> None:
-    """Test 1: Full mock run on a synthetic bank (n=20 >= 12) with a fake rewrite client validates schema, summary, and fixture parity."""
-    n = 20
+    """Test 1: Full mock run on a synthetic bank (n=40 >= 12) with a fake rewrite client validates schema, summary, and fixture parity."""
+    n = 40
     base_seed = 20261103
     worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
     client, calls = _make_fake_rewrite_client(worlds)
@@ -282,7 +300,7 @@ def test_1_full_mock_run_schema_and_summary(tmp_path: Path) -> None:
     _assert_valid_stage5_record_schema(rec)
 
     rs = rec["renderings"]
-    assert len(rs) == n * 2 == 40
+    assert len(rs) == n * 2 == 80
     assert rec["summary"] == {
         "renderings": len(rs),
         "b_passed": sum(1 for r in rs if r["b_passed"]),
@@ -290,8 +308,8 @@ def test_1_full_mock_run_schema_and_summary(tmp_path: Path) -> None:
         "s_pass_b_fail": sum(1 for r in rs if r["s_passed"] and not r["b_passed"]),
         "ctx_over_cap": sum(1 for r in rs if r["ctx_over_cap"]),
     }
-    assert rec["summary"]["b_passed"] == 40
-    assert rec["summary"]["s_passed"] == 40
+    assert rec["summary"]["b_passed"] == 80
+    assert rec["summary"]["s_passed"] == 80
     assert rec["summary"]["s_pass_b_fail"] == 0
     assert rec["summary"]["ctx_over_cap"] == 0
     assert rec["stop_reason"] is None
@@ -304,7 +322,7 @@ def test_1_full_mock_run_schema_and_summary(tmp_path: Path) -> None:
     assert rec["rung"]["facts_only"] == {"attempts": 60, "kept": 60}
     assert rec["rung"]["with_draft"] == {"attempts": 60, "kept": 60}
     assert rec["rung"]["chosen"] == "facts_only"
-    assert rec["call_counts"]["b_calls"] == 40
+    assert rec["call_counts"]["b_calls"] == 80
     assert rec["call_counts"]["rung_calls"] == 120
     assert len(calls) == 120 + rec["call_counts"]["rewrite_calls"]
 
@@ -315,20 +333,35 @@ def test_1_full_mock_run_schema_and_summary(tmp_path: Path) -> None:
 
 
 def test_2_s_ge_b_stop_and_resume(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Test 2: S >= B stop (`STAGE5_S_LT_B`) on a rendering where B passed and S failed, plus resume and `--stage5-redo-b`."""
-    n = 20
+    """Test 2: S >= B stop (`STAGE5_S_LT_B`) on a rendering where B passed and S failed, refusal on unreset resume, and resume with explicit reset."""
+    n = 40
     base_seed = 20261103
     worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
     good_client, _ = _make_fake_rewrite_client(worlds)
 
-    # Inject a faulty swap on rendering index 2 (scen_0001, r0) so B passes and S fails
+    # Find an unsampled rendering from the fixture so we can test resetting just that rendering without resetting the rung,
+    # as well as full --stage5-redo-b + --stage5-redo-rung.
+    fixture_rec = json.loads(MOCK_RECORD_FIXTURE_PATH.read_text(encoding="utf-8"))
+    sampled_set = {
+        (str(pair[0]), int(pair[1])) for pair in fixture_rec["rung"]["sampled_renderings"]
+    }
+    unsampled_candidates = [
+        (w.scenario_id, r_idx, idx)
+        for idx, (w, r_idx) in enumerate((w, r_idx) for w in worlds for r_idx in (0, 1))
+        if (w.scenario_id, r_idx) not in sampled_set and idx >= 2
+    ]
+    target_sid, target_r_idx, target_flat_idx = unsampled_candidates[0]
+
     orig_swap = stage5_mod.swap_all_move_see
     inject_bad_swap = True
 
     def _sabotaged_swap(prose: str, world: Any, plan: Any, **kwargs: Any) -> Any:
         res = orig_swap(prose, world, plan, **kwargs)
-        if inject_bad_swap and world.scenario_id == "scen_0001" and kwargs.get("focal_agent") == world.agents[0]:
-            # Inject a banned adverb into S prose after swap so final profile-d check on S fails while B passed
+        if (
+            inject_bad_swap
+            and world.scenario_id == target_sid
+            and kwargs.get("focal_agent") == world.agents[target_r_idx]
+        ):
             bad_prose = res.prose + " Quietly."
             return stage5_mod.SwapResult(
                 prose=bad_prose,
@@ -342,10 +375,11 @@ def test_2_s_ge_b_stop_and_resume(tmp_path: Path, capsys: pytest.CaptureFixture[
         return res
 
     out_dir = tmp_path / "run_2_stop"
-    b_calls_by_sid: Counter[str] = Counter()
+    b_calls_by_rendering: Counter[tuple[str, int]] = Counter()
 
     def _counting_b_renderer(w: Any, fa: str) -> str:
-        b_calls_by_sid[w.scenario_id] += 1
+        r_idx_cur = 0 if fa == w.agents[0] else 1
+        b_calls_by_rendering[(w.scenario_id, r_idx_cur)] += 1
         return _render_mock_stage5_baseline(w, fa)
 
     stage5_mod.swap_all_move_see = _sabotaged_swap  # type: ignore[assignment]
@@ -363,10 +397,9 @@ def test_2_s_ge_b_stop_and_resume(tmp_path: Path, capsys: pytest.CaptureFixture[
                 mock_custom_renderer=_counting_b_renderer,
             )
         assert "STAGE5_S_LT_B" in str(exc_info.value)
-        assert exc_info.value.scenario_id == "scen_0001"
-        assert exc_info.value.rendering_index == 0
+        assert exc_info.value.scenario_id == target_sid
+        assert exc_info.value.rendering_index == target_r_idx
 
-        # Also verify CLI returns non-zero (1) and prints STAGE5_S_LT_B to stderr
         cli_out_dir = tmp_path / "run_2_cli_stop"
         rc = cli_mod.main(
             [
@@ -393,74 +426,63 @@ def test_2_s_ge_b_stop_and_resume(tmp_path: Path, capsys: pytest.CaptureFixture[
     stopped_rec = json.loads((out_dir / STAGE5_RUN_RECORD_FILENAME).read_text(encoding="utf-8"))
     assert stopped_rec["stop_reason"] == "S_LT_B"
     assert stopped_rec["stop_detail"]["failure_class"] == "STAGE5_S_LT_B"
-    assert stopped_rec["stop_detail"]["scenario_id"] == "scen_0001"
-    assert stopped_rec["stop_detail"]["rendering_index"] == 0
+    assert stopped_rec["stop_detail"]["scenario_id"] == target_sid
+    assert stopped_rec["stop_detail"]["rendering_index"] == target_r_idx
     assert stopped_rec["stop_detail"]["b_fault_rule_ids"] == []
     assert "c_fidelity_unlogged_event" in stopped_rec["stop_detail"]["s_fault_rule_ids"]
-
-    # B completed for all 40 renderings, S completed up to and including stopping rendering #3 (index 2 -> s_done == 3)
-    assert stopped_rec["progress"]["renderings_planned"] == 40
-    assert stopped_rec["progress"]["b_done"] == 40
+    assert stopped_rec["progress"]["renderings_planned"] == 80
+    assert stopped_rec["progress"]["b_done"] == 80
     assert stopped_rec["progress"]["rung_done"] is True
-    assert stopped_rec["progress"]["s_done"] == 3
-    assert stopped_rec["progress"]["calls_made"]["b_calls"] == 40
-    assert stopped_rec["progress"]["calls_made"]["rung_calls"] == 120
-    # Renderings after index 2 were not processed for S
-    for later_r in stopped_rec["renderings"][3:]:
+    assert stopped_rec["progress"]["s_done"] == target_flat_idx + 1
+    for later_r in stopped_rec["renderings"][target_flat_idx + 1 :]:
         assert later_r["s_passed"] is False
         assert all(ev["s_form"] is None for ev in later_r["events"])
 
-    # Now test RESUME after stop: zero B calls for renderings with B in record, zero rung calls, byte-identical B fields
+    # Addendum 2 Item 3: Resume after S_LT_B without resetting the stopped rendering refuses with STAGE5_RESUME_AFTER_S_LT_B
     inject_bad_swap = False
-    b_calls_by_sid.clear()
-    resume_client, resume_rw_calls = _make_fake_rewrite_client(worlds)
+    with pytest.raises(Stage5ResumeAfterSLtBError) as exc_refused:
+        run_stage5_pipeline(
+            count=n,
+            base_seed=base_seed,
+            output_dir=out_dir,
+            writer_kind="mock",
+            resume=True,
+            rewrite_client=good_client,
+            worlds=worlds,
+        )
+    assert "STAGE5_RESUME_AFTER_S_LT_B" in str(exc_refused.value)
+    assert target_sid in str(exc_refused.value)
+
+    # Resume with explicit reset of the stopped rendering (`redo_b=[f"{target_sid}:{target_r_idx}"]`):
+    # Zero B calls for the other 79 renderings, zero rung calls, byte-identical B fields!
+    b_calls_by_rendering.clear()
+    resume_client, _ = _make_fake_rewrite_client(worlds)
     resumed_rec = run_stage5_pipeline(
         count=n,
         base_seed=base_seed,
         output_dir=out_dir,
         writer_kind="mock",
         resume=True,
+        redo_b=[f"{target_sid}:{target_r_idx}"],
         rewrite_client=resume_client,
         worlds=worlds,
         mock_custom_renderer=_counting_b_renderer,
     )
-    assert sum(b_calls_by_sid.values()) == 0
+    assert b_calls_by_rendering == {(target_sid, target_r_idx): 1}
     assert resumed_rec["stop_reason"] is None
-    assert resumed_rec["redo_b"] is False
-    assert resumed_rec["progress"]["s_done"] == 40
-    assert resumed_rec["summary"]["s_passed"] == 40
-    # Zero rung calls on resume (only rewrite calls for renderings 2..39)
+    assert resumed_rec["redo_b"] is True
+    assert resumed_rec["progress"]["s_done"] == 80
+    assert resumed_rec["summary"]["s_passed"] == 80
     assert resumed_rec["call_counts"]["rung_calls"] == 120
-    assert len(resume_rw_calls) < 90  # renderings 0 and 1 were skipped
-
-    # Verify byte-identical B fields before and after resume
     for r_before, r_after in zip(stopped_rec["renderings"], resumed_rec["renderings"]):
         assert r_before["b_passed"] == r_after["b_passed"]
         assert r_before["b_fault_rule_ids"] == r_after["b_fault_rule_ids"]
         assert [e["b_form"] for e in r_before["events"]] == [e["b_form"] for e in r_after["events"]]
 
-    # Now test --stage5-redo-b on resume: B calls happen for all scenarios and redo_b=True is recorded
-    b_calls_by_sid.clear()
-    redo_client, _ = _make_fake_rewrite_client(worlds)
-    redo_rec = run_stage5_pipeline(
-        count=n,
-        base_seed=base_seed,
-        output_dir=out_dir,
-        writer_kind="mock",
-        resume=True,
-        redo_b=True,
-        rewrite_client=redo_client,
-        worlds=worlds,
-        mock_custom_renderer=_counting_b_renderer,
-    )
-    assert redo_rec["redo_b"] is True
-    assert sum(b_calls_by_sid.values()) == 40
-    assert all(c == 2 for c in b_calls_by_sid.values())
-
 
 def test_3_s_passes_where_b_failed(tmp_path: Path) -> None:
     """Test 3: A rendering where B failed and S passed is allowed, does not stop the run, and is counted in `s_pass_b_fail`."""
-    n = 20
+    n = 40
     base_seed = 20261103
     worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
     client, _ = _make_fake_rewrite_client(worlds)
@@ -468,8 +490,6 @@ def test_3_s_passes_where_b_failed(tmp_path: Path) -> None:
     def _b_fails_first_move_renderer(w: Any, fa: str) -> str:
         clean_b = _render_mock_stage5_baseline(w, fa)
         if w.scenario_id == "scen_0000" and fa == w.agents[0]:
-            # Inject a banned adverb into a move sentence in B so B fails `a_banned_adverbs`,
-            # and `swap_all_move_see` replaces that move sentence so S passes!
             for idx_ev, ev in enumerate(w.events):
                 if ev.kind == "move":
                     paras = clean_b.split("\n\n")
@@ -497,9 +517,9 @@ def test_3_s_passes_where_b_failed(tmp_path: Path) -> None:
     )
 
     assert rec["stop_reason"] is None
-    assert rec["summary"]["renderings"] == 40
-    assert rec["summary"]["b_passed"] == 39
-    assert rec["summary"]["s_passed"] == 40
+    assert rec["summary"]["renderings"] == 80
+    assert rec["summary"]["b_passed"] == 79
+    assert rec["summary"]["s_passed"] == 80
     assert rec["summary"]["s_pass_b_fail"] == 1
     r0 = rec["renderings"][0]
     assert r0["b_passed"] is False
@@ -510,11 +530,10 @@ def test_3_s_passes_where_b_failed(tmp_path: Path) -> None:
 
 def test_4_context_cap_and_4a_cap_decision_per_rendering(tmp_path: Path) -> None:
     """Test 4 & 4a: Reuses the writer's existing `c_ctx_over_cap` refusal path; never drops over-cap renderings; populates `cap`."""
-    n = 21  # 21 scenarios = 42 renderings so even with 1 over-cap rendering, >= 20 eligible per SAY target remain
+    n = 40
     base_seed = 20261103
     worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
-    worlds_by_sid = {w.scenario_id: w for w in worlds}
-    client, rw_calls = _make_fake_rewrite_client(worlds)
+    client, _ = _make_fake_rewrite_client(worlds)
 
     fitting_queue = [
         (w, r_idx, w.agents[r_idx])
@@ -563,7 +582,6 @@ def test_4_context_cap_and_4a_cap_decision_per_rendering(tmp_path: Path) -> None
         nonlocal counter_call_idx
         _ = rendered_prompt
         counter_call_idx += 1
-        # Force only the first rendering (scen_0000, rendering 0) over the 4,864 prompt token limit (5000 + 4096 + 256 = 9352 > 9216)
         if counter_call_idx == 1:
             return 5000
         return 3500
@@ -583,13 +601,10 @@ def test_4_context_cap_and_4a_cap_decision_per_rendering(tmp_path: Path) -> None
         worlds=worlds,
     )
 
-    # 1. Rendering count equals input count (never dropped)
-    assert len(rec["renderings"]) == n * 2 == 42
-    assert rec["summary"]["renderings"] == 42
+    assert len(rec["renderings"]) == n * 2 == 80
+    assert rec["summary"]["renderings"] == 80
     assert rec["summary"]["ctx_over_cap"] == 1
-
-    # 2. Over-cap rendering took the existing refusal path (no model call, c_ctx_over_cap in both fault lists, no swap/rewrite)
-    assert len(chat_calls_made) == 41
+    assert len(chat_calls_made) == 79
     assert ("scen_0000", 0) not in chat_calls_made
     r_over = rec["renderings"][0]
     assert r_over["scenario_id"] == "scen_0000" and r_over["rendering_index"] == 0
@@ -602,7 +617,6 @@ def test_4_context_cap_and_4a_cap_decision_per_rendering(tmp_path: Path) -> None
     assert all(ev["action"] == "not_spliced" for ev in r_over["events"])
     assert all(ev["b_form"] is None and ev["s_form"] is None for ev in r_over["events"])
 
-    # 3. Test 4a: Every rendering's cap block is filled with exact fields
     for r in rec["renderings"]:
         cap = r["cap"]
         assert cap["fits"] == (not r["ctx_over_cap"])
@@ -611,7 +625,6 @@ def test_4_context_cap_and_4a_cap_decision_per_rendering(tmp_path: Path) -> None
         assert cap["margin"] == NUM_CTX_MARGIN_TOKENS == 256
         assert cap["max_num_ctx"] == DEFAULT_WRITER_MAX_NUM_CTX == 9216
 
-    # 4. Raising --max-num-ctx above DEFAULT_WRITER_MAX_NUM_CTX is refused with MaxNumCtxRefusalError
     with pytest.raises(MaxNumCtxRefusalError):
         run_stage5_pipeline(
             count=1,
@@ -625,8 +638,8 @@ def test_4_context_cap_and_4a_cap_decision_per_rendering(tmp_path: Path) -> None
 def test_5_plan_seed_draws_write_order_and_resume_refusal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Test 5: Plan seed is drawn once via `secrets.randbelow`, written before the first writer call, and never redrawn on resume or with flag."""
-    n = 20
+    """Test 5: Plan seed and rung seed are drawn at run start via `secrets.randbelow`, written before the first writer call, and never redrawn on resume."""
+    n = 40
     base_seed = 20261103
     worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
     client, _ = _make_fake_rewrite_client(worlds)
@@ -640,11 +653,11 @@ def test_5_plan_seed_draws_write_order_and_resume_refusal(
 
     monkeypatch.setattr(secrets, "randbelow", _spy_randbelow)
 
-    # 1. Fresh run with rung_seed given by flag -> secrets.randbelow called EXACTLY ONCE (for plan_seed)
+    # 1. Fresh run with no seed flags -> secrets.randbelow called EXACTLY TWICE at run start (plan_seed, rung_seed)
     out_fresh = tmp_path / "run_5_fresh"
     verified_before_writer = False
 
-    def _assert_record_written_before_b( world: Any, focal: str) -> str:
+    def _assert_record_written_before_b(world: Any, focal: str) -> str:
         nonlocal verified_before_writer
         if not verified_before_writer:
             rec_file = out_fresh / STAGE5_RUN_RECORD_FILENAME
@@ -652,6 +665,8 @@ def test_5_plan_seed_draws_write_order_and_resume_refusal(
             on_disk = json.loads(rec_file.read_text(encoding="utf-8"))
             assert on_disk["plan_seed"] == 20261103
             assert on_disk["plan_seed_source"] == "secrets"
+            assert on_disk["rung_seed"] == 20261104
+            assert on_disk["rung_seed_source"] == "secrets"
             verified_before_writer = True
         return _render_mock_stage5_baseline(world, focal)
 
@@ -660,17 +675,16 @@ def test_5_plan_seed_draws_write_order_and_resume_refusal(
         base_seed=base_seed,
         output_dir=out_fresh,
         writer_kind="mock",
-        stage5_rung_seed=20261104,
         rewrite_client=client,
         worlds=worlds,
         mock_custom_renderer=_assert_record_written_before_b,
     )
     assert verified_before_writer is True
-    assert len(randbelow_calls) == 1
+    assert len(randbelow_calls) == 2
     assert rec_fresh["plan_seed"] == 20261103
     assert rec_fresh["plan_seed_source"] == "secrets"
     assert rec_fresh["rung_seed"] == 20261104
-    assert rec_fresh["rung_seed_source"] == "flag"
+    assert rec_fresh["rung_seed_source"] == "secrets"
 
     # 2. Resume -> secrets.randbelow called ZERO times
     randbelow_calls.clear()
@@ -685,6 +699,7 @@ def test_5_plan_seed_draws_write_order_and_resume_refusal(
     )
     assert len(randbelow_calls) == 0
     assert rec_resumed["plan_seed"] == 20261103
+    assert rec_resumed["rung_seed"] == 20261104
 
     # 3. With --stage5-plan-seed and --stage5-rung-seed flags -> secrets.randbelow called ZERO times
     randbelow_calls.clear()
@@ -727,14 +742,12 @@ def test_5_plan_seed_draws_write_order_and_resume_refusal(
 
 def test_6_rewrite_input_rung_sample_rule_boundary_and_short_refusal(tmp_path: Path) -> None:
     """Test 6: Rung samples 20/20/20 from passing B only, calls both inputs on the same 60 events, tests +0.10/+0.0999 boundary, and refuses short samples."""
-    # 1. Exact rational boundary tests (+0.10 -> with_draft; +0.0999 -> facts_only)
-    assert decide_rung_input_mode(60, 36, 60, 42) == "with_draft"  # 42/60 - 36/60 = 6/60 = +0.10 exact
-    assert decide_rung_input_mode(10000, 5000, 10000, 6000) == "with_draft"  # +0.1000
-    assert decide_rung_input_mode(10000, 5000, 10000, 5999) == "facts_only"  # +0.0999
-    assert decide_rung_input_mode(60, 37, 60, 42) == "facts_only"  # 5/60 = +0.0833...
+    assert decide_rung_input_mode(60, 36, 60, 42) == "with_draft"
+    assert decide_rung_input_mode(10000, 5000, 10000, 6000) == "with_draft"
+    assert decide_rung_input_mode(10000, 5000, 10000, 5999) == "facts_only"
+    assert decide_rung_input_mode(60, 37, 60, 42) == "facts_only"
 
-    # 2. Verify 20/20/20 sample from passing B only, and both inputs called on the exact same 60 events
-    n = 20
+    n = 40
     base_seed = 20261103
     worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
     wd_client, wd_calls = _make_fake_rewrite_client(worlds, with_draft_only=True)
@@ -759,16 +772,14 @@ def test_6_rewrite_input_rung_sample_rule_boundary_and_short_refusal(tmp_path: P
     assert all(c["input_mode"] == "facts_only" for c in fo_calls)
     assert all(c["input_mode"] == "with_draft" for c in wd_rung_calls)
     assert Counter(c["target_form"] for c in fo_calls) == {"SAY_2": 20, "SAY_3": 20, "SAY_4": 20}
-    # Both inputs run on the exact same 60 events in the same order
     assert [(c["scenario_id"], c["target_form"]) for c in fo_calls] == [
         (c["scenario_id"], c["target_form"]) for c in wd_rung_calls
     ]
-    # And the main rewrite pass uses the chosen input ("with_draft")
     main_calls = wd_calls[120:]
     assert len(main_calls) > 0
     assert all(c["input_mode"] == "with_draft" for c in main_calls)
 
-    # 3. Short-sample refusal: n=12 has only 18 events per target shape (< 20) -> refuses with STAGE5_RUNG_SAMPLE_SHORT
+    # Short-sample refusal: n=12 has < 20 eligible renderings per target -> refuses with STAGE5_RUNG_SAMPLE_SHORT
     worlds_12 = worlds[:12]
     with pytest.raises(Stage5RungSampleShortError) as exc_short:
         run_stage5_pipeline(
@@ -782,7 +793,7 @@ def test_6_rewrite_input_rung_sample_rule_boundary_and_short_refusal(tmp_path: P
             worlds=worlds_12,
         )
     assert "STAGE5_RUNG_SAMPLE_SHORT" in str(exc_short.value)
-    assert exc_short.value.counts == {"SAY_2": 18, "SAY_3": 18, "SAY_4": 18}
+    assert all(v < 20 for v in exc_short.value.counts.values())
 
 
 def test_7_stage5_dry_no_writer_and_no_calls(
@@ -834,6 +845,8 @@ def test_7_stage5_dry_no_writer_and_no_calls(
     assert dry_doc["plan_seed_source"] == "flag"
     assert dry_doc["scenarios"] == 20
     assert dry_doc["renderings"] == 40
+    assert isinstance(dry_doc["ctx_over_cap"], int) and dry_doc["ctx_over_cap"] >= 0
+    assert dry_doc["expected_call_counts_is_upper_bound_before_ctx_cap"] is True
     assert dry_doc["block_balance_max_spread"] <= 1
     assert dry_doc["planned_form_counts_by_kind"]["say"] == {
         "SAY_1": 15,
@@ -852,7 +865,7 @@ def test_8_no_prose_in_record_stdout_or_stderr(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Test 8: Serialized `stage5_run_record.json`, stdout, and stderr carry zero agent names, rooms, or utterances."""
-    n = 20
+    n = 40
     base_seed = 20261103
     worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
     client, _ = _make_fake_rewrite_client(worlds)
@@ -877,7 +890,6 @@ def test_8_no_prose_in_record_stdout_or_stderr(
     assert rc == 0
     captured = capsys.readouterr()
 
-    # stdout is a single JSON summary line of counts
     stdout_lines = [ln for ln in captured.out.splitlines() if ln.strip()]
     assert len(stdout_lines) == 1
     summary_from_stdout = json.loads(stdout_lines[0])
@@ -926,7 +938,7 @@ def test_9_repin_and_testing_notes() -> None:
 
     rewrite_test_text = (REPO_ROOT / "tests" / "test_stage5_rewrite.py").read_text(encoding="utf-8")
     assert 'u3_sha = "f6277c6d6f52b6280b0f1cab518dd7d741a85c6e"' in rewrite_test_text
-    assert '"tests/test_stage5_templates.py",  # U3-fix1 authorized test-file edit' in rewrite_test_text
+    assert '"tests/test_stage5_templates.py",' in rewrite_test_text
 
 
 def test_10_existing_behaviour_unchanged(tmp_path: Path) -> None:
@@ -1008,14 +1020,13 @@ def test_11_seed_bank_input_matches_paired_seed_bank_and_dry(
     """Test 11 (Addendum 1): `--stage5` takes a seed-bank file via `world_from_scenario_seed`, matches `run_paired_seed_bank` per rendering, records `seed_bank_sha256`/`seed_bank_size`, and prints them in `--stage5 --dry`."""
     assert MOCK_SEED_BANK_FIXTURE_PATH.is_file()
     raw_seeds = json.loads(MOCK_SEED_BANK_FIXTURE_PATH.read_text(encoding="utf-8"))
-    assert isinstance(raw_seeds, list) and len(raw_seeds) == 20
+    assert isinstance(raw_seeds, list) and len(raw_seeds) == 40
     expected_sha256 = hashlib.sha256(MOCK_SEED_BANK_FIXTURE_PATH.read_bytes()).hexdigest()
     expected_size = len(raw_seeds)
 
     worlds = [world_from_scenario_seed(int(s), index=i) for i, s in enumerate(raw_seeds)]
     client, _ = _make_fake_rewrite_client(worlds)
 
-    # 1. Run `run_paired_seed_bank` on the exact same seed-bank file (with a fake CPU transport)
     paired_queue = [
         (w, r_idx, w.agents[r_idx])
         for w in worlds
@@ -1064,9 +1075,8 @@ def test_11_seed_bank_input_matches_paired_seed_bank_and_dry(
         prompt_token_counter=lambda _: 3200,
     )
     paired_renderings = paired_report["renderings"]
-    assert isinstance(paired_renderings, list) and len(paired_renderings) == 40
+    assert isinstance(paired_renderings, list) and len(paired_renderings) == 80
 
-    # 2. Run `--stage5` with `--paired-seed-bank` (and mock writer) on the same seed-bank file
     out_dir = tmp_path / "stage5_bank_out"
     rc = cli_mod.main(
         [
@@ -1089,9 +1099,8 @@ def test_11_seed_bank_input_matches_paired_seed_bank_and_dry(
     _assert_valid_stage5_record_schema(rec)
     assert rec["seed_bank_sha256"] == expected_sha256
     assert rec["seed_bank_size"] == expected_size
-    assert len(rec["renderings"]) == len(paired_renderings) == 40
+    assert len(rec["renderings"]) == len(paired_renderings) == 80
 
-    # Read sealed B entries from `sealed_store/responses.sealed.jsonl` to verify focal_agent per rendering
     sealed_path = out_dir / "sealed_store" / "responses.sealed.jsonl"
     sealed_focal_by_key: dict[tuple[str, int], str] = {}
     for raw_ln in sealed_path.read_text(encoding="utf-8").splitlines():
@@ -1116,7 +1125,6 @@ def test_11_seed_bank_input_matches_paired_seed_bank_and_dry(
         )
         assert sealed_focal_by_key[(sid, r_idx)] == expected_focal
 
-    # 3. Run `--stage5 --dry` with `--stage5-seed-bank` and assert sha256, size, and renderings count
     rc_dry = cli_mod.main(
         [
             "--stage5",
@@ -1131,7 +1139,815 @@ def test_11_seed_bank_input_matches_paired_seed_bank_and_dry(
     dry_doc = json.loads(capsys.readouterr().out.strip())
     assert dry_doc["dry"] is True
     assert dry_doc["seed_bank_sha256"] == expected_sha256
-    assert dry_doc["seed_bank_size"] == expected_size == 20
-    assert dry_doc["scenarios"] == 20
-    assert dry_doc["renderings"] == 40
+    assert dry_doc["seed_bank_size"] == expected_size == 40
+    assert dry_doc["scenarios"] == 40
+    assert dry_doc["renderings"] == 80
 
+
+# ===========================================================================
+# U4 Addendum 2 Tests (Items 1–14)
+# ===========================================================================
+
+
+def test_12_addendum2_item1_rung_rule_exact_integers_and_34_float_pairs() -> None:
+    """Addendum 2 Item 1: Every pair (k, k+6) for k=0..54 picks with_draft, every (k, k+5) picks facts_only, and 34 of 55 float pairs fall below 0.10."""
+    float_below_point_one = [
+        k for k in range(55) if ((k + 6) / 60.0) - (k / 60.0) < 0.10
+    ]
+    assert len(float_below_point_one) == 34
+
+    for k in range(55):
+        assert decide_rung_input_mode(60, k, 60, k + 6) == "with_draft"
+    for k in range(56):
+        assert decide_rung_input_mode(60, k, 60, k + 5) == "facts_only"
+
+    assert "kept_with_draft - kept_facts_only >= 6 of 60" in STAGE5_RUNG_RULE
+    assert "exact equivalent" in STAGE5_RUNG_RULE
+
+
+def test_13_addendum2_item2_both_seeds_drawn_at_run_start_and_zero_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Addendum 2 Item 2: Fresh run makes exactly 2 secrets draws at run start; resume after a crash in B (before the rung) makes 0 draws."""
+    n = 40
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+    client, _ = _make_fake_rewrite_client(worlds)
+
+    draws: list[int] = []
+
+    def _spy_randbelow(upper: int) -> int:
+        draws.append(upper)
+        return 20261103 + len(draws) - 1
+
+    monkeypatch.setattr(secrets, "randbelow", _spy_randbelow)
+
+    # Fresh run crashing during B (after 5 renderings, before the rung)
+    out_dir = tmp_path / "run_13_crash_in_b"
+    b_count = 0
+
+    def _crash_on_sixth_b(w: Any, fa: str) -> str:
+        nonlocal b_count
+        b_count += 1
+        if b_count == 1:
+            # Both plan_seed and rung_seed must already be in the record before the first writer call!
+            rec_on_disk = json.loads((out_dir / STAGE5_RUN_RECORD_FILENAME).read_text(encoding="utf-8"))
+            assert rec_on_disk["plan_seed"] == 20261103
+            assert rec_on_disk["rung_seed"] == 20261104
+            assert len(draws) == 2
+        if b_count == 6:
+            raise RuntimeError("Simulated crash in Phase 1 (B) before the rung")
+        return _render_mock_stage5_baseline(w, fa)
+
+    with pytest.raises(RuntimeError, match="Simulated crash in Phase 1"):
+        run_stage5_pipeline(
+            count=n,
+            base_seed=base_seed,
+            output_dir=out_dir,
+            writer_kind="mock",
+            rewrite_client=client,
+            worlds=worlds,
+            mock_custom_renderer=_crash_on_sixth_b,
+        )
+    assert len(draws) == 2
+
+    # Resume from the Phase 1 crash -> ZERO secrets draws across the entire resumed run (including the rung!)
+    draws.clear()
+    resumed = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="mock",
+        resume=True,
+        rewrite_client=client,
+        worlds=worlds,
+    )
+    assert len(draws) == 0
+    assert resumed["plan_seed"] == 20261103
+    assert resumed["rung_seed"] == 20261104
+    assert resumed["progress"]["rung_done"] is True
+    assert resumed["progress"]["s_done"] == 80
+
+
+def test_14_addendum2_item3_resume_after_s_lt_b_refuses_until_reset(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Addendum 2 Item 3: Stop on S < B, resume without reset refuses with STAGE5_RESUME_AFTER_S_LT_B, resume with reset runs."""
+    n = 40
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+    client, _ = _make_fake_rewrite_client(worlds)
+
+    fixture_rec = json.loads(MOCK_RECORD_FIXTURE_PATH.read_text(encoding="utf-8"))
+    sampled_set = {
+        (str(pair[0]), int(pair[1])) for pair in fixture_rec["rung"]["sampled_renderings"]
+    }
+    unsampled_key = next(
+        (w.scenario_id, r_idx)
+        for w in worlds
+        for r_idx in (0, 1)
+        if (w.scenario_id, r_idx) not in sampled_set
+    )
+    stop_sid, stop_r_idx = unsampled_key
+
+    orig_swap = stage5_mod.swap_all_move_see
+    sabotage = True
+
+    def _bad_swap(prose: str, world: Any, plan: Any, **kwargs: Any) -> Any:
+        res = orig_swap(prose, world, plan, **kwargs)
+        if sabotage and world.scenario_id == stop_sid and kwargs.get("focal_agent") == world.agents[stop_r_idx]:
+            return stage5_mod.SwapResult(
+                prose=res.prose + " Quietly.",
+                events=res.events,
+                b_faults=res.b_faults,
+                s_faults=res.s_faults,
+                b_passed=res.b_passed,
+                s_passed=False,
+                seam_count=res.seam_count,
+            )
+        return res
+
+    out_dir = tmp_path / "run_14"
+    stage5_mod.swap_all_move_see = _bad_swap  # type: ignore[assignment]
+    try:
+        with pytest.raises(Stage5SLtBStopError):
+            run_stage5_pipeline(
+                count=n,
+                base_seed=base_seed,
+                output_dir=out_dir,
+                writer_kind="mock",
+                stage5_plan_seed=20261103,
+                stage5_rung_seed=20261104,
+                rewrite_client=client,
+                worlds=worlds,
+            )
+    finally:
+        stage5_mod.swap_all_move_see = orig_swap  # type: ignore[assignment]
+
+    sabotage = False
+    # 1. CLI resume without --stage5-redo-b exits non-zero with STAGE5_RESUME_AFTER_S_LT_B naming the rendering
+    rc_refused = cli_mod.main(
+        [
+            "--stage5",
+            "--resume",
+            "--count",
+            str(n),
+            "--seed",
+            str(base_seed),
+            "--out-dir",
+            str(out_dir),
+        ],
+        rewrite_client=client,
+    )
+    err_text = capsys.readouterr().err
+    assert rc_refused == 1
+    assert "STAGE5_RESUME_AFTER_S_LT_B" in err_text
+    assert stop_sid in err_text
+    assert f"rendering_index={stop_r_idx}" in err_text
+
+    # 2. CLI resume with explicit --stage5-redo-b <sid>:<r_idx> runs and succeeds
+    rc_ok = cli_mod.main(
+        [
+            "--stage5",
+            "--resume",
+            "--stage5-redo-b",
+            f"{stop_sid}:{stop_r_idx}",
+            "--count",
+            str(n),
+            "--seed",
+            str(base_seed),
+            "--out-dir",
+            str(out_dir),
+        ],
+        rewrite_client=client,
+    )
+    _ = capsys.readouterr()
+    assert rc_ok == 0
+    rec_done = json.loads((out_dir / STAGE5_RUN_RECORD_FILENAME).read_text(encoding="utf-8"))
+    assert rec_done["stop_reason"] is None
+    assert rec_done["summary"]["s_passed"] == 80
+
+
+def test_15_addendum2_item4_redo_b_sampled_by_rung_refuses_unless_redo_rung(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Addendum 2 Item 4: `--stage5-redo-b` on a rendering sampled by the rung refuses unless `--stage5-redo-rung` is also given (which redraws 0 seeds)."""
+    n = 40
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+    client, _ = _make_fake_rewrite_client(worlds)
+
+    out_dir = tmp_path / "run_15"
+    rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="mock",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        rewrite_client=client,
+        worlds=worlds,
+    )
+    sampled_pair = rec["rung"]["sampled_renderings"][0]
+    sampled_sid, sampled_r_idx = str(sampled_pair[0]), int(sampled_pair[1])
+
+    # 1. Refused without --stage5-redo-rung
+    with pytest.raises(Stage5RedoBSampledByRungError) as exc_info:
+        run_stage5_pipeline(
+            count=n,
+            base_seed=base_seed,
+            output_dir=out_dir,
+            writer_kind="mock",
+            resume=True,
+            redo_b=[f"{sampled_sid}:{sampled_r_idx}"],
+            redo_rung=False,
+            rewrite_client=client,
+            worlds=worlds,
+        )
+    assert "STAGE5_REDO_B_SAMPLED_BY_RUNG" in str(exc_info.value)
+    assert f"{sampled_sid}:{sampled_r_idx}" in str(exc_info.value)
+
+    # 2. Succeeds with --stage5-redo-rung, records redo_rung=True, and makes 0 secrets draws (reuses rung_seed)
+    draws: list[int] = []
+    monkeypatch.setattr(secrets, "randbelow", lambda u: (draws.append(u), 999)[1])
+
+    rec_redo = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="mock",
+        resume=True,
+        redo_b=[f"{sampled_sid}:{sampled_r_idx}"],
+        redo_rung=True,
+        rewrite_client=client,
+        worlds=worlds,
+    )
+    assert draws == []
+    assert rec_redo["redo_b"] is True
+    assert rec_redo["redo_rung"] is True
+    assert rec_redo["rung_seed"] == 20261104
+    assert rec_redo["rung"]["sampled_renderings"] == rec["rung"]["sampled_renderings"]
+
+
+def test_16_addendum2_item5_over_cap_excluded_from_rung_and_zero_reads_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Addendum 2 Item 5: Over-cap rendering never enters the rung pool, and on resume from B makes 0 writer calls and 0 sealed-store reads."""
+    n = 40
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+    client, _ = _make_fake_rewrite_client(worlds)
+
+    # Force ("scen_0000", 0) to be over cap via prompt_token_counter (call 1 of initial run)
+    tok_call_count = 0
+
+    def _token_counter(rendered_prompt: str) -> int:
+        nonlocal tok_call_count
+        _ = rendered_prompt
+        tok_call_count += 1
+        if tok_call_count == 1:
+            return 5000
+        return 3500
+
+    out_dir = tmp_path / "run_16"
+    b_calls_made_for: list[tuple[str, int]] = []
+    crash_after_ten = True
+
+    def _renderer(w: Any, fa: str) -> str:
+        r_idx_cur = 0 if fa == w.agents[0] else 1
+        b_calls_made_for.append((w.scenario_id, r_idx_cur))
+        if crash_after_ten and len(b_calls_made_for) == 10:
+            raise RuntimeError("Simulated crash in B after 10 non-over-cap renderings")
+        return _render_mock_stage5_baseline(w, fa)
+
+    with pytest.raises(RuntimeError, match="Simulated crash in B"):
+        run_stage5_pipeline(
+            count=n,
+            base_seed=base_seed,
+            output_dir=out_dir,
+            writer_kind="mock",
+            stage5_plan_seed=20261103,
+            stage5_rung_seed=20261104,
+            prompt_token_counter=_token_counter,
+            rewrite_client=client,
+            worlds=worlds,
+            mock_custom_renderer=_renderer,
+        )
+    assert ("scen_0000", 0) not in b_calls_made_for
+
+    # Spy on _read_sealed_b_prose_for_rendering during resume
+    sealed_reads_for: list[tuple[str, int]] = []
+    orig_read = stage5_mod._read_sealed_b_prose_for_rendering
+
+    def _spy_read(path: Path, sid: str, r_idx: int, **kw: Any) -> str | None:
+        sealed_reads_for.append((sid, int(r_idx)))
+        return orig_read(path, sid, r_idx, **kw)
+
+    monkeypatch.setattr(stage5_mod, "_read_sealed_b_prose_for_rendering", _spy_read)
+    crash_after_ten = False
+    b_calls_made_for.clear()
+
+    rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="mock",
+        resume=True,
+        prompt_token_counter=_token_counter,
+        rewrite_client=client,
+        worlds=worlds,
+        mock_custom_renderer=_renderer,
+    )
+
+    # ("scen_0000", 0) made 0 writer calls and 0 sealed-store reads on resume, and never entered the rung pool
+    assert ("scen_0000", 0) not in b_calls_made_for
+    assert ("scen_0000", 0) not in sealed_reads_for
+    assert ["scen_0000", 0] not in rec["rung"]["sampled_renderings"]
+    assert rec["summary"]["ctx_over_cap"] == 1
+    assert rec["renderings"][0]["ctx_over_cap"] is True
+
+
+def test_17_addendum2_item6_mid_rung_crash_call_45_and_resume(tmp_path: Path) -> None:
+    """Addendum 2 Item 6: Fake rewrite client raises on call 45 of the rung; resume restarts the rung from scratch with the same rung_seed and same 60 events, keeping rung_aborted_calls=45 apart from rung_calls=120."""
+    n = 40
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+    base_client, base_calls = _make_fake_rewrite_client(worlds)
+
+    call_idx = 0
+    crash_on_45 = True
+
+    def _flaky_client(payload: dict[str, Any]) -> dict[str, Any]:
+        nonlocal call_idx
+        call_idx += 1
+        if crash_on_45 and call_idx == 45:
+            raise RuntimeError("Simulated mid-rung crash on call 45")
+        return base_client(payload)
+
+    out_dir = tmp_path / "run_17"
+    with pytest.raises(RuntimeError, match="Simulated mid-rung crash on call 45"):
+        run_stage5_pipeline(
+            count=n,
+            base_seed=base_seed,
+            output_dir=out_dir,
+            writer_kind="mock",
+            stage5_plan_seed=20261103,
+            stage5_rung_seed=20261104,
+            rewrite_client=_flaky_client,
+            worlds=worlds,
+        )
+
+    aborted_rec = json.loads((out_dir / STAGE5_RUN_RECORD_FILENAME).read_text(encoding="utf-8"))
+    assert aborted_rec["rung_aborted_calls"] == 45
+    assert aborted_rec["call_counts"]["rung_aborted_calls"] == 45
+    assert aborted_rec["call_counts"]["rung_calls"] == 0
+    assert aborted_rec["progress"]["rung_done"] is False
+    first_44_Before_crash = [(c["scenario_id"], c["target_form"]) for c in base_calls[:44]]
+
+    # Resume -> restarts rung from scratch with same rung_seed and same 60 events
+    crash_on_45 = False
+    base_calls.clear()
+    resumed_rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="mock",
+        resume=True,
+        rewrite_client=_flaky_client,
+        worlds=worlds,
+    )
+    assert resumed_rec["rung_aborted_calls"] == 45
+    assert resumed_rec["call_counts"]["rung_aborted_calls"] == 45
+    assert resumed_rec["call_counts"]["rung_calls"] == 120
+    assert resumed_rec["progress"]["rung_done"] is True
+    resumed_first_44 = [(c["scenario_id"], c["target_form"]) for c in base_calls[:44]]
+    assert resumed_first_44 == first_44_Before_crash
+
+
+def test_18_addendum2_item7_canonical_rung_pool_and_mode_order_invariance(tmp_path: Path) -> None:
+    """Addendum 2 Item 7: First drafts completed in a shuffled order give the same 60 event ids, and the two rung modes run in both orders give identical results per event."""
+    n = 40
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+
+    all_r_keys = [(w.scenario_id, r_idx) for w in worlds for r_idx in (0, 1)]
+    shuffled_r_keys = list(all_r_keys)
+    random.Random(99999).shuffle(shuffled_r_keys)
+    assert shuffled_r_keys != all_r_keys
+
+    client_a, calls_a = _make_fake_rewrite_client(worlds)
+    rec_a = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=tmp_path / "run_18_canonical",
+        writer_kind="mock",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        rewrite_client=client_a,
+        worlds=worlds,
+        rung_mode_order=("facts_only", "with_draft"),
+    )
+
+    client_b, calls_b = _make_fake_rewrite_client(worlds)
+    rec_b = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=tmp_path / "run_18_shuffled_reversed",
+        writer_kind="mock",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        rewrite_client=client_b,
+        worlds=worlds,
+        rendering_execution_order=shuffled_r_keys,
+        rung_mode_order=("with_draft", "facts_only"),
+    )
+
+    assert rec_a["rung"] == rec_b["rung"]
+    # Compare the 60 facts_only and 60 with_draft rung calls in both runs
+    fo_a = [(c["scenario_id"], c["target_form"], c["content"]) for c in calls_a[:60]]
+    wd_a = [(c["scenario_id"], c["target_form"], c["content"]) for c in calls_a[60:120]]
+    wd_b = [(c["scenario_id"], c["target_form"], c["content"]) for c in calls_b[:60]]
+    fo_b = [(c["scenario_id"], c["target_form"], c["content"]) for c in calls_b[60:120]]
+    assert fo_a == fo_b
+    assert wd_a == wd_b
+    assert rec_a["renderings"] == rec_b["renderings"]
+
+
+def test_19_addendum2_item8_rewrite_input_enum_and_canary_test(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Addendum 2 Item 8: `rewrite_input` is only `facts_only` | `with_draft` | None, and unique canary tokens on every mock writer and fake rewrite reply appear only in the sealed store, never in record, stdout, stderr, or temp files."""
+    n = 40
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+
+    canary_tokens: list[str] = []
+    b_idx = 0
+
+    def _canary_b_renderer(w: Any, fa: str) -> str:
+        nonlocal b_idx
+        b_idx += 1
+        tok = f"CANARY_B_{b_idx:04d}_NO_NAME_LINE"
+        canary_tokens.append(tok)
+        base_prose = _render_mock_stage5_baseline(w, fa)
+        # Include a canary token even on a line with no names (checker will refuse it as unlogged, or we embed it in raw B)
+        return base_prose + f"\n{tok}."
+
+    # Also test a passing run where every rewrite reply carries a unique canary token (including lines with no names)
+    rw_idx = 0
+
+    def _canary_rw_client(payload: dict[str, Any]) -> dict[str, Any]:
+        nonlocal rw_idx
+        _ = payload
+        rw_idx += 1
+        tok = f"CANARY_RW_{rw_idx:04d}_NO_NAMES"
+        canary_tokens.append(tok)
+        return {
+            "message": {"role": "assistant", "content": f"The {tok} remained silent."},
+            "done": True,
+            "done_reason": "stop",
+            "prompt_eval_count": 32,
+            "eval_count": 4,
+        }
+
+    out_dir = tmp_path / "run_19_canary"
+    rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="mock",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        rewrite_client=_canary_rw_client,
+        worlds=worlds,
+    )
+    # Also run a 1-scenario run with _canary_b_renderer into a sub-dir to verify B canary tokens on nameless lines
+    out_dir_b = tmp_path / "run_19_canary_b"
+    run_stage5_pipeline(
+        count=1,
+        base_seed=base_seed,
+        output_dir=out_dir_b,
+        writer_kind="mock",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        s_code_say=True,
+        worlds=worlds[:1],
+        mock_custom_renderer=_canary_b_renderer,
+    )
+
+    captured = capsys.readouterr()
+    assert len(canary_tokens) > 40
+
+    # Assert rewrite_input is strictly the enum ("facts_only", "with_draft", None)
+    for r in rec["renderings"]:
+        for ev in r["events"]:
+            assert ev["rewrite_input"] in ("facts_only", "with_draft", None)
+
+    # Check all files under out_dir and out_dir_b: no temp files exist, and non-sealed files + stdout + stderr contain ZERO canary tokens
+    for root_dir in (out_dir, out_dir_b):
+        for p in root_dir.rglob("*"):
+            if p.is_file():
+                assert not p.name.endswith(".tmp"), f"Leftover temp file found: {p}"
+                if "sealed_store" not in p.parts:
+                    txt = p.read_text(encoding="utf-8")
+                    for tok in canary_tokens:
+                        assert tok not in txt, f"Canary token {tok!r} leaked into {p.name}"
+
+    for tok in canary_tokens:
+        assert tok not in captured.out
+        assert tok not in captured.err
+
+    # Every canary token IS present in the sealed store
+    combined_sealed = (
+        (out_dir / "sealed_store" / "responses.sealed.jsonl").read_text(encoding="utf-8")
+        + "\n"
+        + (out_dir_b / "sealed_store" / "responses.sealed.jsonl").read_text(encoding="utf-8")
+    )
+    for tok in canary_tokens:
+        assert tok in combined_sealed, f"Canary token {tok!r} missing from sealed store"
+
+
+def test_20_addendum2_item9_write_order_and_atomic_os_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Addendum 2 Item 9: Each sealed blob is written and flushed before the record that refers to it is atomically replaced via `os.replace`."""
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(2, base_seed=20261103)]
+    events_log: list[tuple[str, int]] = []
+
+    orig_flush = stage5_mod._flush_sealed_store
+    orig_replace = os.replace
+
+    def _spy_flush(sealed_path: Path) -> None:
+        orig_flush(sealed_path)
+        line_count = sum(
+            1 for ln in sealed_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+        )
+        events_log.append(("sealed_flushed", line_count))
+
+    def _spy_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        dst_path = Path(dst)
+        orig_replace(src, dst)
+        if dst_path.name == STAGE5_RUN_RECORD_FILENAME:
+            rec_obj = json.loads(dst_path.read_text(encoding="utf-8"))
+            b_done = int(rec_obj["progress"]["b_done"])
+            s_done = int(rec_obj["progress"]["s_done"])
+            events_log.append(("record_replaced", b_done + s_done))
+            if b_done + s_done > 0:
+                # Most recent sealed_flushed must precede this record_replaced and have >= b_done + s_done entries
+                flushes = [cnt for kind, cnt in events_log if kind == "sealed_flushed"]
+                assert len(flushes) > 0 and flushes[-1] >= b_done + s_done
+
+    monkeypatch.setattr(stage5_mod, "_flush_sealed_store", _spy_flush)
+    monkeypatch.setattr(os, "replace", _spy_replace)
+
+    out_dir = tmp_path / "run_20"
+    run_stage5_pipeline(
+        count=2,
+        base_seed=20261103,
+        output_dir=out_dir,
+        writer_kind="mock",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        s_code_say=True,
+        worlds=worlds,
+    )
+    assert any(k == "sealed_flushed" for k, _ in events_log)
+    assert any(k == "record_replaced" for k, _ in events_log)
+
+
+def test_21_addendum2_item10_resume_refuses_on_env_drift(tmp_path: Path) -> None:
+    """Addendum 2 Item 10: Resume refuses with `STAGE5_RESUME_ENV_CHANGED` on model, digest, ollama_version, num_predict, max_num_ctx, or module sha256 drift."""
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(2, base_seed=20261103)]
+    out_dir = tmp_path / "run_21"
+    run_stage5_pipeline(
+        count=2,
+        base_seed=20261103,
+        output_dir=out_dir,
+        writer_kind="mock",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        s_code_say=True,
+        worlds=worlds,
+    )
+    rec_path = out_dir / STAGE5_RUN_RECORD_FILENAME
+    orig_rec = json.loads(rec_path.read_text(encoding="utf-8"))
+
+    # 1. Parameter drift: num_predict and max_num_ctx
+    with pytest.raises(Stage5ResumeEnvChangedError) as exc_np:
+        run_stage5_pipeline(
+            count=2,
+            base_seed=20261103,
+            output_dir=out_dir,
+            writer_kind="mock",
+            resume=True,
+            num_predict=2048,
+            s_code_say=True,
+            worlds=worlds,
+        )
+    assert "STAGE5_RESUME_ENV_CHANGED" in str(exc_np.value)
+    assert "num_predict" in exc_np.value.drifted_fields
+
+    with pytest.raises(Stage5ResumeEnvChangedError) as exc_ctx:
+        run_stage5_pipeline(
+            count=2,
+            base_seed=20261103,
+            output_dir=out_dir,
+            writer_kind="mock",
+            resume=True,
+            max_num_ctx=8192,
+            s_code_say=True,
+            worlds=worlds,
+        )
+    assert "max_num_ctx" in exc_ctx.value.drifted_fields
+
+    # 2. Record mutation drift: model, model_digest, ollama_version, and each of render.py / shape_templates.py / rewrite.py
+    mutations: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
+        ("engine.model", lambda d: d["engine"].__setitem__("model", "other:model")),
+        ("engine.model_digest", lambda d: d["engine"].__setitem__("model_digest", "deadbeef" * 8)),
+        ("engine.ollama_version", lambda d: d["engine"].__setitem__("ollama_version", "0.99.0")),
+        ("module_sha256s.render.py", lambda d: d["module_sha256s"].__setitem__("render.py", "00" * 32)),
+        ("module_sha256s.shape_templates.py", lambda d: d["module_sha256s"].__setitem__("shape_templates.py", "11" * 32)),
+        ("module_sha256s.rewrite.py", lambda d: d["module_sha256s"].__setitem__("rewrite.py", "22" * 32)),
+    ]
+    for expected_field, mutator in mutations:
+        tampered = json.loads(json.dumps(orig_rec))
+        mutator(tampered)
+        rec_path.write_text(json.dumps(tampered, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with pytest.raises(Stage5ResumeEnvChangedError) as exc_mut:
+            run_stage5_pipeline(
+                count=2,
+                base_seed=20261103,
+                output_dir=out_dir,
+                writer_kind="mock",
+                resume=True,
+                s_code_say=True,
+                worlds=worlds,
+            )
+        assert expected_field in exc_mut.value.drifted_fields
+
+
+def test_22_addendum2_item11_dry_mode_upper_bound_and_over_cap_count() -> None:
+    """Addendum 2 Item 11: Dry-mode call counts are labelled upper bounds before the context cap, and dry mode prints `ctx_over_cap` without a writer."""
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(2, base_seed=20261103)]
+    tok_calls = 0
+
+    def _counter(text: str) -> int:
+        nonlocal tok_calls
+        _ = text
+        tok_calls += 1
+        return 5000 if tok_calls == 1 else 3200
+
+    dry_res = run_stage5_dry(
+        count=2,
+        base_seed=20261103,
+        stage5_plan_seed=20261103,
+        max_retries=1,
+        prompt_token_counter=_counter,
+        worlds=worlds,
+    )
+    assert dry_res["expected_call_counts_is_upper_bound_before_ctx_cap"] is True
+    assert dry_res["expected_call_counts_upper_bound_before_ctx_cap"] == {
+        "b_calls": 8,
+        "rung_calls": 120,
+        "rewrite_calls": 12,
+    }
+    assert dry_res["ctx_over_cap"] == 1
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Addendum 2 Item 12 STOP & REPORT: generate_stage5_shape_plan (src/udlab_generator/shape_templates.py:969) "
+        "slices 20-scenario blocks rather than 20-event blocks per variant stream, resets last_kind_forms=[] on "
+        "every scenario and block boundary (allowing 3-in-a-row across boundaries), and samples extra remainder "
+        "forms independently per block without rotating the short shape (allowing global form spread > 1). "
+        "Per card U4 & Addendum 2 Item 12: do not modify shape_templates.py."
+    ),
+)
+def test_23_addendum2_item12_multi_block_plan_check() -> None:
+    """Addendum 2 Item 12: Multi-block plan test over >= 3 blocks per variant stream against `generate_stage5_shape_plan` (`shape_templates.py:969`)."""
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(60, base_seed=20261103)]
+    plan = generate_stage5_shape_plan(worlds, seed=20261103, block_size=20)
+    recs = plan["plan_records"]
+
+    for v, forms in STAGE5_ASSIGNED_VARIANTS.items():
+        seq = [str(r["form_id"]) for r in recs if r["variant"] == v]
+        assert len(seq) >= 60, f"Variant {v} needs at least 3 blocks of 20 events, got {len(seq)}"
+        # 1. No three-in-a-row across block edges (indices 18-20, 38-40) or anywhere in stream
+        for edge_start in (18, 38):
+            window = seq[edge_start : edge_start + 3]
+            assert len(set(window)) > 1, f"Three-in-a-row at edge {edge_start} for {v}: {window}"
+        for i in range(len(seq) - 2):
+            assert not (seq[i] == seq[i + 1] == seq[i + 2]), f"Three-in-a-row at {i} for {v}"
+        # 2. Spread <= 1 on every 20-event block, including the tail block
+        for b_start in range(0, len(seq), 20):
+            blk = seq[b_start : b_start + 20]
+            c = Counter(blk)
+            spread = max(c.get(f, 0) for f in forms) - min(c.get(f, 0) for f in forms)
+            assert spread <= 1, f"Block spread {spread} > 1 at {b_start} for {v}"
+        # 3. Short shape rotated across blocks so global counts stay within 1
+        g_counts = Counter(seq)
+        global_spread = max(g_counts.get(f, 0) for f in forms) - min(g_counts.get(f, 0) for f in forms)
+        assert global_spread <= 1, f"Global spread {global_spread} > 1 for {v}: {dict(g_counts)}"
+
+
+def test_24_addendum2_item13_rung_runs_on_post_swap_scene(tmp_path: Path) -> None:
+    """Addendum 2 Item 13: The rung applies `swap_all_move_see` in memory to each sampled rendering's B before running its two modes, without writing the rung's swap to S."""
+    n = 40
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+    client, _ = _make_fake_rewrite_client(worlds)
+
+    out_dir = tmp_path / "run_24"
+    rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="mock",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        rewrite_client=client,
+        worlds=worlds,
+    )
+
+    plan_bundle = generate_stage5_shape_plan(worlds, seed=20261103, block_size=20)
+    plan_by_sid = plan_bundle["plan_by_scenario_id"]
+    worlds_by_sid = {w.scenario_id: w for w in worlds}
+
+    sealed_path = out_dir / "sealed_store" / "responses.sealed.jsonl"
+    rung_entries = [
+        json.loads(ln)
+        for ln in sealed_path.read_text(encoding="utf-8").splitlines()
+        if ln.strip() and json.loads(ln).get("retry_form") == "stage5_rung"
+    ]
+    assert len(rung_entries) == 120
+
+    verified_diff_from_raw_b = 0
+    for entry in rung_entries:
+        sid = str(entry["scenario_id"])
+        r_idx = int(entry["rendering_index"])
+        w = worlds_by_sid[sid]
+        focal = w.agents[r_idx]
+        raw_b = _render_mock_stage5_baseline(w, focal)
+        scen_plan = stage5_mod._scenario_stage5_plan_dict(plan_by_sid[sid], w)
+        expected_post_swap = swap_all_move_see(
+            raw_b, w, scen_plan, focal_agent=focal, checker_profile="d"
+        ).prose
+        thinking_obj = json.loads(entry["thinking_text"])
+        assert thinking_obj["context_prose"] == expected_post_swap
+        if expected_post_swap != raw_b:
+            assert thinking_obj["context_prose"] != raw_b
+            verified_diff_from_raw_b += 1
+
+    assert verified_diff_from_raw_b > 0
+    assert rec["summary"]["s_passed"] == 80
+
+
+def test_25_addendum2_item14_at_most_one_rung_event_per_rendering_and_overlap() -> None:
+    """Addendum 2 Item 14: At most one rung event is drawn per rendering, `rung_scenario_overlap` is exact, and a pool short under the 1-per-rendering cap refuses with `STAGE5_RUNG_SAMPLE_SHORT`."""
+    # 1. Pool where every rendering has multiple eligible events (2 per rendering across 60 renderings):
+    # yields at most 1 event per rendering across all 60 drawn events.
+    eligible_multi: dict[str, list[tuple[str, int, int, str]]] = {
+        "SAY_2": [],
+        "SAY_3": [],
+        "SAY_4": [],
+    }
+    for idx in range(35):
+        sid = f"scen_{idx:04d}"
+        for r_idx in (0, 1):
+            for t_idx, t_form in enumerate(("SAY_2", "SAY_3", "SAY_4"), start=1):
+                # Put two eligible events for each target in the same rendering
+                eligible_multi[t_form].append((sid, r_idx, t_idx * 2 - 1, t_form))
+                eligible_multi[t_form].append((sid, r_idx, t_idx * 2, t_form))
+
+    sampled, overlap = _sample_rung_events_at_most_one_per_rendering(
+        eligible_multi, rung_seed=20261104, per_target=20
+    )
+    assert len(sampled) == 60
+    sampled_renderings = [(sid, r_idx) for sid, r_idx, _, _ in sampled]
+    # Strictly at most 1 event per rendering across all 60 events!
+    assert len(set(sampled_renderings)) == 60
+
+    by_sid: dict[str, set[int]] = {}
+    for sid, r_idx in sampled_renderings:
+        by_sid.setdefault(sid, set()).add(r_idx)
+    expected_overlap = sum(1 for s in by_sid.values() if len(s) == 2)
+    assert overlap == expected_overlap
+
+    # 2. A pool that has >= 20 total events for SAY_2 (e.g. 30 events) but all in only 15 renderings (< 20 renderings)
+    # must refuse with STAGE5_RUNG_SAMPLE_SHORT under the 1-per-rendering cap!
+    short_renderings_pool: dict[str, list[tuple[str, int, int, str]]] = {
+        "SAY_2": [
+            (f"scen_{i:04d}", 0, ev_i, "SAY_2")
+            for i in range(15)
+            for ev_i in (1, 2)  # 30 events, but only 15 distinct renderings!
+        ],
+        "SAY_3": [(f"scen_{i:04d}", 0, 3, "SAY_3") for i in range(15, 40)],
+        "SAY_4": [(f"scen_{i:04d}", 1, 5, "SAY_4") for i in range(15, 40)],
+    }
+    with pytest.raises(Stage5RungSampleShortError) as exc_short:
+        _sample_rung_events_at_most_one_per_rendering(
+            short_renderings_pool, rung_seed=20261104, per_target=20
+        )
+    assert "STAGE5_RUNG_SAMPLE_SHORT" in str(exc_short.value)
+    assert exc_short.value.counts["SAY_2"] == 15

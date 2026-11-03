@@ -1,13 +1,14 @@
 """Stage 5 hybrid pipeline (`--stage5`), rewrite-input rung, and `stage5_run_record.json` writer.
 
-Implements Card U4 (Design Revision 2, §4–§8):
+Implements Card U4 (Design Revision 2, §4–§8) + Addenda 1 & 2:
 1. Phase 1 (B, first draft): Stage 2/3 Prompt C (`constraint_layout="table"`, `accepted_forms_line="off"`,
    `shape_plan="off"`), with retries as Stage 3 and Profile D (`checker_profile="d"`) evaluation.
    Reuses the writer's existing `c_ctx_over_cap` refusal path (`CTX_OVER_CAP_CHECK_ID`).
-2. Phase 2 (Rewrite-input rung): 60 eligible `say` events (20 × `SAY_2`, 20 × `SAY_3`, 20 × `SAY_4`) from
-   renderings whose B passed and where `b_form != target`, drawn with `rung_seed`. Runs both `facts_only`
-   and `with_draft` (120 calls) and selects `with_draft` iff `kept_rate(with_draft) - kept_rate(facts_only) >= 0.10`
-   as exact fractions.
+2. Phase 2 (Rewrite-input rung): 60 eligible `say` events (20 × `SAY_2`, 20 × `SAY_3`, 20 × `SAY_4`), at most 1
+   event per rendering, from canonically sorted renderings where `b_passed and not ctx_over_cap` and `b_form != target`,
+   drawn with `rung_seed`. Applies `swap_all_move_see` in memory to each sampled rendering's B before running both
+   `facts_only` and `with_draft` (120 calls), and selects `with_draft` iff `kept_with_draft - kept_facts_only >= 6`
+   of 60 (exact integer/rational arithmetic, never float division).
 3. Phase 3 (Swap, Rewrite, Final Check, and S >= B Stop): runs `swap_all_move_see` followed by `rewrite_all_say`
    (or `swap_all_say` when `s_code_say=True`), evaluates Profile D on S, and stops immediately with
    `STAGE5_S_LT_B` (`stop_reason="S_LT_B"`) if any rendering with `b_passed=True` has `s_passed=False`.
@@ -19,7 +20,9 @@ from collections import Counter
 from dataclasses import replace
 from fractions import Fraction
 import hashlib
+from itertools import combinations
 import json
+import os
 from pathlib import Path
 import random
 import secrets
@@ -74,6 +77,7 @@ from .render import (
 from .rewrite import (
     SAY_SHAPE_DESCRIPTIONS,
     RewriteResult,
+    _invoke_rewrite_client,
     rewrite_all_say,
 )
 from .shape_templates import (
@@ -84,7 +88,7 @@ from .shape_templates import (
     SwapEventRecord,
     SwapResult,
     generate_stage5_shape_plan,
-     render_event_sentence,
+    render_event_sentence,
     swap_all_move_see,
     swap_all_say,
 )
@@ -92,7 +96,10 @@ from .shape_templates import (
 STAGE5_RUN_RECORD_FILENAME: str = "stage5_run_record.json"
 STAGE5_STATUS_FILENAME: str = "stage5_status.json"
 STAGE5_SCHEMA_VERSION: str = "stage5_run_record_v1"
-STAGE5_RUNG_RULE: str = "with_draft iff kept_rate(with_draft) - kept_rate(facts_only) >= 0.10"
+STAGE5_RUNG_RULE: str = (
+    "with_draft iff kept_with_draft - kept_facts_only >= 6 of 60 "
+    "(exact equivalent of kept_rate(with_draft) - kept_rate(facts_only) >= 0.10 at n = 60)"
+)
 STAGE5_RUNG_TARGETS: tuple[str, str, str] = ("SAY_2", "SAY_3", "SAY_4")
 STAGE5_RUNG_PER_TARGET: int = 20
 
@@ -137,22 +144,69 @@ class Stage5SLtBStopError(Stage5PipelineError):
 
 
 class Stage5ResumeNoPlanSeedError(Stage5PipelineError):
-    """Raised when `--resume` is requested on a record lacking an integer `plan_seed` (`STAGE5_RESUME_NO_PLAN_SEED`)."""
+    """Raised when `--resume` is requested on a record lacking an integer `plan_seed` or `rung_seed` (`STAGE5_RESUME_NO_PLAN_SEED`)."""
 
     def __init__(self, message: str = "STAGE5_RESUME_NO_PLAN_SEED: resume record has no plan_seed.") -> None:
         super().__init__("STAGE5_RESUME_NO_PLAN_SEED", message)
 
 
+class Stage5ResumeAfterSLtBError(Stage5PipelineError):
+    """Raised when `--resume` is requested after an `S_LT_B` stop without resetting the stopped rendering (`STAGE5_RESUME_AFTER_S_LT_B`)."""
+
+    def __init__(self, *, scenario_id: str, rendering_index: int) -> None:
+        self.scenario_id = scenario_id
+        self.rendering_index = int(rendering_index)
+        msg = (
+            f"STAGE5_RESUME_AFTER_S_LT_B: cannot resume after S_LT_B stop on "
+            f"scenario_id={scenario_id} rendering_index={self.rendering_index} without explicit --stage5-redo-b."
+        )
+        super().__init__("STAGE5_RESUME_AFTER_S_LT_B", msg)
+
+
+class Stage5RedoBSampledByRungError(Stage5PipelineError):
+    """Raised when `--stage5-redo-b` targets a rendering sampled by the rung without `--stage5-redo-rung` (`STAGE5_REDO_B_SAMPLED_BY_RUNG`)."""
+
+    def __init__(self, sampled_renderings: Sequence[tuple[str, int]]) -> None:
+        self.sampled_renderings = [(str(s), int(r)) for s, r in sampled_renderings]
+        formatted = [f"{s}:{r}" for s, r in self.sampled_renderings]
+        msg = (
+            f"STAGE5_REDO_B_SAMPLED_BY_RUNG: --stage5-redo-b affects rendering(s) sampled by the rung "
+            f"{formatted}; pass --stage5-redo-rung to reset the rung."
+        )
+        super().__init__("STAGE5_REDO_B_SAMPLED_BY_RUNG", msg)
+
+
+class Stage5ResumeEnvChangedError(Stage5PipelineError):
+    """Raised when `--resume` detects environment or module SHA-256 drift (`STAGE5_RESUME_ENV_CHANGED`)."""
+
+    def __init__(self, drifted_fields: Sequence[str]) -> None:
+        self.drifted_fields = [str(f) for f in drifted_fields]
+        msg = (
+            f"STAGE5_RESUME_ENV_CHANGED: resume refused due to environment drift in "
+            f"{json.dumps(self.drifted_fields)}"
+        )
+        super().__init__("STAGE5_RESUME_ENV_CHANGED", msg)
+
+
 class Stage5RungSampleShortError(Stage5PipelineError):
-    """Raised when fewer than 20 eligible `say` events exist for any rung target (`STAGE5_RUNG_SAMPLE_SHORT`)."""
+    """Raised when fewer than 20 eligible `say` events (at most 1 per rendering) exist for any rung target (`STAGE5_RUNG_SAMPLE_SHORT`)."""
 
     def __init__(self, counts: Mapping[str, int]) -> None:
         self.counts = {str(k): int(v) for k, v in counts.items()}
         msg = (
             f"STAGE5_RUNG_SAMPLE_SHORT: fewer than {STAGE5_RUNG_PER_TARGET} eligible say events "
-            f"from passing B renderings: {json.dumps(self.counts, sort_keys=True)}"
+            f"(at most 1 per rendering) from passing B renderings: {json.dumps(self.counts, sort_keys=True)}"
         )
         super().__init__("STAGE5_RUNG_SAMPLE_SHORT", msg)
+
+
+def compute_stage5_module_sha256s() -> dict[str, str]:
+    """Compute SHA-256 digests of the checker, template, and guard modules (`render.py`, `shape_templates.py`, `rewrite.py`)."""
+    pkg_dir = Path(__file__).resolve().parent
+    return {
+        name: hashlib.sha256((pkg_dir / name).read_bytes()).hexdigest()
+        for name in ("render.py", "shape_templates.py", "rewrite.py")
+    }
 
 
 def decide_rung_input_mode(
@@ -161,12 +215,17 @@ def decide_rung_input_mode(
     with_draft_attempts: int,
     with_draft_kept: int,
 ) -> str:
-    """Apply the pre-registered rung rule using exact rational fractions (no float rounding).
+    """Apply the pre-registered rung rule in exact integer / rational arithmetic (never float division).
 
-    Returns `'with_draft'` iff `kept_rate(with_draft) - kept_rate(facts_only) >= 1/10`, else `'facts_only'`.
+    At `n = 60` (`facts_only_attempts == 60 and with_draft_attempts == 60`), chooses `'with_draft'`
+    iff `kept_with_draft - kept_facts_only >= 6`. In general, compares exact `Fraction` rates against `Fraction(1, 10)`.
     """
     if facts_only_attempts <= 0 or with_draft_attempts <= 0:
         raise ValueError("Rung attempts must be > 0.")
+    if int(facts_only_attempts) == 60 and int(with_draft_attempts) == 60:
+        if int(with_draft_kept) - int(facts_only_kept) >= 6:
+            return "with_draft"
+        return "facts_only"
     rate_fo = Fraction(int(facts_only_kept), int(facts_only_attempts))
     rate_wd = Fraction(int(with_draft_kept), int(with_draft_attempts))
     if rate_wd - rate_fo >= Fraction(1, 10):
@@ -416,9 +475,14 @@ def run_stage5_dry(
     seed_bank: Path | Sequence[int] | None = None,
     stage5_plan_seed: int | None = None,
     max_retries: int = 0,
+    num_predict: int | None = None,
+    max_num_ctx: int = DEFAULT_WRITER_MAX_NUM_CTX,
+    think: bool = DEFAULT_WRITER_THINK,
+    goal_mode: str = DEFAULT_GOAL_MODE,
+    prompt_token_counter: PromptTokenCounter | None = None,
     worlds: Sequence[World] | None = None,
 ) -> dict[str, object]:
-    """Execute `--stage5 --dry`: build worlds and the Stage 5 plan, compute counts, construct no writer, write no files."""
+    """Execute `--stage5 --dry`: build worlds and the Stage 5 plan, compute upper-bound call counts and over-cap count without constructing a writer."""
     if max_retries < 0:
         raise ValueError(f"max_retries must be >= 0, got {max_retries}.")
     if stage5_plan_seed is not None:
@@ -454,6 +518,52 @@ def run_stage5_dry(
         "rung_calls": 120,
         "rewrite_calls": say_events_per_rendering_pass,
     }
+
+    # Evaluate context cap without constructing any writer (`count_prompt_tokens_exact` at render.py:8063
+    # when `prompt_token_counter` is provided, or `estimate_prompt_tokens` at render.py:7890 otherwise,
+    # checked via `prompt_fits_num_ctx_cap` at render.py:7920).
+    resolved_goal_mode = str(goal_mode)
+    resolved_think = bool(think)
+    resolved_num_predict = (
+        int(num_predict)
+        if num_predict is not None
+        else (DEFAULT_WRITER_THINK_NUM_PREDICT if resolved_think else DEFAULT_WRITER_NUM_PREDICT)
+    )
+    prompt_template_c = load_writer_prompt_template(
+        goal_mode=resolved_goal_mode,
+        constraint_layout="table",
+        accepted_forms_line="off",
+        shape_plan="off",
+    )
+    ctx_over_cap_count = 0
+    for w in resolved_worlds:
+        for r_idx in (0, 1):
+            focal_ag = w.agents[r_idx]
+            prompt_text = format_writer_prompt(
+                w,
+                focal_ag,
+                prompt_template_c,
+                goal_mode=resolved_goal_mode,
+                constraint_layout="table",
+                accepted_forms_line="off",
+                shape_plan="off",
+            )
+            messages = [{"role": "user", "content": prompt_text}]
+            p_tokens = (
+                count_prompt_tokens_exact(
+                    messages, think=resolved_think, counter=prompt_token_counter
+                )
+                if prompt_token_counter is not None
+                else estimate_prompt_tokens(messages)
+            )
+            if not prompt_fits_num_ctx_cap(
+                p_tokens,
+                resolved_num_predict,
+                int(max_num_ctx),
+                margin=NUM_CTX_MARGIN_TOKENS,
+            ):
+                ctx_over_cap_count += 1
+
     max_spread_overall = max(max_spread_by_variant.values()) if max_spread_by_variant else 0
     return {
         "dry": True,
@@ -463,10 +573,13 @@ def run_stage5_dry(
         "seed_bank_size": seed_bank_size,
         "scenarios": num_scenarios,
         "renderings": num_renderings,
+        "ctx_over_cap": ctx_over_cap_count,
         "planned_form_counts_by_kind": counts_by_kind,
         "planned_form_counts_by_variant": counts_by_variant,
         "block_balance_max_spread_by_variant": max_spread_by_variant,
         "block_balance_max_spread": max_spread_overall,
+        "expected_call_counts_is_upper_bound_before_ctx_cap": True,
+        "expected_call_counts_upper_bound_before_ctx_cap": expected_call_counts,
         "expected_call_counts": expected_call_counts,
     }
 
@@ -596,6 +709,9 @@ def _assemble_final_events_for_rendering(
             action = "not_spliced"
             rollback_cause = None
 
+        if rewrite_input_val not in (None, "facts_only", "with_draft"):
+            raise ValueError(f"Invalid rewrite_input enum value: {rewrite_input_val!r}")
+
         events_out.append(
             {
                 "event_index": ev_idx,
@@ -617,16 +733,18 @@ def _assemble_final_events_for_rendering(
     return events_out
 
 
-def _load_sealed_b_prose_by_rendering(
+def _read_sealed_b_prose_for_rendering(
     sealed_responses_path: Path,
+    scenario_id: str,
+    rendering_index: int,
     *,
     goal_mode: str = DEFAULT_GOAL_MODE,
-    worlds_by_sid: Mapping[str, World] | None = None,
-) -> dict[tuple[str, int], str]:
-    """Read the latest sealed B response for each `(scenario_id, rendering_index)` from `responses.sealed.jsonl`."""
-    out: dict[tuple[str, int], str] = {}
+    world: World | None = None,
+) -> str | None:
+    """Read the latest sealed B response for a single non-over-cap `(scenario_id, rendering_index)` from `responses.sealed.jsonl`."""
     if not sealed_responses_path.is_file():
-        return out
+        return None
+    found_text: str | None = None
     for raw_line in sealed_responses_path.read_text(encoding="utf-8").splitlines():
         if not raw_line.strip():
             continue
@@ -638,16 +756,34 @@ def _load_sealed_b_prose_by_rendering(
             continue
         sid = str(obj.get("scenario_id") or "")
         r_idx = int(obj.get("rendering_index", 0))
-        resp_text = str(obj.get("response_text") or "")
-        if not sid or not resp_text:
+        if sid != scenario_id or r_idx != int(rendering_index):
             continue
-        if goal_mode == "splice" and worlds_by_sid and sid in worlds_by_sid:
-            try:
-                resp_text = splice_goal_tokens(resp_text, worlds_by_sid[sid]).expanded_prose
-            except Exception:
-                pass
-        out[(sid, r_idx)] = resp_text
-    return out
+        resp_text = str(obj.get("response_text") or "")
+        if not resp_text:
+            continue
+        found_text = resp_text
+    if found_text is not None and goal_mode == "splice" and world is not None:
+        try:
+            found_text = splice_goal_tokens(found_text, world).expanded_prose
+        except Exception:
+            pass
+    return found_text
+
+
+def _flush_sealed_store(sealed_responses_path: Path) -> None:
+    """Flush `responses.sealed.jsonl` to disk before updating the run record."""
+    if sealed_responses_path.is_file():
+        with sealed_responses_path.open("r+b") as fh:
+            fh.flush()
+
+
+def _append_and_flush_sealed_response(
+    sealed_responses_path: Path,
+    entry: SealedResponseEntry,
+) -> None:
+    """Append a sealed response entry and immediately flush `responses.sealed.jsonl`."""
+    append_sealed_response(sealed_responses_path, entry)
+    _flush_sealed_store(sealed_responses_path)
 
 
 def _seal_rewrite_entries(
@@ -660,17 +796,22 @@ def _seal_rewrite_entries(
     sealed_entries: Sequence[Mapping[str, Any]],
     call_counter_start: int,
     goal_mode: str,
+    context_prose: str | None = None,
 ) -> int:
-    """Append sealed prompt/reply entries from `RewriteResult.sealed` to `responses.sealed.jsonl`."""
+    """Append and flush sealed prompt/reply entries from `RewriteResult.sealed` to `responses.sealed.jsonl`."""
     idx = call_counter_start
     for entry in sealed_entries:
         idx += 1
         ev_idx = int(entry.get("event_index", 0))
         reply_txt = str(entry.get("reply") or "")
         msgs = entry.get("messages") or []
-        prompt_json = json.dumps(msgs, sort_keys=True, separators=(",", ":"))
+        if context_prose is not None:
+            thinking_payload: Any = {"context_prose": context_prose, "messages": msgs}
+        else:
+            thinking_payload = msgs
+        prompt_json = json.dumps(thinking_payload, sort_keys=True, separators=(",", ":"))
         resp_sha, think_sha = compute_sealed_response_digests(reply_txt, prompt_json)
-        append_sealed_response(
+        _append_and_flush_sealed_response(
             sealed_responses_path,
             SealedResponseEntry(
                 call_id=f"{scenario_id}:r{rendering_index}:{phase_tag}:ev{ev_idx}:call_{idx:04d}",
@@ -695,6 +836,17 @@ def _seal_rewrite_entries(
     return idx
 
 
+def _atomic_write_json(target_path: Path, payload: Mapping[str, Any]) -> None:
+    """Write `payload` to a sibling `.tmp` file, flush, and atomically replace `target_path` via `os.replace`."""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target_path.with_name(f".{target_path.name}.tmp")
+    encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    with tmp_path.open("wb") as fh:
+        fh.write(encoded)
+        fh.flush()
+    os.replace(tmp_path, target_path)
+
+
 def _write_record_and_status(
     record_path: Path,
     status_path: Path,
@@ -703,9 +855,8 @@ def _write_record_and_status(
     status_state: str,
     failure_class: str | None = None,
 ) -> None:
-    """Write `stage5_run_record.json` and `stage5_status.json` atomically/cleanly with no prose."""
-    record_path.parent.mkdir(parents=True, exist_ok=True)
-    record_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    """Write `stage5_run_record.json` and `stage5_status.json` atomically (`os.replace`) with no prose."""
+    _atomic_write_json(record_path, record)
     status_doc = {
         "schema_version": STAGE5_SCHEMA_VERSION,
         "status": status_state,
@@ -714,7 +865,7 @@ def _write_record_and_status(
         "progress": record.get("progress"),
         "summary": record.get("summary"),
     }
-    status_path.write_text(json.dumps(status_doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _atomic_write_json(status_path, status_doc)
 
 
 def _recompute_summary(renderings_list: Sequence[Mapping[str, Any]]) -> dict[str, int]:
@@ -735,6 +886,162 @@ def _recompute_summary(renderings_list: Sequence[Mapping[str, Any]]) -> dict[str
     }
 
 
+def _hall_condition_holds(
+    renderings_by_target: Mapping[str, set[tuple[str, int]]],
+    quotas: Mapping[str, int],
+    used_renderings: set[tuple[str, int]],
+) -> bool:
+    """Return True iff Hall's marriage condition holds for `quotas` across `STAGE5_RUNG_TARGETS` outside `used_renderings`."""
+    active_targets = [t for t in STAGE5_RUNG_TARGETS if quotas.get(t, 0) > 0]
+    for r_len in range(1, len(active_targets) + 1):
+        for subset in combinations(active_targets, r_len):
+            needed = sum(quotas[t] for t in subset)
+            union_avail: set[tuple[str, int]] = set()
+            for t in subset:
+                union_avail |= (renderings_by_target[t] - used_renderings)
+            if len(union_avail) < needed:
+                return False
+    return True
+
+
+def _sample_rung_events_at_most_one_per_rendering(
+    eligible_by_target: Mapping[str, Sequence[tuple[str, int, int, str]]],
+    rung_seed: int,
+    *,
+    per_target: int = STAGE5_RUNG_PER_TARGET,
+) -> tuple[list[tuple[str, int, int, str]], int]:
+    """Sample `per_target` events per target (`SAY_2`, `SAY_3`, `SAY_4`) with at most 1 event per rendering `(sid, r_idx)`.
+
+    Pools are sorted canonically by `(scenario_id, rendering_index, event_index)` before sampling.
+    Raises `Stage5RungSampleShortError` if any target cannot reach `per_target` under the 1-per-rendering cap.
+    Returns `(sampled_events, rung_scenario_overlap)`.
+    """
+    sorted_by_target: dict[str, list[tuple[str, int, int, str]]] = {
+        t: sorted(
+            eligible_by_target.get(t, ()),
+            key=lambda item: (str(item[0]), int(item[1]), int(item[2]), str(item[3])),
+        )
+        for t in STAGE5_RUNG_TARGETS
+    }
+    events_by_target_and_rendering: dict[str, dict[tuple[str, int], list[tuple[str, int, int, str]]]] = {
+        t: {} for t in STAGE5_RUNG_TARGETS
+    }
+    renderings_by_target: dict[str, set[tuple[str, int]]] = {t: set() for t in STAGE5_RUNG_TARGETS}
+    for t in STAGE5_RUNG_TARGETS:
+        for ev_tuple in sorted_by_target[t]:
+            r_key = (str(ev_tuple[0]), int(ev_tuple[1]))
+            events_by_target_and_rendering[t].setdefault(r_key, []).append(ev_tuple)
+            renderings_by_target[t].add(r_key)
+
+    quotas: dict[str, int] = {t: int(per_target) for t in STAGE5_RUNG_TARGETS}
+    used_renderings: set[tuple[str, int]] = set()
+    if not _hall_condition_holds(renderings_by_target, quotas, used_renderings):
+        # Compute per-target distinct rendering counts (and if union across targets is short, reflect capped availability)
+        counts_by_target: dict[str, int] = {
+            t: len(renderings_by_target[t]) for t in STAGE5_RUNG_TARGETS
+        }
+        if all(counts_by_target[t] >= per_target for t in STAGE5_RUNG_TARGETS):
+            # Individual targets have >= per_target renderings, but their union is too small for disjoint 1-per-rendering draws
+            greedy_used: set[tuple[str, int]] = set()
+            for t in STAGE5_RUNG_TARGETS:
+                avail_t = sorted(renderings_by_target[t] - greedy_used)
+                take_t = avail_t[:per_target]
+                counts_by_target[t] = len(take_t)
+                greedy_used.update(take_t)
+        raise Stage5RungSampleShortError(counts_by_target)
+
+    rung_rng = random.Random(rung_seed)
+    sampled_events: list[tuple[str, int, int, str]] = []
+    for t in STAGE5_RUNG_TARGETS:
+        for _ in range(per_target):
+            next_quotas = dict(quotas)
+            next_quotas[t] -= 1
+            valid_events: list[tuple[str, int, int, str]] = []
+            for r_key in sorted(renderings_by_target[t] - used_renderings):
+                cand_used = used_renderings | {r_key}
+                if _hall_condition_holds(renderings_by_target, next_quotas, cand_used):
+                    valid_events.extend(events_by_target_and_rendering[t][r_key])
+            chosen_ev = rung_rng.choice(valid_events)
+            sampled_events.append(chosen_ev)
+            used_renderings.add((str(chosen_ev[0]), int(chosen_ev[1])))
+            quotas[t] -= 1
+
+    renderings_by_sid: dict[str, set[int]] = {}
+    for sid, r_idx, _, _ in sampled_events:
+        renderings_by_sid.setdefault(str(sid), set()).add(int(r_idx))
+    rung_scenario_overlap = sum(1 for r_set in renderings_by_sid.values() if len(r_set) == 2)
+    return sampled_events, rung_scenario_overlap
+
+
+def _parse_redo_b_spec(
+    redo_b: bool | Sequence[str | tuple[str, int]] | None,
+    resolved_worlds: Sequence[World],
+) -> tuple[bool, set[tuple[str, int]]]:
+    """Parse `redo_b` into `(redo_b_all, redo_b_targets)`."""
+    if redo_b is True:
+        all_keys = {(w.scenario_id, r_idx) for w in resolved_worlds for r_idx in (0, 1)}
+        return True, all_keys
+    if not redo_b:
+        return False, set()
+    targets: set[tuple[str, int]] = set()
+    for item in redo_b:
+        if isinstance(item, tuple) and len(item) == 2:
+            targets.add((str(item[0]), int(item[1])))
+        elif isinstance(item, str):
+            raw = item.strip()
+            if ":" in raw:
+                sid_part, r_part = raw.split(":", 1)
+                targets.add((sid_part.strip(), int(r_part.strip())))
+            elif raw:
+                targets.add((raw, 0))
+                targets.add((raw, 1))
+    return False, targets
+
+
+def _check_resume_environment_drift(
+    existing_record: Mapping[str, Any],
+    *,
+    writer_kind: str,
+    model_tag: str,
+    model_digest: str | None,
+    ollama_version: str | None,
+    num_predict: int,
+    max_num_ctx: int,
+    current_module_sha256s: Mapping[str, str],
+    check_ollama_version: bool,
+) -> None:
+    """Refuse `--resume` with `Stage5ResumeEnvChangedError` (`STAGE5_RESUME_ENV_CHANGED`) if environment or module shas drifted."""
+    drifted: list[str] = []
+    prev_engine = existing_record.get("engine")
+    if isinstance(prev_engine, Mapping):
+        if prev_engine.get("writer_kind") != writer_kind:
+            drifted.append("engine.writer_kind")
+        if prev_engine.get("model") != model_tag:
+            drifted.append("engine.model")
+        if prev_engine.get("model_digest") != model_digest:
+            drifted.append("engine.model_digest")
+        if check_ollama_version and prev_engine.get("ollama_version") != ollama_version:
+            drifted.append("engine.ollama_version")
+    else:
+        drifted.append("engine")
+
+    if existing_record.get("num_predict") != int(num_predict):
+        drifted.append("num_predict")
+    if existing_record.get("max_num_ctx") != int(max_num_ctx):
+        drifted.append("max_num_ctx")
+
+    prev_mod_shas = existing_record.get("module_sha256s")
+    if isinstance(prev_mod_shas, Mapping):
+        for mod_name in ("render.py", "shape_templates.py", "rewrite.py"):
+            if prev_mod_shas.get(mod_name) != current_module_sha256s.get(mod_name):
+                drifted.append(f"module_sha256s.{mod_name}")
+    else:
+        drifted.append("module_sha256s")
+
+    if drifted:
+        raise Stage5ResumeEnvChangedError(drifted)
+
+
 def run_stage5_pipeline(
     *,
     count: int = 80,
@@ -744,7 +1051,8 @@ def run_stage5_pipeline(
     writer_kind: str = "mock",
     stage5_plan_seed: int | None = None,
     stage5_rung_seed: int | None = None,
-    redo_b: bool = False,
+    redo_b: bool | Sequence[str | tuple[str, int]] = False,
+    redo_rung: bool = False,
     s_code_say: bool = False,
     vram_halt_mib: int = DEFAULT_VRAM_HALT_MIB,
     num_predict: int | None = None,
@@ -770,6 +1078,8 @@ def run_stage5_pipeline(
     worlds: Sequence[World] | None = None,
     mock_custom_renderer: Callable[[World, str], str] | None = None,
     on_before_first_writer_call: Callable[[Path], None] | None = None,
+    rung_mode_order: tuple[str, str] = ("facts_only", "with_draft"),
+    rendering_execution_order: Sequence[tuple[str, int]] | None = None,
 ) -> dict[str, Any]:
     """Run the full Stage 5 pipeline (B -> Rung -> Swap & Rewrite -> Final Check -> S >= B Stop) and write `stage5_run_record.json`."""
     if writer_kind not in ("mock", "ollama"):
@@ -790,6 +1100,10 @@ def run_stage5_pipeline(
             f"REFUSED (MAX_NUM_CTX_CAP): max_num_ctx={max_num_ctx} exceeds the hard VRAM ceiling limit "
             f"{DEFAULT_WRITER_MAX_NUM_CTX}."
         )
+    if sorted(rung_mode_order) != ["facts_only", "with_draft"]:
+        raise ValueError(
+            f"rung_mode_order must be a permutation of ('facts_only', 'with_draft'), got {rung_mode_order!r}."
+        )
 
     resolved_goal_mode = str(goal_mode)
     resolved_think = bool(think)
@@ -805,11 +1119,12 @@ def run_stage5_pipeline(
         max_num_ctx=int(max_num_ctx),
         think=resolved_think,
     )
+    current_module_sha256s = compute_stage5_module_sha256s()
 
     output_dir.mkdir(parents=True, exist_ok=True)
     sealed_dir = output_dir / "sealed_store"
     sealed_dir.mkdir(parents=True, exist_ok=True)
-    generations_path = output_dir / GENERATIONS_FILENAME
+    generations_path = sealed_dir / GENERATIONS_FILENAME
     sealed_responses_path = sealed_dir / SEALED_RESPONSES_FILENAME
     record_path = output_dir / STAGE5_RUN_RECORD_FILENAME
     status_path = output_dir / STAGE5_STATUS_FILENAME
@@ -830,19 +1145,29 @@ def run_stage5_pipeline(
             raise Stage5ResumeNoPlanSeedError(
                 "STAGE5_RESUME_NO_PLAN_SEED: resume record has no valid integer plan_seed."
             )
+        raw_rs = loaded_obj.get("rung_seed")
+        if isinstance(raw_rs, bool) or not isinstance(raw_rs, int):
+            raise Stage5ResumeNoPlanSeedError(
+                "STAGE5_RESUME_NO_PLAN_SEED: resume record has no valid integer rung_seed."
+            )
         plan_seed = int(raw_ps)
         plan_seed_source = str(loaded_obj.get("plan_seed_source") or "secrets")
-        raw_rs = loaded_obj.get("rung_seed")
-        if not isinstance(raw_rs, bool) and isinstance(raw_rs, int):
-            rung_seed = int(raw_rs)
-            rung_seed_source = str(loaded_obj.get("rung_seed_source") or "secrets")
-        elif stage5_rung_seed is not None:
-            rung_seed = int(stage5_rung_seed)
-            rung_seed_source = "flag"
-        else:
-            rung_seed = secrets.randbelow(2**63)
-            rung_seed_source = "secrets"
+        rung_seed = int(raw_rs)
+        rung_seed_source = str(loaded_obj.get("rung_seed_source") or "secrets")
         existing_record = loaded_obj
+
+        # Check environment & module SHA-256 drift before any writer / server startup
+        _check_resume_environment_drift(
+            existing_record,
+            writer_kind=writer_kind,
+            model_tag=effective_writer_pin.ollama_tag,
+            model_digest=effective_writer_pin.manifest_digest if writer_kind == "ollama" else None,
+            ollama_version=None,
+            num_predict=resolved_num_predict,
+            max_num_ctx=int(max_num_ctx),
+            current_module_sha256s=current_module_sha256s,
+            check_ollama_version=(writer_kind == "mock"),
+        )
     else:
         if stage5_plan_seed is not None:
             plan_seed = int(stage5_plan_seed)
@@ -885,15 +1210,17 @@ def run_stage5_pipeline(
     plan_by_sid: Mapping[str, Sequence[Mapping[str, Any]]] = plan_bundle["plan_by_scenario_id"]  # type: ignore[assignment]
 
     total_renderings = len(resolved_worlds) * 2
-    redo_b_flag = bool(redo_b)
+    redo_b_all, redo_b_targets = _parse_redo_b_spec(redo_b, resolved_worlds)
+    redo_b_flag = bool(redo_b_all or bool(redo_b_targets))
+    redo_rung_flag = bool(redo_rung)
 
-    # Restore state from existing_record if resuming without --stage5-redo-b
     existing_renderings_by_key: dict[tuple[str, int], dict[str, Any]] = {}
     b_prose_by_key: dict[tuple[str, int], str] = {}
     existing_rung: dict[str, Any] | None = None
     existing_rung_done: bool = False
     b_calls_made = 0
     rung_calls_made = 0
+    rung_aborted_calls = 0
     rewrite_calls_made = 0
 
     if existing_record is not None:
@@ -901,46 +1228,96 @@ def run_stage5_pipeline(
         if isinstance(prev_calls, dict):
             b_calls_made = int(prev_calls.get("b_calls", 0))
             rung_calls_made = int(prev_calls.get("rung_calls", 0))
+            rung_aborted_calls = int(
+                existing_record.get(
+                    "rung_aborted_calls",
+                    prev_calls.get("rung_aborted_calls", 0),
+                )
+            )
             rewrite_calls_made = int(prev_calls.get("rewrite_calls", 0))
-        if redo_b_flag:
-            # Explicit --stage5-redo-b resets every downstream field (rung and S) of affected renderings.
+
+        prev_prog = existing_record.get("progress") or {}
+        prev_b_done = int(prev_prog.get("b_done", len(existing_record.get("renderings") or ())))
+        prev_s_done = int(prev_prog.get("s_done", 0))
+        prev_renderings_list = list(existing_record.get("renderings") or ())
+
+        # Addendum 2 Item 3: Resume after S_LT_B stop refuses unless the stopped rendering is explicitly reset via --stage5-redo-b
+        stopped_s_lt_b_keys: list[tuple[str, int]] = []
+        if existing_record.get("stop_reason") == "S_LT_B":
+            sd = existing_record.get("stop_detail")
+            if isinstance(sd, Mapping) and sd.get("scenario_id") is not None and sd.get("rendering_index") is not None:
+                stopped_s_lt_b_keys.append((str(sd["scenario_id"]), int(sd["rendering_index"])))
+        for idx_r, r_entry in enumerate(prev_renderings_list):
+            if idx_r >= prev_s_done:
+                break
+            if isinstance(r_entry, Mapping) and r_entry.get("b_passed") is True and r_entry.get("s_passed") is False:
+                k_stop = (str(r_entry["scenario_id"]), int(r_entry["rendering_index"]))
+                if k_stop not in stopped_s_lt_b_keys:
+                    stopped_s_lt_b_keys.append(k_stop)
+
+        for stop_sid, stop_r_idx in stopped_s_lt_b_keys:
+            if not redo_b_all and (stop_sid, stop_r_idx) not in redo_b_targets:
+                raise Stage5ResumeAfterSLtBError(
+                    scenario_id=stop_sid,
+                    rendering_index=stop_r_idx,
+                )
+
+        # Addendum 2 Item 4: --stage5-redo-b on a rendering sampled by the rung refuses unless --stage5-redo-rung is set
+        prev_rung = existing_record.get("rung")
+        sampled_r_set: set[tuple[str, int]] = set()
+        if isinstance(prev_rung, Mapping):
+            raw_sampled_rs = prev_rung.get("sampled_renderings")
+            if isinstance(raw_sampled_rs, Sequence):
+                for item in raw_sampled_rs:
+                    if isinstance(item, Sequence) and len(item) == 2:
+                        sampled_r_set.add((str(item[0]), int(item[1])))
+        if redo_b_flag and sampled_r_set:
+            affected_sampled = sorted(sampled_r_set & redo_b_targets)
+            if affected_sampled and not redo_rung_flag:
+                raise Stage5RedoBSampledByRungError(affected_sampled)
+
+        # Restore non-reset renderings up to prev_b_done
+        for idx_r, r_entry in enumerate(prev_renderings_list):
+            if idx_r >= prev_b_done:
+                break
+            if isinstance(r_entry, dict):
+                k = (str(r_entry["scenario_id"]), int(r_entry["rendering_index"]))
+                if k in redo_b_targets:
+                    continue
+                cp = dict(r_entry)
+                cp["_s_completed"] = bool(
+                    not redo_rung_flag
+                    and idx_r < prev_s_done
+                    and not (cp.get("b_passed") and not cp.get("s_passed"))
+                )
+                existing_renderings_by_key[k] = cp
+
+        if redo_rung_flag:
             existing_rung = None
             existing_rung_done = False
             rung_calls_made = 0
             rewrite_calls_made = 0
+        elif (
+            isinstance(prev_rung, dict)
+            and prev_rung.get("chosen") in ("facts_only", "with_draft")
+            and isinstance(prev_prog, dict)
+            and bool(prev_prog.get("rung_done"))
+        ):
+            existing_rung = dict(prev_rung)
+            existing_rung_done = True
         else:
-            b_prose_by_key = _load_sealed_b_prose_by_rendering(
-                sealed_responses_path,
-                goal_mode=resolved_goal_mode,
-                worlds_by_sid=worlds_by_sid,
-            )
-            prev_prog = existing_record.get("progress") or {}
-            prev_b_done = int(prev_prog.get("b_done", len(existing_record.get("renderings") or ())))
-            prev_s_done = int(prev_prog.get("s_done", 0))
-            for idx_r, r_entry in enumerate(existing_record.get("renderings") or ()):
-                if idx_r >= prev_b_done:
-                    break
-                if isinstance(r_entry, dict):
-                    k = (str(r_entry["scenario_id"]), int(r_entry["rendering_index"]))
-                    cp = dict(r_entry)
-                    cp["_s_completed"] = bool(
-                        idx_r < prev_s_done
-                        and not (cp.get("b_passed") and not cp.get("s_passed"))
-                    )
-                    existing_renderings_by_key[k] = cp
-            prev_rung = existing_record.get("rung")
-            if (
-                isinstance(prev_rung, dict)
-                and prev_rung.get("chosen") in ("facts_only", "with_draft")
-                and isinstance(prev_prog, dict)
-                and bool(prev_prog.get("rung_done"))
-            ):
-                existing_rung = dict(prev_rung)
-                existing_rung_done = True
+            existing_rung = None
+            existing_rung_done = False
+            rung_calls_made = 0
 
+    prev_engine_ver = (
+        existing_record.get("engine", {}).get("ollama_version")
+        if isinstance(existing_record, Mapping) and isinstance(existing_record.get("engine"), Mapping)
+        else None
+    )
     engine_block: dict[str, object] = {
         "writer_kind": writer_kind,
-        "ollama_version": None,
+        "ollama_version": prev_engine_ver if writer_kind == "ollama" else None,
         "model": effective_writer_pin.ollama_tag,
         "model_digest": effective_writer_pin.manifest_digest if writer_kind == "ollama" else None,
     }
@@ -953,6 +1330,8 @@ def run_stage5_pipeline(
             "with_draft": {"attempts": 0, "kept": 0},
             "chosen": "facts_only",
             "rule": STAGE5_RUNG_RULE,
+            "rung_scenario_overlap": 0,
+            "sampled_renderings": [],
         }
     )
 
@@ -965,7 +1344,10 @@ def run_stage5_pipeline(
         "rung_seed_source": rung_seed_source,
         "seed_bank_sha256": seed_bank_sha256,
         "seed_bank_size": seed_bank_size,
+        "module_sha256s": current_module_sha256s,
         "rung": default_rung_block,
+        "rung_scenario_overlap": int(default_rung_block.get("rung_scenario_overlap", 0)),
+        "rung_aborted_calls": rung_aborted_calls,
         "stop_reason": None,
         "progress": {
             "renderings_planned": total_renderings,
@@ -979,16 +1361,19 @@ def run_stage5_pipeline(
             "calls_made": {
                 "b_calls": b_calls_made,
                 "rung_calls": rung_calls_made,
+                "rung_aborted_calls": rung_aborted_calls,
                 "rewrite_calls": rewrite_calls_made,
             },
         },
         "redo_b": redo_b_flag,
+        "redo_rung": redo_rung_flag,
         "engine": engine_block,
         "max_num_ctx": int(max_num_ctx),
         "num_predict": resolved_num_predict,
         "call_counts": {
             "b_calls": b_calls_made,
             "rung_calls": rung_calls_made,
+            "rung_aborted_calls": rung_aborted_calls,
             "rewrite_calls": rewrite_calls_made,
         },
         "summary": {
@@ -1096,19 +1481,34 @@ def run_stage5_pipeline(
     for v in existing_renderings_by_key.values():
         v.pop("_s_completed", None)
 
+    ordered_rendering_keys: list[tuple[str, int]] = (
+        list(rendering_execution_order)
+        if rendering_execution_order is not None
+        else [(w.scenario_id, r_idx) for w in resolved_worlds for r_idx in (0, 1)]
+    )
+
     try:
-        for w in resolved_worlds:
-            sid = w.scenario_id
+        for sid, r_idx in ordered_rendering_keys:
+            w = worlds_by_sid[sid]
             scen_plan_by_idx = scen_plan_dict_by_sid[sid]
-            for r_idx in (0, 1):
-                r_key = (sid, r_idx)
-                focal_ag = w.agents[r_idx]
-                if r_key in existing_renderings_by_key:
-                    prev_r = existing_renderings_by_key[r_key]
-                    renderings_records.append(prev_r)
-                    if not prev_r.get("ctx_over_cap") and r_key in b_prose_by_key:
+            r_key = (sid, r_idx)
+            focal_ag = w.agents[r_idx]
+            if r_key in existing_renderings_by_key:
+                prev_r = existing_renderings_by_key[r_key]
+                renderings_records.append(prev_r)
+                # Addendum 2 Item 5: Over-cap renderings make 0 writer calls and 0 sealed-store reads on resume
+                if not prev_r.get("ctx_over_cap"):
+                    restored_prose = _read_sealed_b_prose_for_rendering(
+                        sealed_responses_path,
+                        sid,
+                        r_idx,
+                        goal_mode=resolved_goal_mode,
+                        world=w,
+                    )
+                    if restored_prose is not None:
+                        b_prose_by_key[r_key] = restored_prose
                         b_rows_restored = match_rendering_event_forms(
-                            b_prose_by_key[r_key],
+                            restored_prose,
                             w,
                             focal_agent=focal_ag,
                             goal_mode=resolved_goal_mode,
@@ -1116,231 +1516,240 @@ def run_stage5_pipeline(
                         )
                         assert isinstance(b_rows_restored, list)
                         b_rows_by_key[r_key] = b_rows_restored
+                continue
+
+            prompt_text = format_writer_prompt(
+                w,
+                focal_ag,
+                prompt_template_c,
+                goal_mode=resolved_goal_mode,
+                constraint_layout="table",
+                accepted_forms_line="off",
+                shape_plan="off",
+            )
+            messages = [{"role": "user", "content": prompt_text}]
+
+            if ollama_writer is not None:
+                prev_call_len = len(ollama_writer.call_records)
+                prev_sealed_len = len(ollama_writer.sealed_responses)
+                prose_out = ollama_writer._chat_render(
+                    world=w,
+                    scenario_id=sid,
+                    rendering_index=r_idx,
+                    focal_agent=focal_ag,
+                    prompt_text=prompt_text,
+                    allow_refusal=True,
+                )
+                _flush_sealed_store(sealed_responses_path)
+                new_call_recs = ollama_writer.call_records[prev_call_len:]
+                last_rec = new_call_recs[-1]
+                decision_tokens = (
+                    last_rec.prompt_tokens_exact
+                    if last_rec.prompt_tokens_exact is not None
+                    else last_rec.prompt_tokens_estimate
+                )
+                is_over_cap = last_rec.check_id == CTX_OVER_CAP_CHECK_ID
+                if not is_over_cap:
+                    b_calls_made += len(new_call_recs)
+                    sealed_call_counter += len(ollama_writer.sealed_responses) - prev_sealed_len
+
+                if is_over_cap:
+                    cap_block = {
+                        "prompt_tokens": int(decision_tokens),
+                        "num_predict": resolved_num_predict,
+                        "margin": NUM_CTX_MARGIN_TOKENS,
+                        "max_num_ctx": int(max_num_ctx),
+                        "fits": False,
+                    }
+                    ev_init = _build_initial_events_for_rendering(
+                        w, focal_ag, scen_plan_by_idx, None
+                    )
+                    renderings_records.append(
+                        {
+                            "scenario_id": sid,
+                            "scenario_seed": int(w.seed),
+                            "rendering_index": r_idx,
+                            "focal_agent_sha256": hashlib.sha256(focal_ag.encode("utf-8")).hexdigest(),
+                            "ctx_over_cap": True,
+                            "prompt_tokens": int(decision_tokens),
+                            "cap": cap_block,
+                            "b_passed": False,
+                            "b_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
+                            "s_passed": False,
+                            "s_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
+                            "seam_count": 0,
+                            "events": ev_init,
+                        }
+                    )
                     continue
 
-                prompt_text = format_writer_prompt(
-                    w,
-                    focal_ag,
-                    prompt_template_c,
-                    goal_mode=resolved_goal_mode,
-                    constraint_layout="table",
-                    accepted_forms_line="off",
-                    shape_plan="off",
+                if prose_out is not None:
+                    b_prose = prose_out
+                else:
+                    new_sealed = ollama_writer.sealed_responses[prev_sealed_len:]
+                    raw_last = new_sealed[-1].response_text if new_sealed else ""
+                    if resolved_goal_mode == "splice" and raw_last:
+                        try:
+                            b_prose = splice_goal_tokens(raw_last, w).expanded_prose
+                        except Exception:
+                            b_prose = raw_last
+                    else:
+                        b_prose = raw_last
+                decision_tokens_out = int(decision_tokens)
+            else:
+                assert mock_writer is not None
+                p_tokens: int | None = (
+                    count_prompt_tokens_exact(
+                        messages, think=resolved_think, counter=prompt_token_counter
+                    )
+                    if prompt_token_counter is not None
+                    else None
                 )
-                messages = [{"role": "user", "content": prompt_text}]
+                fits_cap = (
+                    prompt_fits_num_ctx_cap(
+                        p_tokens,
+                        resolved_num_predict,
+                        max_num_ctx,
+                        margin=NUM_CTX_MARGIN_TOKENS,
+                    )
+                    if p_tokens is not None
+                    else True
+                )
+                if not fits_cap:
+                    assert p_tokens is not None
+                    cap_block = {
+                        "prompt_tokens": int(p_tokens),
+                        "num_predict": resolved_num_predict,
+                        "margin": NUM_CTX_MARGIN_TOKENS,
+                        "max_num_ctx": int(max_num_ctx),
+                        "fits": False,
+                    }
+                    ev_init = _build_initial_events_for_rendering(
+                        w, focal_ag, scen_plan_by_idx, None
+                    )
+                    renderings_records.append(
+                        {
+                            "scenario_id": sid,
+                            "scenario_seed": int(w.seed),
+                            "rendering_index": r_idx,
+                            "focal_agent_sha256": hashlib.sha256(focal_ag.encode("utf-8")).hexdigest(),
+                            "ctx_over_cap": True,
+                            "prompt_tokens": int(p_tokens),
+                            "cap": cap_block,
+                            "b_passed": False,
+                            "b_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
+                            "s_passed": False,
+                            "s_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
+                            "seam_count": 0,
+                            "events": ev_init,
+                        }
+                    )
+                    continue
 
-                if ollama_writer is not None:
-                    prev_call_len = len(ollama_writer.call_records)
-                    prev_sealed_len = len(ollama_writer.sealed_responses)
-                    prose_out = ollama_writer._chat_render(
-                        world=w,
+                decision_tokens_out: int | None = int(p_tokens) if p_tokens is not None else None
+                raw_b = mock_writer.render_raw_response(w, focal_ag)
+                b_calls_made += 1
+                sealed_call_counter += 1
+                call_seed = derive_call_seed(int(w.seed), r_idx, 0)
+                resp_sha, think_sha = compute_sealed_response_digests(raw_b, "")
+                # Write and flush the sealed B response BEFORE updating the record
+                _append_and_flush_sealed_response(
+                    sealed_responses_path,
+                    SealedResponseEntry(
+                        call_id=f"{sid}:r{r_idx}:b_call_{sealed_call_counter:04d}",
+                        call_index=sealed_call_counter,
                         scenario_id=sid,
                         rendering_index=r_idx,
                         focal_agent=focal_ag,
-                        prompt_text=prompt_text,
-                        allow_refusal=True,
-                    )
-                    new_call_recs = ollama_writer.call_records[prev_call_len:]
-                    last_rec = new_call_recs[-1]
-                    decision_tokens = (
-                        last_rec.prompt_tokens_exact
-                        if last_rec.prompt_tokens_exact is not None
-                        else last_rec.prompt_tokens_estimate
-                    )
-                    is_over_cap = last_rec.check_id == CTX_OVER_CAP_CHECK_ID
-                    if not is_over_cap:
-                        b_calls_made += len(new_call_recs)
-                        sealed_call_counter += len(ollama_writer.sealed_responses) - prev_sealed_len
-
-                    if is_over_cap:
-                        cap_block = {
-                            "prompt_tokens": int(decision_tokens),
-                            "num_predict": resolved_num_predict,
-                            "margin": NUM_CTX_MARGIN_TOKENS,
-                            "max_num_ctx": int(max_num_ctx),
-                            "fits": False,
-                        }
-                        ev_init = _build_initial_events_for_rendering(
-                            w, focal_ag, scen_plan_by_idx, None
-                        )
-                        renderings_records.append(
-                            {
-                                "scenario_id": sid,
-                                "scenario_seed": int(w.seed),
-                                "rendering_index": r_idx,
-                                "focal_agent_sha256": hashlib.sha256(focal_ag.encode("utf-8")).hexdigest(),
-                                "ctx_over_cap": True,
-                                "prompt_tokens": int(decision_tokens),
-                                "cap": cap_block,
-                                "b_passed": False,
-                                "b_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
-                                "s_passed": False,
-                                "s_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
-                                "seam_count": 0,
-                                "events": ev_init,
-                            }
-                        )
-                        continue
-
-                    if prose_out is not None:
-                        b_prose = prose_out
-                    else:
-                        # All attempts failed check_rendered_prose; recover the final attempt's sealed prose
-                        new_sealed = ollama_writer.sealed_responses[prev_sealed_len:]
-                        raw_last = new_sealed[-1].response_text if new_sealed else ""
-                        if resolved_goal_mode == "splice" and raw_last:
-                            try:
-                                b_prose = splice_goal_tokens(raw_last, w).expanded_prose
-                            except Exception:
-                                b_prose = raw_last
-                        else:
-                            b_prose = raw_last
-                    decision_tokens_out = int(decision_tokens)
-                else:
-                    assert mock_writer is not None
-                    p_tokens: int | None = (
-                        count_prompt_tokens_exact(
-                            messages, think=resolved_think, counter=prompt_token_counter
-                        )
-                        if prompt_token_counter is not None
-                        else None
-                    )
-                    fits_cap = (
-                        prompt_fits_num_ctx_cap(
-                            p_tokens,
-                            resolved_num_predict,
-                            max_num_ctx,
-                            margin=NUM_CTX_MARGIN_TOKENS,
-                        )
-                        if p_tokens is not None
-                        else True
-                    )
-                    if not fits_cap:
-                        assert p_tokens is not None
-                        cap_block = {
-                            "prompt_tokens": int(p_tokens),
-                            "num_predict": resolved_num_predict,
-                            "margin": NUM_CTX_MARGIN_TOKENS,
-                            "max_num_ctx": int(max_num_ctx),
-                            "fits": False,
-                        }
-                        ev_init = _build_initial_events_for_rendering(
-                            w, focal_ag, scen_plan_by_idx, None
-                        )
-                        renderings_records.append(
-                            {
-                                "scenario_id": sid,
-                                "scenario_seed": int(w.seed),
-                                "rendering_index": r_idx,
-                                "focal_agent_sha256": hashlib.sha256(focal_ag.encode("utf-8")).hexdigest(),
-                                "ctx_over_cap": True,
-                                "prompt_tokens": int(p_tokens),
-                                "cap": cap_block,
-                                "b_passed": False,
-                                "b_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
-                                "s_passed": False,
-                                "s_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
-                                "seam_count": 0,
-                                "events": ev_init,
-                            }
-                        )
-                        continue
-
-                    decision_tokens_out: int | None = int(p_tokens) if p_tokens is not None else None
-                    raw_b = mock_writer.render_raw_response(w, focal_ag)
-                    b_calls_made += 1
-                    sealed_call_counter += 1
-                    call_seed = derive_call_seed(int(w.seed), r_idx, 0)
-                    resp_sha, think_sha = compute_sealed_response_digests(raw_b, "")
-                    append_sealed_response(
-                        sealed_responses_path,
-                        SealedResponseEntry(
-                            call_id=f"{sid}:r{r_idx}:b_call_{sealed_call_counter:04d}",
-                            call_index=sealed_call_counter,
-                            scenario_id=sid,
-                            rendering_index=r_idx,
-                            focal_agent=focal_ag,
-                            attempt=0,
-                            seed=call_seed,
-                            temperature=ATTEMPT_0_TEMPERATURE,
-                            min_p=None,
-                            retry_form="",
-                            response_text=raw_b,
-                            thinking_text="",
-                            response_sha256=resp_sha,
-                            thinking_sha256=think_sha,
-                            goal_mode=resolved_goal_mode,
-                            presence_penalty=resolved_presence_penalty,
-                            constraint_layout="table",
-                        ),
-                    )
-                    if resolved_goal_mode == "splice":
-                        try:
-                            b_prose = splice_goal_tokens(raw_b, w).expanded_prose
-                        except Exception:
-                            b_prose = raw_b
-                    else:
+                        attempt=0,
+                        seed=call_seed,
+                        temperature=ATTEMPT_0_TEMPERATURE,
+                        min_p=None,
+                        retry_form="",
+                        response_text=raw_b,
+                        thinking_text="",
+                        response_sha256=resp_sha,
+                        thinking_sha256=think_sha,
+                        goal_mode=resolved_goal_mode,
+                        presence_penalty=resolved_presence_penalty,
+                        constraint_layout="table",
+                    ),
+                )
+                if resolved_goal_mode == "splice":
+                    try:
+                        b_prose = splice_goal_tokens(raw_b, w).expanded_prose
+                    except Exception:
                         b_prose = raw_b
+                else:
+                    b_prose = raw_b
 
-                b_prose_by_key[r_key] = b_prose
-                b_faults = collect_prose_faults(
-                    b_prose,
-                    w,
-                    focal_agent=focal_ag,
-                    goal_mode=resolved_goal_mode,
-                    checker_profile="d",
-                )
-                b_passed = len(b_faults) == 0
-                b_fault_rule_ids = [f.rule_id for f in b_faults]
-                b_rows = match_rendering_event_forms(
-                    b_prose,
-                    w,
-                    focal_agent=focal_ag,
-                    goal_mode=resolved_goal_mode,
-                    checker_profile="d",
-                )
-                assert isinstance(b_rows, list)
-                b_rows_by_key[r_key] = b_rows
+            b_prose_by_key[r_key] = b_prose
+            b_faults = collect_prose_faults(
+                b_prose,
+                w,
+                focal_agent=focal_ag,
+                goal_mode=resolved_goal_mode,
+                checker_profile="d",
+            )
+            b_passed = len(b_faults) == 0
+            b_fault_rule_ids = [f.rule_id for f in b_faults]
+            b_rows = match_rendering_event_forms(
+                b_prose,
+                w,
+                focal_agent=focal_ag,
+                goal_mode=resolved_goal_mode,
+                checker_profile="d",
+            )
+            assert isinstance(b_rows, list)
+            b_rows_by_key[r_key] = b_rows
 
-                cap_block = {
+            cap_block = {
+                "prompt_tokens": decision_tokens_out,
+                "num_predict": resolved_num_predict,
+                "margin": NUM_CTX_MARGIN_TOKENS,
+                "max_num_ctx": int(max_num_ctx),
+                "fits": True,
+            }
+            ev_init = _build_initial_events_for_rendering(
+                w, focal_ag, scen_plan_by_idx, b_rows
+            )
+            renderings_records.append(
+                {
+                    "scenario_id": sid,
+                    "scenario_seed": int(w.seed),
+                    "rendering_index": r_idx,
+                    "focal_agent_sha256": hashlib.sha256(focal_ag.encode("utf-8")).hexdigest(),
+                    "ctx_over_cap": False,
                     "prompt_tokens": decision_tokens_out,
-                    "num_predict": resolved_num_predict,
-                    "margin": NUM_CTX_MARGIN_TOKENS,
-                    "max_num_ctx": int(max_num_ctx),
-                    "fits": True,
+                    "cap": cap_block,
+                    "b_passed": b_passed,
+                    "b_fault_rule_ids": b_fault_rule_ids,
+                    "s_passed": False,
+                    "s_fault_rule_ids": [],
+                    "seam_count": 0,
+                    "events": ev_init,
                 }
-                ev_init = _build_initial_events_for_rendering(
-                    w, focal_ag, scen_plan_by_idx, b_rows
-                )
-                renderings_records.append(
-                    {
-                        "scenario_id": sid,
-                        "scenario_seed": int(w.seed),
-                        "rendering_index": r_idx,
-                        "focal_agent_sha256": hashlib.sha256(focal_ag.encode("utf-8")).hexdigest(),
-                        "ctx_over_cap": False,
-                        "prompt_tokens": decision_tokens_out,
-                        "cap": cap_block,
-                        "b_passed": b_passed,
-                        "b_fault_rule_ids": b_fault_rule_ids,
-                        "s_passed": False,
-                        "s_fault_rule_ids": [],
-                        "seam_count": 0,
-                        "events": ev_init,
-                    }
-                )
+            )
     finally:
         if ollama_writer is not None:
             if ollama_writer.owned_server is not None:
                 engine_block["ollama_version"] = ollama_writer.owned_server.ollama_version
             ollama_writer.close()
-
-    # Update progress after Phase 1 (B done for all renderings)
-    record["call_counts"]["b_calls"] = b_calls_made
-    record["progress"]["b_done"] = len(renderings_records)
-    record["progress"]["calls_made"]["b_calls"] = b_calls_made
-    record["summary"] = _recompute_summary(renderings_records)
-    _write_record_and_status(record_path, status_path, record, status_state="running")
+        if rendering_execution_order is not None:
+            canonical_index = {
+                (w.scenario_id, r_idx): idx
+                for idx, (w, r_idx) in enumerate(
+                    (w, r_idx) for w in resolved_worlds for r_idx in (0, 1)
+                )
+            }
+            renderings_records.sort(
+                key=lambda r: canonical_index.get((str(r["scenario_id"]), int(r["rendering_index"])), 0)
+            )
+        record["call_counts"]["b_calls"] = b_calls_made
+        record["progress"]["b_done"] = len(renderings_records)
+        record["progress"]["calls_made"]["b_calls"] = b_calls_made
+        record["summary"] = _recompute_summary(renderings_records)
+        _write_record_and_status(record_path, status_path, record, status_state="running")
 
     # -----------------------------------------------------------------------
     # Phase 2: The Rewrite-Input Rung
@@ -1348,6 +1757,7 @@ def run_stage5_pipeline(
     if existing_rung_done and existing_rung is not None:
         chosen_input = str(existing_rung["chosen"])
         record["rung"] = existing_rung
+        record["rung_scenario_overlap"] = int(existing_rung.get("rung_scenario_overlap", 0))
     elif s_code_say:
         chosen_input = "facts_only"
         record["rung"] = {
@@ -1355,14 +1765,21 @@ def run_stage5_pipeline(
             "with_draft": {"attempts": 0, "kept": 0},
             "chosen": "facts_only",
             "rule": STAGE5_RUNG_RULE,
+            "rung_scenario_overlap": 0,
+            "sampled_renderings": [],
         }
+        record["rung_scenario_overlap"] = 0
         record["progress"]["rung_done"] = True
         _write_record_and_status(record_path, status_path, record, status_state="running")
     else:
         eligible_by_target: dict[str, list[tuple[str, int, int, str]]] = {
             t: [] for t in STAGE5_RUNG_TARGETS
         }
-        for r_entry in renderings_records:
+        # Pool filter is `b_passed and not ctx_over_cap`, sorted canonically by (scenario_id, rendering_index, event_index)
+        for r_entry in sorted(
+            renderings_records,
+            key=lambda r: (str(r["scenario_id"]), int(r["rendering_index"])),
+        ):
             if not r_entry.get("b_passed") or r_entry.get("ctx_over_cap"):
                 continue
             sid = str(r_entry["scenario_id"])
@@ -1389,8 +1806,13 @@ def run_stage5_pipeline(
                 if b_form != target_form:
                     eligible_by_target[target_form].append((sid, r_idx, ev_idx, target_form))
 
-        counts_by_target = {t: len(eligible_by_target[t]) for t in STAGE5_RUNG_TARGETS}
-        if any(counts_by_target[t] < STAGE5_RUNG_PER_TARGET for t in STAGE5_RUNG_TARGETS):
+        try:
+            sampled_rung_events, rung_scenario_overlap = _sample_rung_events_at_most_one_per_rendering(
+                eligible_by_target,
+                rung_seed,
+                per_target=STAGE5_RUNG_PER_TARGET,
+            )
+        except Stage5RungSampleShortError:
             _write_record_and_status(
                 record_path,
                 status_path,
@@ -1398,53 +1820,106 @@ def run_stage5_pipeline(
                 status_state="stopped",
                 failure_class="STAGE5_RUNG_SAMPLE_SHORT",
             )
-            raise Stage5RungSampleShortError(counts_by_target)
+            raise
 
-        rung_rng = random.Random(rung_seed)
-        sampled_rung_events: list[tuple[str, int, int, str]] = []
-        for target_form in STAGE5_RUNG_TARGETS:
-            sampled_rung_events.extend(
-                rung_rng.sample(eligible_by_target[target_form], STAGE5_RUNG_PER_TARGET)
-            )
+        sampled_renderings_list = [
+            [str(sid), int(r_idx)] for sid, r_idx, _, _ in sampled_rung_events
+        ]
+
+        # Addendum 2 Item 13: Apply U2's deterministic swap pass (`swap_all_move_see`, with the run's plan)
+        # in memory to each sampled rendering's B before running the rung's two modes.
+        rung_post_swap_prose_by_key: dict[tuple[str, int], str] = {}
+        for sid, r_idx, _, _ in sampled_rung_events:
+            r_key = (sid, r_idx)
+            if r_key not in rung_post_swap_prose_by_key:
+                w = worlds_by_sid[sid]
+                focal_ag = w.agents[r_idx]
+                scen_plan_by_idx = scen_plan_dict_by_sid[sid]
+                in_memory_swap = swap_all_move_see(
+                    b_prose_by_key[r_key],
+                    w,
+                    scen_plan_by_idx,
+                    focal_agent=focal_ag,
+                    goal_mode=resolved_goal_mode,
+                    checker_profile="d",
+                )
+                rung_post_swap_prose_by_key[r_key] = in_memory_swap.prose
+
+        # Addendum 2 Item 6: Track current rung calls and propagate any client exception to abort mid-rung
+        current_rung_attempt_calls = 0
+        aborted_rung_exc: BaseException | None = None
+
+        def _rung_client_proxy(payload: dict[str, Any]) -> Any:
+            nonlocal current_rung_attempt_calls, aborted_rung_exc
+            current_rung_attempt_calls += 1
+            try:
+                return _invoke_rewrite_client(
+                    active_rewrite_client,
+                    f"{ollama_base_url.rstrip('/')}/api/chat",
+                    payload,
+                )
+            except BaseException as exc:
+                aborted_rung_exc = exc
+                raise
 
         rung_stats: dict[str, dict[str, int]] = {
             "facts_only": {"attempts": 0, "kept": 0},
             "with_draft": {"attempts": 0, "kept": 0},
         }
-        for mode in ("facts_only", "with_draft"):
-            for sid, r_idx, ev_idx, target_form in sampled_rung_events:
-                w = worlds_by_sid[sid]
-                focal_ag = w.agents[r_idx]
-                b_prose = b_prose_by_key[(sid, r_idx)]
-                single_event_plan = {ev_idx: target_form}
-                rung_res = rewrite_all_say(
-                    b_prose,
-                    w,
-                    single_event_plan,
-                    active_rewrite_client,
-                    input_mode=mode,
-                    focal_agent=focal_ag,
-                    goal_mode=resolved_goal_mode,
-                    checker_profile="d",
-                    base_url=ollama_base_url,
-                    model=effective_writer_pin.ollama_tag,
-                )
-                rung_calls_made += len(rung_res.sealed)
-                sealed_call_counter = _seal_rewrite_entries(
-                    sealed_responses_path,
-                    scenario_id=sid,
-                    rendering_index=r_idx,
-                    focal_agent=focal_ag,
-                    phase_tag="stage5_rung",
-                    sealed_entries=rung_res.sealed,
-                    call_counter_start=sealed_call_counter,
-                    goal_mode=resolved_goal_mode,
-                )
-                ev_rec = rung_res.events[ev_idx - 1]
-                rung_stats[mode]["attempts"] += 1
-                if ev_rec.action == "rewritten":
-                    rung_stats[mode]["kept"] += 1
+        try:
+            for mode in rung_mode_order:
+                for sid, r_idx, ev_idx, target_form in sampled_rung_events:
+                    w = worlds_by_sid[sid]
+                    focal_ag = w.agents[r_idx]
+                    post_swap_scene_prose = rung_post_swap_prose_by_key[(sid, r_idx)]
+                    single_event_plan = {ev_idx: target_form}
+                    rung_res = rewrite_all_say(
+                        post_swap_scene_prose,
+                        w,
+                        single_event_plan,
+                        _rung_client_proxy,
+                        input_mode=mode,
+                        focal_agent=focal_ag,
+                        goal_mode=resolved_goal_mode,
+                        checker_profile="d",
+                        base_url=ollama_base_url,
+                        model=effective_writer_pin.ollama_tag,
+                    )
+                    if aborted_rung_exc is not None:
+                        raise aborted_rung_exc
+                    sealed_call_counter = _seal_rewrite_entries(
+                        sealed_responses_path,
+                        scenario_id=sid,
+                        rendering_index=r_idx,
+                        focal_agent=focal_ag,
+                        phase_tag="stage5_rung",
+                        sealed_entries=rung_res.sealed,
+                        call_counter_start=sealed_call_counter,
+                        goal_mode=resolved_goal_mode,
+                        context_prose=post_swap_scene_prose,
+                    )
+                    ev_rec = rung_res.events[ev_idx - 1]
+                    rung_stats[mode]["attempts"] += 1
+                    if ev_rec.action == "rewritten":
+                        rung_stats[mode]["kept"] += 1
+        except BaseException:
+            rung_aborted_calls += current_rung_attempt_calls
+            record["rung_aborted_calls"] = rung_aborted_calls
+            record["call_counts"]["rung_aborted_calls"] = rung_aborted_calls
+            record["call_counts"]["rung_calls"] = 0
+            record["progress"]["rung_done"] = False
+            record["progress"]["calls_made"]["rung_calls"] = 0
+            record["progress"]["calls_made"]["rung_aborted_calls"] = rung_aborted_calls
+            _write_record_and_status(
+                record_path,
+                status_path,
+                record,
+                status_state="stopped",
+                failure_class="STAGE5_RUNG_ABORTED",
+            )
+            raise
 
+        rung_calls_made = current_rung_attempt_calls
         chosen_input = decide_rung_input_mode(
             rung_stats["facts_only"]["attempts"],
             rung_stats["facts_only"]["kept"],
@@ -1456,7 +1931,10 @@ def run_stage5_pipeline(
             "with_draft": rung_stats["with_draft"],
             "chosen": chosen_input,
             "rule": STAGE5_RUNG_RULE,
+            "rung_scenario_overlap": rung_scenario_overlap,
+            "sampled_renderings": sampled_renderings_list,
         }
+        record["rung_scenario_overlap"] = rung_scenario_overlap
         record["call_counts"]["rung_calls"] = rung_calls_made
         record["progress"]["rung_done"] = True
         record["progress"]["calls_made"]["rung_calls"] = rung_calls_made
@@ -1479,7 +1957,7 @@ def run_stage5_pipeline(
             record["progress"]["s_done"] = s_done_count
             continue
 
-        if resume and not redo_b_flag and r_key in s_completed_keys:
+        if resume and r_key in s_completed_keys:
             s_done_count += 1
             record["progress"]["s_done"] = s_done_count
             continue
@@ -1538,10 +2016,10 @@ def run_stage5_pipeline(
                 goal_mode=resolved_goal_mode,
             )
 
-        # Seal S prose per rendering beside B in the sealed store
+        # Seal and flush S prose per rendering beside B in the sealed store BEFORE updating the record
         sealed_call_counter += 1
         s_sha, s_think_sha = compute_sealed_response_digests(s_prose, "")
-        append_sealed_response(
+        _append_and_flush_sealed_response(
             sealed_responses_path,
             SealedResponseEntry(
                 call_id=f"{sid}:r{r_idx}:s_final_{sealed_call_counter:04d}",
