@@ -584,6 +584,123 @@ def _fault_list_grew(
     return False, ()
 
 
+@dataclass(frozen=True)
+class SpliceKeepCheckResult:
+    """Outcome of the §5 per-splice scene keep check (`check_splice_keep`)."""
+
+    kept: bool
+    cause: str | None
+    rule_ids: tuple[str, ...]
+    cand_faults: tuple[ProseFaultRecord, ...]
+    cand_rows: list[dict[str, object]]
+    cand_sent_count: int
+
+
+def check_splice_keep(
+    current_prose: str,
+    candidate_prose: str,
+    world: World,
+    *,
+    ev_pos: int,
+    target_form: str,
+    current_faults: Sequence[ProseFaultRecord],
+    current_rows: Sequence[Mapping[str, object]],
+    current_sent_count: int,
+    focal_agent: str,
+    goal_mode: str = DEFAULT_GOAL_MODE,
+    checker_profile: str = "d",
+) -> SpliceKeepCheckResult:
+    """Evaluate the four §5 scene-level keep conditions on `candidate_prose` spliced at `ev_pos`."""
+    if candidate_prose == current_prose:
+        cand_faults = tuple(current_faults)
+        cand_rows = list(current_rows)  # type: ignore[arg-type]
+        cand_sent_count = current_sent_count
+    else:
+        cand_faults = collect_prose_faults(
+            candidate_prose,
+            world,
+            focal_agent=focal_agent,
+            goal_mode=goal_mode,
+            checker_profile=checker_profile,
+        )
+        cand_rows, cand_sent_count = match_rendering_event_forms(
+            candidate_prose,
+            world,
+            focal_agent=focal_agent,
+            goal_mode=goal_mode,
+            checker_profile=checker_profile,
+            return_sentence_count=True,
+        )
+
+    # Evaluate the four §5 splice conditions:
+    # (iii) sentence count unchanged
+    count_changed = cand_sent_count != current_sent_count
+    # (i) scene fault list does not grow (multiset of (rule_id, event_index) and rule_id set)
+    fault_grew, added_fault_rules = _fault_list_grew(current_faults, cand_faults)
+    # (ii) every other row's realized_form_id and sentence_index are unchanged
+    neighbour_changed = False
+    changed_neighbour_rules: list[str] = []
+    for other_pos in range(len(world.events)):
+        if other_pos == ev_pos:
+            continue
+        prev_r = current_rows[other_pos]
+        next_r = cand_rows[other_pos]
+        if (
+            prev_r.get("realized_form_id") != next_r.get("realized_form_id")
+            or prev_r.get("sentence_index") != next_r.get("sentence_index")
+        ):
+            neighbour_changed = True
+            nr_rule = next_r.get("rule_id")
+            if isinstance(nr_rule, str) and nr_rule and nr_rule not in changed_neighbour_rules:
+                changed_neighbour_rules.append(nr_rule)
+    # (iv) target row reports the planned form
+    cand_target_row = cand_rows[ev_pos]
+    wrong_form = cand_target_row.get("realized_form_id") != target_form
+
+    if not (count_changed or fault_grew or neighbour_changed or wrong_form):
+        return SpliceKeepCheckResult(
+            kept=True,
+            cause=None,
+            rule_ids=(),
+            cand_faults=cand_faults,
+            cand_rows=cand_rows,
+            cand_sent_count=cand_sent_count,
+        )
+
+    if count_changed:
+        cause = "count_changed"
+    elif fault_grew:
+        cause = "fault_grew"
+    elif neighbour_changed:
+        cause = "neighbour_changed"
+    else:
+        cause = "wrong_form"
+
+    involved_rules: list[str] = []
+    for r_id in added_fault_rules:
+        if r_id not in involved_rules:
+            involved_rules.append(r_id)
+    target_rule = cand_target_row.get("rule_id")
+    if isinstance(target_rule, str) and target_rule and target_rule not in involved_rules:
+        involved_rules.append(target_rule)
+    for r_id in changed_neighbour_rules:
+        if r_id not in involved_rules:
+            involved_rules.append(r_id)
+    if not involved_rules and cand_faults:
+        for f in cand_faults:
+            if f.rule_id not in involved_rules:
+                involved_rules.append(f.rule_id)
+
+    return SpliceKeepCheckResult(
+        kept=False,
+        cause=cause,
+        rule_ids=tuple(involved_rules),
+        cand_faults=cand_faults,
+        cand_rows=cand_rows,
+        cand_sent_count=cand_sent_count,
+    )
+
+
 def _run_swap_pass(
     prose: str,
     world: World,
@@ -686,89 +803,33 @@ def _run_swap_pass(
         template_sentence = render_fn(ev, world, planned_form, focal_agent=focal_agent)
         candidate_prose = splice_event_sentence_at_index(current_prose, s_idx, template_sentence)
 
-        if candidate_prose == current_prose:
-            cand_faults = current_faults
-            cand_rows = current_rows
-            cand_sent_count = current_sent_count
-        else:
-            cand_faults = collect_prose_faults(
-                candidate_prose,
-                world,
-                focal_agent=focal_agent,
-                goal_mode=goal_mode,
-                checker_profile=checker_profile,
-            )
-            cand_rows, cand_sent_count = match_rendering_event_forms(
-                candidate_prose,
-                world,
-                focal_agent=focal_agent,
-                goal_mode=goal_mode,
-                checker_profile=checker_profile,
-                return_sentence_count=True,
-            )
+        keep_res = check_splice_keep(
+            current_prose,
+            candidate_prose,
+            world,
+            ev_pos=ev_pos,
+            target_form=planned_form,
+            current_faults=current_faults,
+            current_rows=current_rows,
+            current_sent_count=current_sent_count,
+            focal_agent=focal_agent,
+            goal_mode=goal_mode,
+            checker_profile=checker_profile,
+        )
 
-        # Evaluate the four §5 splice conditions:
-        # (iii) sentence count unchanged
-        count_changed = cand_sent_count != current_sent_count
-        # (i) scene fault list does not grow (multiset of (rule_id, event_index) and rule_id set)
-        fault_grew, added_fault_rules = _fault_list_grew(current_faults, cand_faults)
-        # (ii) every other row's realized_form_id and sentence_index are unchanged
-        neighbour_changed = False
-        changed_neighbour_rules: list[str] = []
-        for other_pos in range(len(world.events)):
-            if other_pos == ev_pos:
-                continue
-            prev_r = current_rows[other_pos]
-            next_r = cand_rows[other_pos]
-            if (
-                prev_r.get("realized_form_id") != next_r.get("realized_form_id")
-                or prev_r.get("sentence_index") != next_r.get("sentence_index")
-            ):
-                neighbour_changed = True
-                nr_rule = next_r.get("rule_id")
-                if isinstance(nr_rule, str) and nr_rule and nr_rule not in changed_neighbour_rules:
-                    changed_neighbour_rules.append(nr_rule)
-        # (iv) target row reports the planned form
-        cand_target_row = cand_rows[ev_pos]
-        wrong_form = cand_target_row.get("realized_form_id") != planned_form
-
-        if not (count_changed or fault_grew or neighbour_changed or wrong_form):
+        if keep_res.kept:
             current_prose = candidate_prose
-            current_faults = cand_faults
-            current_rows = cand_rows
-            current_sent_count = cand_sent_count
+            current_faults = keep_res.cand_faults
+            current_rows = keep_res.cand_rows
+            current_sent_count = keep_res.cand_sent_count
             per_event_action[ev_idx] = "swapped"
             per_event_cause[ev_idx] = None
             per_event_rule_ids[ev_idx] = ()
         else:
             # Roll back: restore `current_prose` untouched and record `swap_rolled_back` with cause and rule_ids.
-            if count_changed:
-                cause = "count_changed"
-            elif fault_grew:
-                cause = "fault_grew"
-            elif neighbour_changed:
-                cause = "neighbour_changed"
-            else:
-                cause = "wrong_form"
-
-            involved_rules: list[str] = []
-            for r_id in added_fault_rules:
-                if r_id not in involved_rules:
-                    involved_rules.append(r_id)
-            target_rule = cand_target_row.get("rule_id")
-            if isinstance(target_rule, str) and target_rule and target_rule not in involved_rules:
-                involved_rules.append(target_rule)
-            for r_id in changed_neighbour_rules:
-                if r_id not in involved_rules:
-                    involved_rules.append(r_id)
-            if not involved_rules and cand_faults:
-                for f in cand_faults:
-                    if f.rule_id not in involved_rules:
-                        involved_rules.append(f.rule_id)
-
             per_event_action[ev_idx] = "swap_rolled_back"
-            per_event_cause[ev_idx] = cause
-            per_event_rule_ids[ev_idx] = tuple(involved_rules)
+            per_event_cause[ev_idx] = keep_res.cause
+            per_event_rule_ids[ev_idx] = keep_res.rule_ids
 
     final_event_sentences = _extract_event_sentences(current_prose, world, goal_mode)
     records: list[SwapEventRecord] = []
