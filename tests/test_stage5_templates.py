@@ -101,7 +101,7 @@ def _make_custom_archival_world(events: tuple[Event, ...]) -> World:
         StakeEdge(
             agent="Dan",
             variable="location:brass ledger",
-            description="Dan is off-site and depends on the location of the brass ledger for tomorrow's courier handoff.",
+            description="Dan must close tonight's audit, so his sign-off depends on whether the brass ledger is still in the vault room.",
         ),
     )
     return replace(

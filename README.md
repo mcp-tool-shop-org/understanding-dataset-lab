@@ -67,7 +67,7 @@ design.
 - **Shortcut probes**, run out of fold. They test whether surface features of a scene give the answer away.
 - **The writer prompt** (`prompts/`). The writer is `qwen3.6:35b`, run locally through Ollama.
 - **A Colab launcher** (`scripts/colab/`) for running the writer on a rented GPU.
-- **753 tests.**
+- **759 tests.**
 
 ## Try it without a GPU
 

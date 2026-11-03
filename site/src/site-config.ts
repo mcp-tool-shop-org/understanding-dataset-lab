@@ -29,7 +29,7 @@ export const config: SiteConfig = {
       },
       {
         label: 'Test',
-        code: 'uv run pytest\n\n# 753 tests, synthetic seeds only.',
+        code: 'uv run pytest\n\n# 759 tests, synthetic seeds only.',
       },
     ],
   },

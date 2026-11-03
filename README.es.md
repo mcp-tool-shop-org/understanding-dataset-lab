@@ -65,7 +65,7 @@ y verifica un conjunto escrito volviéndolo a renderizar y comparándolo.
 - **Sondas de acceso directo**, ejecutadas fuera del bucle. Prueban si las características superficiales de una escena revelan la respuesta.
 - **El mensaje del escritor** (`prompts/`). El escritor es `qwen3.6:35b`, que se ejecuta localmente a través de Ollama.
 - **Un lanzador de Colab** (`scripts/colab/`) para ejecutar el escritor en una GPU alquilada.
-- **753 pruebas.**
+- **759 pruebas.**
 
 ## Pruébalo sin una GPU
 

@@ -57,7 +57,7 @@ Os resultados são contagens em bancos de dados de desenvolvimento de 160 versõ
 - **Sondas de atalho**, executadas fora do loop. Elas testam se as características superficiais de uma cena revelam a resposta.
 - **O prompt do escritor** (`prompts/`). O escritor é `qwen3.6:35b`, executado localmente por meio do Ollama.
 - **Um lançador do Colab** (`scripts/colab/`) para executar o escritor em uma GPU alugada.
-- **753 testes.**
+- **759 testes.**
 
 ## Tente sem uma GPU
 

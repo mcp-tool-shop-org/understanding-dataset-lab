@@ -14,7 +14,7 @@ The first public release, as a **prototype**.
 - The Stage 5 pipeline (code moves and rewritten speech, revision 2), which passed all 7 of its pre-registered
   development gates.
 - The writer prompt for `qwen3.6:35b`, the Stage 4 legend, and a Colab launcher for the writer on a rented GPU.
-- 753 tests, using synthetic seeds and invented scenes only.
+- 759 tests, using synthetic seeds and invented scenes only.
 - README, MIT `LICENSE`, `SECURITY.md`, `SHIP_GATE.md`, CI with coverage and the Atlas map, a landing page and a
   handbook.
 - `.gitattributes` keeps every file byte-exact, since the legend and several fixtures are pinned by SHA-256.
@@ -23,3 +23,5 @@ The first public release, as a **prototype**.
 
 - The Colab launcher's reconcile script has no default path (`COLAB_RECONCILE_SH` is empty unless set).
 - One test sentence is now hand-written.
+- Stage 5: a rewrite transport error (an Ollama timeout, for example) now aborts the run instead of being recorded
+  as a failed rewrite. It is a fault in the rig, not a data outcome. The rung phase already behaved this way.

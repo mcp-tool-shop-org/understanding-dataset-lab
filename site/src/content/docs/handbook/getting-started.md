@@ -51,7 +51,7 @@ score well without tracking the people.
 uv run pytest -n auto
 ```
 
-753 tests, using synthetic seeds and invented scenes only. The full suite is long, so `-n auto` runs it in parallel.
+759 tests, using synthetic seeds and invented scenes only. The full suite is long, so `-n auto` runs it in parallel.
 
 ## Using the real writer
 

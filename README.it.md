@@ -57,7 +57,7 @@ I risultati sono conteggi su database di sviluppo di 160 versioni. I risultati n
 - **Sonde di scorciatoia**, eseguite in modo indipendente. Verificano se le caratteristiche superficiali di una scena rivelano la risposta.
 - **Il prompt dello scrittore** (`prompts/`). Lo scrittore è `qwen3.6:35b`, eseguito localmente tramite Ollama.
 - **Un lanciatore Colab** (`scripts/colab/`) per eseguire lo scrittore su una GPU in affitto.
-- **753 test.**
+- **759 test.**
 
 ## Provalo senza una GPU
 

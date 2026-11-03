@@ -57,7 +57,7 @@ Les résultats sont des comptages effectués sur des bases de données de dével
 - **Sondes de raccourci**, exécutées en dehors du processus principal. Elles testent si les caractéristiques superficielles d’une scène révèlent la réponse.
 - **L’invite de l’écrivain** (`prompts/`). L’écrivain est `qwen3.6:35b`, exécuté localement via Ollama.
 - **Un lanceur Colab** (`scripts/colab/`) pour exécuter l’écrivain sur un GPU loué.
-- **753 tests.**
+- **759 tests.**
 
 ## Essayez-le sans GPU
 
