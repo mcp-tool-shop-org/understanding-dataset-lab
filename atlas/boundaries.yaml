@@ -1,0 +1,30 @@
+summary: "understanding-dataset-lab (a prototype) plans multi-party scenes in code, puts them into prose with a local writer model, checks every rendering against the plan, and seals the code-made answer keys with a private seed."
+boundaries:
+  - name: .github
+    globs:
+      - .github/**
+    role: config
+  - name: prompts
+    globs:
+      - prompts/**
+    role: docs
+  - name: root
+    globs:
+      - "*"
+    role: config
+  - name: scripts
+    globs:
+      - scripts/**
+    role: code
+  - name: site
+    globs:
+      - site/**
+    role: site
+  - name: src
+    globs:
+      - src/**
+    role: code
+  - name: tests
+    globs:
+      - tests/**
+    role: test

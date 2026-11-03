@@ -1787,5 +1787,28 @@ def main(
         return 1
 
 
+INTERNAL_EXIT: int = 70  # EX_SOFTWARE: kept apart from 1 (refusal) and 2 (usage)
+
+
+def console_main(argv: Sequence[str] | None = None) -> int:
+    """Console entry for `udlab-gen`: run `main`, and print any unexpected error as `error: INTERNAL`, never a traceback.
+
+    `main` itself still raises unexpected errors (tests pin that); only the console entry turns them into the
+    studio error shape and exit code 70.
+    """
+    try:
+        return main(argv)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"error: INTERNAL: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(
+            "  hint: check the paths and options you passed (`udlab-gen --help`); if they are right, "
+            "this is a bug in udlab-gen, so please report it with the command you ran",
+            file=sys.stderr,
+        )
+        return INTERNAL_EXIT
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(console_main())

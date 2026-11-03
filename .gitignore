@@ -12,3 +12,7 @@ artifacts/
 **/*.sealed.jsonl
 .private_seed*
 *.secret
+.coverage.*
+coverage.xml
+site/.astro/
+node_modules/
