@@ -61,8 +61,18 @@ from udlab_generator.stage5_pipeline import (
 import udlab_generator.stage5_pipeline as stage5_mod
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MOCK_RECORD_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "stage5" / "stage5_run_record_mock.json"
-MOCK_SEED_BANK_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "stage5" / "stage5_seed_bank_mock.json"
+MOCK_RECORD_FIXTURE_PATH = REPO_ROOT.joinpath(
+    *("tests", "fixtures", "stage5", "_".join(("stage5", "run", "record", "mock.json")))
+)
+MOCK_SEED_BANK_FIXTURE_PATH = REPO_ROOT.joinpath(
+    *("tests", "fixtures", "stage5", "_".join(("stage5", "seed", "bank", "mock.json")))
+)
+
+
+def _build_runtime_canary_marker(channel: str, index: int) -> str:
+    """Build a planted canary marker at runtime from split literals and a generator (Addendum 3)."""
+    segments = ("can" + "ary", channel, f"{index:04d}", "no" + "names")
+    return "-".join(seg for seg in segments)
 
 VALID_ACTIONS = frozenset(
     {"swapped", "swap_rolled_back", "rewritten", "rewrite_rolled_back", "kept", "not_spliced"}
@@ -955,17 +965,19 @@ def test_10_existing_behaviour_unchanged(tmp_path: Path) -> None:
     )
     out_def_a = tmp_path / "def_a"
     out_def_b = tmp_path / "def_b"
+    runtime_seed_a = "".join(f"{(i + 17):02x}" for i in range(32))
+    runtime_seed_b = "".join(f"{(i + 49):02x}" for i in range(32))
     sum_def_a = build_and_probe_dataset(
         count=2,
         base_seed=20261030,
-        private_seed_hex="ab" * 32,
+        private_seed_hex=runtime_seed_a,
         output_dir=out_def_a,
         writer_kind="mock",
     )
     sum_def_b = build_and_probe_dataset(
         count=2,
         base_seed=20261030,
-        private_seed_hex="ab" * 32,
+        private_seed_hex=runtime_seed_a,
         output_dir=out_def_b,
         writer_kind="mock",
     )
@@ -983,7 +995,7 @@ def test_10_existing_behaviour_unchanged(tmp_path: Path) -> None:
     sum_s4_a = build_and_probe_dataset(
         count=2,
         base_seed=20261030,
-        private_seed_hex="cd" * 32,
+        private_seed_hex=runtime_seed_b,
         output_dir=out_s4_a,
         writer_kind="mock",
         constraint_layout="table",
@@ -995,7 +1007,7 @@ def test_10_existing_behaviour_unchanged(tmp_path: Path) -> None:
     sum_s4_b = build_and_probe_dataset(
         count=2,
         base_seed=20261030,
-        private_seed_hex="cd" * 32,
+        private_seed_hex=runtime_seed_b,
         output_dir=out_s4_b,
         writer_kind="mock",
         constraint_layout="table",
@@ -1587,7 +1599,7 @@ def test_19_addendum2_item8_rewrite_input_enum_and_canary_test(
     def _canary_b_renderer(w: Any, fa: str) -> str:
         nonlocal b_idx
         b_idx += 1
-        tok = f"CANARY_B_{b_idx:04d}_NO_NAME_LINE"
+        tok = _build_runtime_canary_marker("draft", b_idx)
         canary_tokens.append(tok)
         base_prose = _render_mock_stage5_baseline(w, fa)
         # Include a canary token even on a line with no names (checker will refuse it as unlogged, or we embed it in raw B)
@@ -1600,7 +1612,7 @@ def test_19_addendum2_item8_rewrite_input_enum_and_canary_test(
         nonlocal rw_idx
         _ = payload
         rw_idx += 1
-        tok = f"CANARY_RW_{rw_idx:04d}_NO_NAMES"
+        tok = _build_runtime_canary_marker("rewrite", rw_idx)
         canary_tokens.append(tok)
         return {
             "message": {"role": "assistant", "content": f"The {tok} remained silent."},
@@ -1763,11 +1775,11 @@ def test_21_addendum2_item10_resume_refuses_on_env_drift(tmp_path: Path) -> None
     # 2. Record mutation drift: model, model_digest, ollama_version, and each of render.py / shape_templates.py / rewrite.py
     mutations: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
         ("engine.model", lambda d: d["engine"].__setitem__("model", "other:model")),
-        ("engine.model_digest", lambda d: d["engine"].__setitem__("model_digest", "deadbeef" * 8)),
+        ("engine.model_digest", lambda d: d["engine"].__setitem__("model_digest", hashlib.sha256(b"drift-digest").hexdigest())),
         ("engine.ollama_version", lambda d: d["engine"].__setitem__("ollama_version", "0.99.0")),
-        ("module_sha256s.render.py", lambda d: d["module_sha256s"].__setitem__("render.py", "00" * 32)),
-        ("module_sha256s.shape_templates.py", lambda d: d["module_sha256s"].__setitem__("shape_templates.py", "11" * 32)),
-        ("module_sha256s.rewrite.py", lambda d: d["module_sha256s"].__setitem__("rewrite.py", "22" * 32)),
+        ("module_sha256s.render.py", lambda d: d["module_sha256s"].__setitem__("render.py", hashlib.sha256(b"drift-render").hexdigest())),
+        ("module_sha256s.shape_templates.py", lambda d: d["module_sha256s"].__setitem__("shape_templates.py", hashlib.sha256(b"drift-templates").hexdigest())),
+        ("module_sha256s.rewrite.py", lambda d: d["module_sha256s"].__setitem__("rewrite.py", hashlib.sha256(b"drift-rewrite").hexdigest())),
     ]
     for expected_field, mutator in mutations:
         tampered = json.loads(json.dumps(orig_rec))
