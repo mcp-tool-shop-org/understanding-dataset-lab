@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import replace
+import datetime
 from fractions import Fraction
 import hashlib
 from itertools import combinations
@@ -26,7 +27,9 @@ import os
 from pathlib import Path
 import random
 import secrets
+import time
 from typing import Any, Callable, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from .world import World, generate_world, make_balanced_configs
 from .render import (
@@ -429,19 +432,20 @@ def _compute_plan_statistics(
                 counts_by_variant[variant][form_id] += 1
 
     max_spread_by_variant: dict[str, int] = {v: 0 for v in STAGE5_ASSIGNED_VARIANTS}
-    for b_start in range(0, len(worlds), block_size):
-        block_worlds = worlds[b_start : b_start + block_size]
-        for v, forms in STAGE5_ASSIGNED_VARIANTS.items():
-            b_counts = Counter()
-            for w in block_worlds:
-                for rec in plan_by_sid.get(w.scenario_id, ()):
-                    if str(rec["variant"]) == v:
-                        b_counts[str(rec["form_id"])] += 1
-            if sum(b_counts.values()) > 0:
-                vals = [b_counts[f] for f in forms]
-                spread = max(vals) - min(vals)
-                if spread > max_spread_by_variant[v]:
-                    max_spread_by_variant[v] = spread
+    for v, forms in STAGE5_ASSIGNED_VARIANTS.items():
+        stream_forms: list[str] = [
+            str(rec["form_id"])
+            for w in worlds
+            for rec in plan_by_sid.get(w.scenario_id, ())
+            if str(rec["variant"]) == v
+        ]
+        for b_start in range(0, len(stream_forms), block_size):
+            block_forms = stream_forms[b_start : b_start + block_size]
+            b_counts = Counter(block_forms)
+            vals = [b_counts[f] for f in forms]
+            spread = max(vals) - min(vals)
+            if spread > max_spread_by_variant[v]:
+                max_spread_by_variant[v] = spread
 
     return counts_by_kind, counts_by_variant, max_spread_by_variant
 
@@ -871,6 +875,49 @@ def _atomic_write_json(target_path: Path, payload: Mapping[str, Any]) -> None:
     _fsync_directory_if_supported(target_path.parent)
 
 
+def _format_model_endpoint(raw_url: str) -> str:
+    """Format an endpoint URL as `<scheme>://<host>:<port>` (scheme, host, and port only)."""
+    cleaned = str(raw_url or DEFAULT_OLLAMA_BASE_URL).strip().rstrip("/")
+    parsed = urlsplit(cleaned)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return cleaned
+
+
+def _default_utc_now() -> str:
+    """Return the current UTC timestamp in ISO-8601 format (`...Z`)."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _default_monotonic() -> float:
+    """Return the current monotonic clock value in seconds."""
+    return time.monotonic()
+
+
+def _make_empty_step_timing() -> dict[str, Any]:
+    """Create an initial unstarted step-timing entry."""
+    return {
+        "start": None,
+        "end": None,
+        "seconds": 0.0,
+        "calls": 0,
+        "call_count": 0,
+    }
+
+
+def _make_empty_step_timings() -> dict[str, dict[str, Any]]:
+    """Create the initial `step_timings` mapping for `b`, `rung`, `swap`, and `rewrite`."""
+    return {step: _make_empty_step_timing() for step in ("b", "rung", "swap", "rewrite")}
+
+
+class _RewriteClientAbort(BaseException):
+    """Internal `BaseException` wrapper so transport exceptions escape `call_rewrite`'s `except Exception:`."""
+
+    def __init__(self, original: BaseException) -> None:
+        super().__init__(str(original))
+        self.original = original
+
+
 def _write_record_and_status(
     record_path: Path,
     status_path: Path,
@@ -886,6 +933,8 @@ def _write_record_and_status(
         "status": status_state,
         "stop_reason": record.get("stop_reason"),
         "failure_class": failure_class,
+        "model_endpoint": record.get("model_endpoint"),
+        "step_timings": record.get("step_timings"),
         "progress": record.get("progress"),
         "summary": record.get("summary"),
     }
@@ -1104,6 +1153,8 @@ def run_stage5_pipeline(
     on_before_first_writer_call: Callable[[Path], None] | None = None,
     rung_mode_order: tuple[str, str] = ("facts_only", "with_draft"),
     rendering_execution_order: Sequence[tuple[str, int]] | None = None,
+    utc_clock: Callable[[], datetime.datetime | str] | None = None,
+    monotonic_clock: Callable[[], float] | None = None,
 ) -> dict[str, Any]:
     """Run the full Stage 5 pipeline (B -> Rung -> Swap & Rewrite -> Final Check -> S >= B Stop) and write `stage5_run_record.json`."""
     if writer_kind not in ("mock", "ollama"):
@@ -1359,6 +1410,32 @@ def run_stage5_pipeline(
         }
     )
 
+    def _read_utc() -> str:
+        if utc_clock is not None:
+            raw_utc = utc_clock()
+            if isinstance(raw_utc, datetime.datetime):
+                return raw_utc.astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            return str(raw_utc)
+        return _default_utc_now()
+
+    def _read_mono() -> float:
+        if monotonic_clock is not None:
+            return float(monotonic_clock())
+        return _default_monotonic()
+
+    active_ollama_base_url = _format_model_endpoint(
+        f"http://127.0.0.1:{int(server_port)}"
+        if (server_port is not None and ollama_base_url == DEFAULT_OLLAMA_BASE_URL)
+        else ollama_base_url
+    )
+    model_endpoint_block: dict[str, str] = {
+        "b": active_ollama_base_url,
+        "rung": active_ollama_base_url,
+        "swap": active_ollama_base_url,
+        "rewrite": active_ollama_base_url,
+    }
+    step_timings_block: dict[str, dict[str, Any]] = _make_empty_step_timings()
+
     renderings_records: list[dict[str, Any]] = []
     record: dict[str, Any] = {
         "schema_version": STAGE5_SCHEMA_VERSION,
@@ -1369,6 +1446,8 @@ def run_stage5_pipeline(
         "seed_bank_sha256": seed_bank_sha256,
         "seed_bank_size": seed_bank_size,
         "module_sha256s": current_module_sha256s,
+        "model_endpoint": model_endpoint_block,
+        "step_timings": step_timings_block,
         "rung": default_rung_block,
         "rung_scenario_overlap": int(default_rung_block.get("rung_scenario_overlap", 0)),
         "rung_aborted_calls": rung_aborted_calls,
@@ -1461,23 +1540,37 @@ def run_stage5_pipeline(
             popen_factory=popen_factory,
             prompt_token_counter=prompt_token_counter,
         )
-        live_ollama_version: str | None = None
-        live_model_digest: str | None = getattr(
-            ollama_writer, "manifest_digest", effective_writer_pin.manifest_digest
-        )
-        if ollama_writer.owned_server is not None:
-            live_ollama_version = getattr(ollama_writer.owned_server, "version", None)
-            if live_ollama_version is None:
-                live_ollama_version = getattr(ollama_writer.owned_server, "ollama_version", None)
-            owned_digest = getattr(ollama_writer.owned_server, "model_digest", None) or getattr(
-                ollama_writer.owned_server, "manifest_digest", None
+
+    try:
+        if ollama_writer is not None:
+            owned_base_url = (
+                getattr(ollama_writer.owned_server, "base_url", None)
+                if ollama_writer.owned_server is not None
+                else None
             )
-            if owned_digest is not None:
-                live_model_digest = str(owned_digest)
-        if existing_record is not None:
-            # U4-fix1 Item 1 (F2): Right after the owned server starts and reports its version, and BEFORE
-            # the first writer call, compare live version (and model digest) with the record's.
-            try:
+            if owned_base_url:
+                active_ollama_base_url = _format_model_endpoint(str(owned_base_url))
+            elif getattr(ollama_writer, "base_url", None):
+                active_ollama_base_url = _format_model_endpoint(str(ollama_writer.base_url))
+            for step_k in ("b", "rung", "swap", "rewrite"):
+                model_endpoint_block[step_k] = active_ollama_base_url
+
+            live_ollama_version: str | None = None
+            live_model_digest: str | None = getattr(
+                ollama_writer, "manifest_digest", effective_writer_pin.manifest_digest
+            )
+            if ollama_writer.owned_server is not None:
+                live_ollama_version = getattr(ollama_writer.owned_server, "version", None)
+                if live_ollama_version is None:
+                    live_ollama_version = getattr(ollama_writer.owned_server, "ollama_version", None)
+                owned_digest = getattr(ollama_writer.owned_server, "model_digest", None) or getattr(
+                    ollama_writer.owned_server, "manifest_digest", None
+                )
+                if owned_digest is not None:
+                    live_model_digest = str(owned_digest)
+            if existing_record is not None:
+                # U4-fix1 Item 1 (F2): Right after the owned server starts and reports its version, and BEFORE
+                # the first writer call, compare live version (and model digest) with the record's.
                 _check_resume_environment_drift(
                     existing_record,
                     writer_kind=writer_kind,
@@ -1489,418 +1582,560 @@ def run_stage5_pipeline(
                     current_module_sha256s=current_module_sha256s,
                     check_ollama_version=True,
                 )
-            except BaseException:
-                ollama_writer.close()
-                raise
-        else:
-            # On a fresh run, record the live version at start once the server reports it, not only at close.
-            engine_block["ollama_version"] = live_ollama_version
-            engine_block["model_digest"] = live_model_digest
-        if active_rewrite_client is None:
-            active_rewrite_client = ollama_writer._transport
+            else:
+                # On a fresh run, record the live version at start once the server reports it, not only at close.
+                engine_block["ollama_version"] = live_ollama_version
+                engine_block["model_digest"] = live_model_digest
+            if active_rewrite_client is None:
+                active_rewrite_client = ollama_writer._transport
 
-    # Write `plan_seed`, `rung_seed`, and `engine` (including live `ollama_version` on fresh run) BEFORE any writer call.
-    try:
+        # Write `plan_seed`, `rung_seed`, and `engine` (including live `ollama_version` on fresh run) BEFORE any writer call.
         _write_record_and_status(record_path, status_path, record, status_state="running")
         if on_before_first_writer_call is not None:
             on_before_first_writer_call(record_path)
-    except BaseException:
-        if ollama_writer is not None:
-            ollama_writer.close()
-        raise
 
-    if writer_kind != "ollama":
-        renderer_fn = (
-            mock_custom_renderer
-            if mock_custom_renderer is not None
-            else lambda w, fa: _render_mock_stage5_baseline(w, fa, goal_mode=resolved_goal_mode)
-        )
-        if need_any_b:
-            mock_writer = MockWriter(
-                custom_renderer=renderer_fn,
-                goal_mode=resolved_goal_mode,
-                constraint_layout="table",
-                checker_profile="d",
-                accepted_forms_line="off",
-                shape_plan="off",
-                shape_plan_seed=None,
+        if writer_kind != "ollama":
+            renderer_fn = (
+                mock_custom_renderer
+                if mock_custom_renderer is not None
+                else lambda w, fa: _render_mock_stage5_baseline(w, fa, goal_mode=resolved_goal_mode)
             )
-        if active_rewrite_client is None:
-            active_rewrite_client = _build_default_mock_rewrite_client(resolved_worlds)
+            if need_any_b:
+                mock_writer = MockWriter(
+                    custom_renderer=renderer_fn,
+                    goal_mode=resolved_goal_mode,
+                    constraint_layout="table",
+                    checker_profile="d",
+                    accepted_forms_line="off",
+                    shape_plan="off",
+                    shape_plan_seed=None,
+                )
+            if active_rewrite_client is None:
+                active_rewrite_client = _build_default_mock_rewrite_client(resolved_worlds)
 
-    sealed_call_counter = 0
-    if sealed_responses_path.is_file():
-        sealed_call_counter = sum(
-            1 for ln in sealed_responses_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+        sealed_call_counter = 0
+        if sealed_responses_path.is_file():
+            sealed_call_counter = sum(
+                1 for ln in sealed_responses_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+            )
+
+        b_rows_by_key: dict[tuple[str, int], list[dict[str, object]]] = {}
+        scen_plan_dict_by_sid: dict[str, dict[int, str | None]] = {
+            w.scenario_id: _scenario_stage5_plan_dict(plan_by_sid.get(w.scenario_id, ()), w)
+            for w in resolved_worlds
+        }
+
+        s_completed_keys: set[tuple[str, int]] = {
+            k for k, v in existing_renderings_by_key.items() if v.get("_s_completed") is True
+        }
+        for v in existing_renderings_by_key.values():
+            v.pop("_s_completed", None)
+
+        ordered_rendering_keys: list[tuple[str, int]] = (
+            list(rendering_execution_order)
+            if rendering_execution_order is not None
+            else [(w.scenario_id, r_idx) for w in resolved_worlds for r_idx in (0, 1)]
         )
 
-    b_rows_by_key: dict[tuple[str, int], list[dict[str, object]]] = {}
-    scen_plan_dict_by_sid: dict[str, dict[int, str | None]] = {
-        w.scenario_id: _scenario_stage5_plan_dict(plan_by_sid.get(w.scenario_id, ()), w)
-        for w in resolved_worlds
-    }
-
-    s_completed_keys: set[tuple[str, int]] = {
-        k for k, v in existing_renderings_by_key.items() if v.get("_s_completed") is True
-    }
-    for v in existing_renderings_by_key.values():
-        v.pop("_s_completed", None)
-
-    ordered_rendering_keys: list[tuple[str, int]] = (
-        list(rendering_execution_order)
-        if rendering_execution_order is not None
-        else [(w.scenario_id, r_idx) for w in resolved_worlds for r_idx in (0, 1)]
-    )
-
-    try:
-        for sid, r_idx in ordered_rendering_keys:
-            w = worlds_by_sid[sid]
-            scen_plan_by_idx = scen_plan_dict_by_sid[sid]
-            r_key = (sid, r_idx)
-            focal_ag = w.agents[r_idx]
-            if r_key in existing_renderings_by_key:
-                prev_r = existing_renderings_by_key[r_key]
-                renderings_records.append(prev_r)
-                # Addendum 2 Item 5: Over-cap renderings make 0 writer calls and 0 sealed-store reads on resume
-                if not prev_r.get("ctx_over_cap"):
-                    restored_prose = _read_sealed_b_prose_for_rendering(
-                        sealed_responses_path,
-                        sid,
-                        r_idx,
-                        goal_mode=resolved_goal_mode,
-                        world=w,
-                    )
-                    if restored_prose is not None:
-                        b_prose_by_key[r_key] = restored_prose
-                        b_rows_restored = match_rendering_event_forms(
-                            restored_prose,
-                            w,
-                            focal_agent=focal_ag,
+        model_endpoint_block["b"] = active_ollama_base_url
+        step_timings_block["b"]["start"] = _read_utc()
+        b_mono_start = _read_mono()
+        try:
+            for sid, r_idx in ordered_rendering_keys:
+                w = worlds_by_sid[sid]
+                scen_plan_by_idx = scen_plan_dict_by_sid[sid]
+                r_key = (sid, r_idx)
+                focal_ag = w.agents[r_idx]
+                if r_key in existing_renderings_by_key:
+                    prev_r = existing_renderings_by_key[r_key]
+                    renderings_records.append(prev_r)
+                    # Addendum 2 Item 5: Over-cap renderings make 0 writer calls and 0 sealed-store reads on resume
+                    if not prev_r.get("ctx_over_cap"):
+                        restored_prose = _read_sealed_b_prose_for_rendering(
+                            sealed_responses_path,
+                            sid,
+                            r_idx,
                             goal_mode=resolved_goal_mode,
-                            checker_profile="d",
+                            world=w,
                         )
-                        assert isinstance(b_rows_restored, list)
-                        b_rows_by_key[r_key] = b_rows_restored
-                continue
-
-            prompt_text = format_writer_prompt(
-                w,
-                focal_ag,
-                prompt_template_c,
-                goal_mode=resolved_goal_mode,
-                constraint_layout="table",
-                accepted_forms_line="off",
-                shape_plan="off",
-            )
-            messages = [{"role": "user", "content": prompt_text}]
-
-            if ollama_writer is not None:
-                prev_call_len = len(ollama_writer.call_records)
-                prev_sealed_len = len(ollama_writer.sealed_responses)
-                prose_out = ollama_writer._chat_render(
-                    world=w,
-                    scenario_id=sid,
-                    rendering_index=r_idx,
-                    focal_agent=focal_ag,
-                    prompt_text=prompt_text,
-                    allow_refusal=True,
-                )
-                _flush_sealed_store(sealed_responses_path)
-                new_call_recs = ollama_writer.call_records[prev_call_len:]
-                last_rec = new_call_recs[-1]
-                decision_tokens = (
-                    last_rec.prompt_tokens_exact
-                    if last_rec.prompt_tokens_exact is not None
-                    else last_rec.prompt_tokens_estimate
-                )
-                is_over_cap = last_rec.check_id == CTX_OVER_CAP_CHECK_ID
-                if not is_over_cap:
-                    b_calls_made += len(new_call_recs)
-                    sealed_call_counter += len(ollama_writer.sealed_responses) - prev_sealed_len
-
-                if is_over_cap:
-                    cap_block = {
-                        "prompt_tokens": int(decision_tokens),
-                        "num_predict": resolved_num_predict,
-                        "margin": NUM_CTX_MARGIN_TOKENS,
-                        "max_num_ctx": int(max_num_ctx),
-                        "fits": False,
-                    }
-                    ev_init = _build_initial_events_for_rendering(
-                        w, focal_ag, scen_plan_by_idx, None
-                    )
-                    renderings_records.append(
-                        {
-                            "scenario_id": sid,
-                            "scenario_seed": int(w.seed),
-                            "rendering_index": r_idx,
-                            "focal_agent_sha256": hashlib.sha256(focal_ag.encode("utf-8")).hexdigest(),
-                            "ctx_over_cap": True,
-                            "prompt_tokens": int(decision_tokens),
-                            "cap": cap_block,
-                            "b_passed": False,
-                            "b_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
-                            "s_passed": False,
-                            "s_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
-                            "seam_count": 0,
-                            "events": ev_init,
-                        }
-                    )
+                        if restored_prose is not None:
+                            b_prose_by_key[r_key] = restored_prose
+                            b_rows_restored = match_rendering_event_forms(
+                                restored_prose,
+                                w,
+                                focal_agent=focal_ag,
+                                goal_mode=resolved_goal_mode,
+                                checker_profile="d",
+                            )
+                            assert isinstance(b_rows_restored, list)
+                            b_rows_by_key[r_key] = b_rows_restored
                     continue
 
-                if prose_out is not None:
-                    b_prose = prose_out
-                else:
-                    new_sealed = ollama_writer.sealed_responses[prev_sealed_len:]
-                    raw_last = new_sealed[-1].response_text if new_sealed else ""
-                    if resolved_goal_mode == "splice" and raw_last:
-                        try:
-                            b_prose = splice_goal_tokens(raw_last, w).expanded_prose
-                        except Exception:
-                            b_prose = raw_last
-                    else:
-                        b_prose = raw_last
-                decision_tokens_out = int(decision_tokens)
-            else:
-                assert mock_writer is not None
-                p_tokens: int | None = (
-                    count_prompt_tokens_exact(
-                        messages, think=resolved_think, counter=prompt_token_counter
-                    )
-                    if prompt_token_counter is not None
-                    else None
+                prompt_text = format_writer_prompt(
+                    w,
+                    focal_ag,
+                    prompt_template_c,
+                    goal_mode=resolved_goal_mode,
+                    constraint_layout="table",
+                    accepted_forms_line="off",
+                    shape_plan="off",
                 )
-                fits_cap = (
-                    prompt_fits_num_ctx_cap(
-                        p_tokens,
-                        resolved_num_predict,
-                        max_num_ctx,
-                        margin=NUM_CTX_MARGIN_TOKENS,
-                    )
-                    if p_tokens is not None
-                    else True
-                )
-                if not fits_cap:
-                    assert p_tokens is not None
-                    cap_block = {
-                        "prompt_tokens": int(p_tokens),
-                        "num_predict": resolved_num_predict,
-                        "margin": NUM_CTX_MARGIN_TOKENS,
-                        "max_num_ctx": int(max_num_ctx),
-                        "fits": False,
-                    }
-                    ev_init = _build_initial_events_for_rendering(
-                        w, focal_ag, scen_plan_by_idx, None
-                    )
-                    renderings_records.append(
-                        {
-                            "scenario_id": sid,
-                            "scenario_seed": int(w.seed),
-                            "rendering_index": r_idx,
-                            "focal_agent_sha256": hashlib.sha256(focal_ag.encode("utf-8")).hexdigest(),
-                            "ctx_over_cap": True,
-                            "prompt_tokens": int(p_tokens),
-                            "cap": cap_block,
-                            "b_passed": False,
-                            "b_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
-                            "s_passed": False,
-                            "s_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
-                            "seam_count": 0,
-                            "events": ev_init,
-                        }
-                    )
-                    continue
+                messages = [{"role": "user", "content": prompt_text}]
 
-                decision_tokens_out: int | None = int(p_tokens) if p_tokens is not None else None
-                raw_b = mock_writer.render_raw_response(w, focal_ag)
-                b_calls_made += 1
-                sealed_call_counter += 1
-                call_seed = derive_call_seed(int(w.seed), r_idx, 0)
-                resp_sha, think_sha = compute_sealed_response_digests(raw_b, "")
-                # Write and flush the sealed B response BEFORE updating the record
-                _append_and_flush_sealed_response(
-                    sealed_responses_path,
-                    SealedResponseEntry(
-                        call_id=f"{sid}:r{r_idx}:b_call_{sealed_call_counter:04d}",
-                        call_index=sealed_call_counter,
+                if ollama_writer is not None:
+                    prev_call_len = len(ollama_writer.call_records)
+                    prev_sealed_len = len(ollama_writer.sealed_responses)
+                    prose_out = ollama_writer._chat_render(
+                        world=w,
                         scenario_id=sid,
                         rendering_index=r_idx,
                         focal_agent=focal_ag,
-                        attempt=0,
-                        seed=call_seed,
-                        temperature=ATTEMPT_0_TEMPERATURE,
-                        min_p=None,
-                        retry_form="",
-                        response_text=raw_b,
-                        thinking_text="",
-                        response_sha256=resp_sha,
-                        thinking_sha256=think_sha,
-                        goal_mode=resolved_goal_mode,
-                        presence_penalty=resolved_presence_penalty,
-                        constraint_layout="table",
-                    ),
-                )
-                if resolved_goal_mode == "splice":
-                    try:
-                        b_prose = splice_goal_tokens(raw_b, w).expanded_prose
-                    except Exception:
-                        b_prose = raw_b
+                        prompt_text=prompt_text,
+                        allow_refusal=True,
+                    )
+                    _flush_sealed_store(sealed_responses_path)
+                    new_call_recs = ollama_writer.call_records[prev_call_len:]
+                    last_rec = new_call_recs[-1]
+                    decision_tokens = (
+                        last_rec.prompt_tokens_exact
+                        if last_rec.prompt_tokens_exact is not None
+                        else last_rec.prompt_tokens_estimate
+                    )
+                    is_over_cap = last_rec.check_id == CTX_OVER_CAP_CHECK_ID
+                    if not is_over_cap:
+                        b_calls_made += len(new_call_recs)
+                        sealed_call_counter += len(ollama_writer.sealed_responses) - prev_sealed_len
+
+                    if is_over_cap:
+                        cap_block = {
+                            "prompt_tokens": int(decision_tokens),
+                            "num_predict": resolved_num_predict,
+                            "margin": NUM_CTX_MARGIN_TOKENS,
+                            "max_num_ctx": int(max_num_ctx),
+                            "fits": False,
+                        }
+                        ev_init = _build_initial_events_for_rendering(
+                            w, focal_ag, scen_plan_by_idx, None
+                        )
+                        renderings_records.append(
+                            {
+                                "scenario_id": sid,
+                                "scenario_seed": int(w.seed),
+                                "rendering_index": r_idx,
+                                "focal_agent_sha256": hashlib.sha256(focal_ag.encode("utf-8")).hexdigest(),
+                                "ctx_over_cap": True,
+                                "prompt_tokens": int(decision_tokens),
+                                "cap": cap_block,
+                                "b_passed": False,
+                                "b_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
+                                "s_passed": False,
+                                "s_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
+                                "seam_count": 0,
+                                "events": ev_init,
+                            }
+                        )
+                        continue
+
+                    if prose_out is not None:
+                        b_prose = prose_out
+                    else:
+                        new_sealed = ollama_writer.sealed_responses[prev_sealed_len:]
+                        raw_last = new_sealed[-1].response_text if new_sealed else ""
+                        if resolved_goal_mode == "splice" and raw_last:
+                            try:
+                                b_prose = splice_goal_tokens(raw_last, w).expanded_prose
+                            except Exception:
+                                b_prose = raw_last
+                        else:
+                            b_prose = raw_last
+                    decision_tokens_out = int(decision_tokens)
                 else:
-                    b_prose = raw_b
+                    assert mock_writer is not None
+                    p_tokens: int | None = (
+                        count_prompt_tokens_exact(
+                            messages, think=resolved_think, counter=prompt_token_counter
+                        )
+                        if prompt_token_counter is not None
+                        else None
+                    )
+                    fits_cap = (
+                        prompt_fits_num_ctx_cap(
+                            p_tokens,
+                            resolved_num_predict,
+                            max_num_ctx,
+                            margin=NUM_CTX_MARGIN_TOKENS,
+                        )
+                        if p_tokens is not None
+                        else True
+                    )
+                    if not fits_cap:
+                        assert p_tokens is not None
+                        cap_block = {
+                            "prompt_tokens": int(p_tokens),
+                            "num_predict": resolved_num_predict,
+                            "margin": NUM_CTX_MARGIN_TOKENS,
+                            "max_num_ctx": int(max_num_ctx),
+                            "fits": False,
+                        }
+                        ev_init = _build_initial_events_for_rendering(
+                            w, focal_ag, scen_plan_by_idx, None
+                        )
+                        renderings_records.append(
+                            {
+                                "scenario_id": sid,
+                                "scenario_seed": int(w.seed),
+                                "rendering_index": r_idx,
+                                "focal_agent_sha256": hashlib.sha256(focal_ag.encode("utf-8")).hexdigest(),
+                                "ctx_over_cap": True,
+                                "prompt_tokens": int(p_tokens),
+                                "cap": cap_block,
+                                "b_passed": False,
+                                "b_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
+                                "s_passed": False,
+                                "s_fault_rule_ids": [CTX_OVER_CAP_CHECK_ID],
+                                "seam_count": 0,
+                                "events": ev_init,
+                            }
+                        )
+                        continue
 
-            b_prose_by_key[r_key] = b_prose
-            b_faults = collect_prose_faults(
-                b_prose,
-                w,
-                focal_agent=focal_ag,
-                goal_mode=resolved_goal_mode,
-                checker_profile="d",
-            )
-            b_passed = len(b_faults) == 0
-            b_fault_rule_ids = [f.rule_id for f in b_faults]
-            b_rows = match_rendering_event_forms(
-                b_prose,
-                w,
-                focal_agent=focal_ag,
-                goal_mode=resolved_goal_mode,
-                checker_profile="d",
-            )
-            assert isinstance(b_rows, list)
-            b_rows_by_key[r_key] = b_rows
+                    decision_tokens_out: int | None = int(p_tokens) if p_tokens is not None else None
+                    raw_b = mock_writer.render_raw_response(w, focal_ag)
+                    b_calls_made += 1
+                    sealed_call_counter += 1
+                    call_seed = derive_call_seed(int(w.seed), r_idx, 0)
+                    resp_sha, think_sha = compute_sealed_response_digests(raw_b, "")
+                    # Write and flush the sealed B response BEFORE updating the record
+                    _append_and_flush_sealed_response(
+                        sealed_responses_path,
+                        SealedResponseEntry(
+                            call_id=f"{sid}:r{r_idx}:b_call_{sealed_call_counter:04d}",
+                            call_index=sealed_call_counter,
+                            scenario_id=sid,
+                            rendering_index=r_idx,
+                            focal_agent=focal_ag,
+                            attempt=0,
+                            seed=call_seed,
+                            temperature=ATTEMPT_0_TEMPERATURE,
+                            min_p=None,
+                            retry_form="",
+                            response_text=raw_b,
+                            thinking_text="",
+                            response_sha256=resp_sha,
+                            thinking_sha256=think_sha,
+                            goal_mode=resolved_goal_mode,
+                            presence_penalty=resolved_presence_penalty,
+                            constraint_layout="table",
+                        ),
+                    )
+                    if resolved_goal_mode == "splice":
+                        try:
+                            b_prose = splice_goal_tokens(raw_b, w).expanded_prose
+                        except Exception:
+                            b_prose = raw_b
+                    else:
+                        b_prose = raw_b
 
-            cap_block = {
-                "prompt_tokens": decision_tokens_out,
-                "num_predict": resolved_num_predict,
-                "margin": NUM_CTX_MARGIN_TOKENS,
-                "max_num_ctx": int(max_num_ctx),
-                "fits": True,
-            }
-            ev_init = _build_initial_events_for_rendering(
-                w, focal_ag, scen_plan_by_idx, b_rows
-            )
-            renderings_records.append(
-                {
-                    "scenario_id": sid,
-                    "scenario_seed": int(w.seed),
-                    "rendering_index": r_idx,
-                    "focal_agent_sha256": hashlib.sha256(focal_ag.encode("utf-8")).hexdigest(),
-                    "ctx_over_cap": False,
+                b_prose_by_key[r_key] = b_prose
+                b_faults = collect_prose_faults(
+                    b_prose,
+                    w,
+                    focal_agent=focal_ag,
+                    goal_mode=resolved_goal_mode,
+                    checker_profile="d",
+                )
+                b_passed = len(b_faults) == 0
+                b_fault_rule_ids = [f.rule_id for f in b_faults]
+                b_rows = match_rendering_event_forms(
+                    b_prose,
+                    w,
+                    focal_agent=focal_ag,
+                    goal_mode=resolved_goal_mode,
+                    checker_profile="d",
+                )
+                assert isinstance(b_rows, list)
+                b_rows_by_key[r_key] = b_rows
+
+                cap_block = {
                     "prompt_tokens": decision_tokens_out,
-                    "cap": cap_block,
-                    "b_passed": b_passed,
-                    "b_fault_rule_ids": b_fault_rule_ids,
-                    "s_passed": False,
-                    "s_fault_rule_ids": [],
-                    "seam_count": 0,
-                    "events": ev_init,
+                    "num_predict": resolved_num_predict,
+                    "margin": NUM_CTX_MARGIN_TOKENS,
+                    "max_num_ctx": int(max_num_ctx),
+                    "fits": True,
                 }
-            )
-    finally:
-        if ollama_writer is not None:
-            # U4-fix1 Item 1 (F2): Never overwrite the recorded version on close during a resume (and on a fresh
-            # run it was already recorded at start once the server reported it).
-            ollama_writer.close()
-        if rendering_execution_order is not None:
-            canonical_index = {
-                (w.scenario_id, r_idx): idx
-                for idx, (w, r_idx) in enumerate(
-                    (w, r_idx) for w in resolved_worlds for r_idx in (0, 1)
+                ev_init = _build_initial_events_for_rendering(
+                    w, focal_ag, scen_plan_by_idx, b_rows
                 )
+                renderings_records.append(
+                    {
+                        "scenario_id": sid,
+                        "scenario_seed": int(w.seed),
+                        "rendering_index": r_idx,
+                        "focal_agent_sha256": hashlib.sha256(focal_ag.encode("utf-8")).hexdigest(),
+                        "ctx_over_cap": False,
+                        "prompt_tokens": decision_tokens_out,
+                        "cap": cap_block,
+                        "b_passed": b_passed,
+                        "b_fault_rule_ids": b_fault_rule_ids,
+                        "s_passed": False,
+                        "s_fault_rule_ids": [],
+                        "seam_count": 0,
+                        "events": ev_init,
+                    }
+                )
+        finally:
+            step_timings_block["b"]["end"] = _read_utc()
+            step_timings_block["b"]["seconds"] = round(max(0.0, _read_mono() - b_mono_start), 6)
+            step_timings_block["b"]["calls"] = b_calls_made
+            step_timings_block["b"]["call_count"] = b_calls_made
+            if rendering_execution_order is not None:
+                canonical_index = {
+                    (w.scenario_id, r_idx): idx
+                    for idx, (w, r_idx) in enumerate(
+                        (w, r_idx) for w in resolved_worlds for r_idx in (0, 1)
+                    )
+                }
+                renderings_records.sort(
+                    key=lambda r: canonical_index.get((str(r["scenario_id"]), int(r["rendering_index"])), 0)
+                )
+            record["call_counts"]["b_calls"] = b_calls_made
+            record["progress"]["b_done"] = len(renderings_records)
+            record["progress"]["calls_made"]["b_calls"] = b_calls_made
+            record["summary"] = _recompute_summary(renderings_records)
+            _write_record_and_status(record_path, status_path, record, status_state="running")
+
+        # -----------------------------------------------------------------------
+        # Phase 2: The Rewrite-Input Rung
+        # -----------------------------------------------------------------------
+        model_endpoint_block["rung"] = active_ollama_base_url
+        step_timings_block["rung"]["start"] = _read_utc()
+        rung_mono_start = _read_mono()
+        if existing_rung_done and existing_rung is not None:
+            chosen_input = str(existing_rung["chosen"])
+            record["rung"] = existing_rung
+            record["rung_scenario_overlap"] = int(existing_rung.get("rung_scenario_overlap", 0))
+            step_timings_block["rung"]["end"] = _read_utc()
+            step_timings_block["rung"]["seconds"] = round(max(0.0, _read_mono() - rung_mono_start), 6)
+            step_timings_block["rung"]["calls"] = rung_calls_made
+            step_timings_block["rung"]["call_count"] = rung_calls_made
+            _write_record_and_status(record_path, status_path, record, status_state="running")
+        elif s_code_say:
+            chosen_input = "facts_only"
+            record["rung"] = {
+                "facts_only": {"attempts": 0, "kept": 0},
+                "with_draft": {"attempts": 0, "kept": 0},
+                "chosen": "facts_only",
+                "rule": STAGE5_RUNG_RULE,
+                "rung_scenario_overlap": 0,
+                "sampled_renderings": [],
             }
-            renderings_records.sort(
-                key=lambda r: canonical_index.get((str(r["scenario_id"]), int(r["rendering_index"])), 0)
-            )
-        record["call_counts"]["b_calls"] = b_calls_made
-        record["progress"]["b_done"] = len(renderings_records)
-        record["progress"]["calls_made"]["b_calls"] = b_calls_made
-        record["summary"] = _recompute_summary(renderings_records)
-        _write_record_and_status(record_path, status_path, record, status_state="running")
+            record["rung_scenario_overlap"] = 0
+            record["progress"]["rung_done"] = True
+            step_timings_block["rung"]["end"] = _read_utc()
+            step_timings_block["rung"]["seconds"] = round(max(0.0, _read_mono() - rung_mono_start), 6)
+            step_timings_block["rung"]["calls"] = 0
+            step_timings_block["rung"]["call_count"] = 0
+            _write_record_and_status(record_path, status_path, record, status_state="running")
+        else:
+            eligible_by_target: dict[str, list[tuple[str, int, int, str]]] = {
+                t: [] for t in STAGE5_RUNG_TARGETS
+            }
+            # Pool filter is `b_passed and not ctx_over_cap`, sorted canonically by (scenario_id, rendering_index, event_index)
+            for r_entry in sorted(
+                renderings_records,
+                key=lambda r: (str(r["scenario_id"]), int(r["rendering_index"])),
+            ):
+                if not r_entry.get("b_passed") or r_entry.get("ctx_over_cap"):
+                    continue
+                sid = str(r_entry["scenario_id"])
+                r_idx = int(r_entry["rendering_index"])
+                r_key = (sid, r_idx)
+                w = worlds_by_sid[sid]
+                b_rows = b_rows_by_key[r_key]
+                scen_plan_by_idx = scen_plan_dict_by_sid[sid]
+                for ev_pos, ev in enumerate(w.events):
+                    if ev.kind != "say":
+                        continue
+                    ev_idx = ev_pos + 1
+                    target_form = scen_plan_by_idx.get(ev_idx)
+                    if target_form not in STAGE5_RUNG_TARGETS:
+                        continue
+                    b_row = b_rows[ev_pos]
+                    if b_row.get("sentence_index") is None:
+                        continue
+                    b_form = (
+                        str(b_row["realized_form_id"])
+                        if b_row.get("realized_form_id") is not None
+                        else None
+                    )
+                    if b_form != target_form:
+                        eligible_by_target[target_form].append((sid, r_idx, ev_idx, target_form))
 
-    # -----------------------------------------------------------------------
-    # Phase 2: The Rewrite-Input Rung
-    # -----------------------------------------------------------------------
-    if existing_rung_done and existing_rung is not None:
-        chosen_input = str(existing_rung["chosen"])
-        record["rung"] = existing_rung
-        record["rung_scenario_overlap"] = int(existing_rung.get("rung_scenario_overlap", 0))
-    elif s_code_say:
-        chosen_input = "facts_only"
-        record["rung"] = {
-            "facts_only": {"attempts": 0, "kept": 0},
-            "with_draft": {"attempts": 0, "kept": 0},
-            "chosen": "facts_only",
-            "rule": STAGE5_RUNG_RULE,
-            "rung_scenario_overlap": 0,
-            "sampled_renderings": [],
-        }
-        record["rung_scenario_overlap"] = 0
-        record["progress"]["rung_done"] = True
-        _write_record_and_status(record_path, status_path, record, status_state="running")
-    else:
-        eligible_by_target: dict[str, list[tuple[str, int, int, str]]] = {
-            t: [] for t in STAGE5_RUNG_TARGETS
-        }
-        # Pool filter is `b_passed and not ctx_over_cap`, sorted canonically by (scenario_id, rendering_index, event_index)
-        for r_entry in sorted(
-            renderings_records,
-            key=lambda r: (str(r["scenario_id"]), int(r["rendering_index"])),
-        ):
-            if not r_entry.get("b_passed") or r_entry.get("ctx_over_cap"):
-                continue
-            sid = str(r_entry["scenario_id"])
-            r_idx = int(r_entry["rendering_index"])
-            r_key = (sid, r_idx)
-            w = worlds_by_sid[sid]
-            b_rows = b_rows_by_key[r_key]
-            scen_plan_by_idx = scen_plan_dict_by_sid[sid]
-            for ev_pos, ev in enumerate(w.events):
-                if ev.kind != "say":
-                    continue
-                ev_idx = ev_pos + 1
-                target_form = scen_plan_by_idx.get(ev_idx)
-                if target_form not in STAGE5_RUNG_TARGETS:
-                    continue
-                b_row = b_rows[ev_pos]
-                if b_row.get("sentence_index") is None:
-                    continue
-                b_form = (
-                    str(b_row["realized_form_id"])
-                    if b_row.get("realized_form_id") is not None
-                    else None
+            try:
+                sampled_rung_events, rung_scenario_overlap = _sample_rung_events_at_most_one_per_rendering(
+                    eligible_by_target,
+                    rung_seed,
+                    per_target=STAGE5_RUNG_PER_TARGET,
                 )
-                if b_form != target_form:
-                    eligible_by_target[target_form].append((sid, r_idx, ev_idx, target_form))
+            except Stage5RungSampleShortError:
+                step_timings_block["rung"]["end"] = _read_utc()
+                step_timings_block["rung"]["seconds"] = round(max(0.0, _read_mono() - rung_mono_start), 6)
+                step_timings_block["rung"]["calls"] = 0
+                step_timings_block["rung"]["call_count"] = 0
+                _write_record_and_status(
+                    record_path,
+                    status_path,
+                    record,
+                    status_state="stopped",
+                    failure_class="STAGE5_RUNG_SAMPLE_SHORT",
+                )
+                raise
 
+            sampled_renderings_list = [
+                [str(sid), int(r_idx)] for sid, r_idx, _, _ in sampled_rung_events
+            ]
+
+            # Addendum 2 Item 13: Apply U2's deterministic swap pass (`swap_all_move_see`, with the run's plan)
+            # in memory to each sampled rendering's B before running the rung's two modes.
+            rung_post_swap_prose_by_key: dict[tuple[str, int], str] = {}
+            for sid, r_idx, _, _ in sampled_rung_events:
+                r_key = (sid, r_idx)
+                if r_key not in rung_post_swap_prose_by_key:
+                    w = worlds_by_sid[sid]
+                    focal_ag = w.agents[r_idx]
+                    scen_plan_by_idx = scen_plan_dict_by_sid[sid]
+                    in_memory_swap = swap_all_move_see(
+                        b_prose_by_key[r_key],
+                        w,
+                        scen_plan_by_idx,
+                        focal_agent=focal_ag,
+                        goal_mode=resolved_goal_mode,
+                        checker_profile="d",
+                    )
+                    rung_post_swap_prose_by_key[r_key] = in_memory_swap.prose
+
+            # Addendum 2 Item 6: Track current rung calls and propagate any client exception to abort mid-rung
+            current_rung_attempt_calls = 0
+
+            def _rung_client_proxy(payload: dict[str, Any]) -> Any:
+                nonlocal current_rung_attempt_calls
+                current_rung_attempt_calls += 1
+                try:
+                    return _invoke_rewrite_client(
+                        active_rewrite_client,
+                        f"{active_ollama_base_url}/api/chat",
+                        payload,
+                    )
+                except BaseException as exc:
+                    raise _RewriteClientAbort(exc) from exc
+
+            rung_stats: dict[str, dict[str, int]] = {
+                "facts_only": {"attempts": 0, "kept": 0},
+                "with_draft": {"attempts": 0, "kept": 0},
+            }
+            try:
+                for mode in rung_mode_order:
+                    for sid, r_idx, ev_idx, target_form in sampled_rung_events:
+                        w = worlds_by_sid[sid]
+                        focal_ag = w.agents[r_idx]
+                        post_swap_scene_prose = rung_post_swap_prose_by_key[(sid, r_idx)]
+                        single_event_plan = {ev_idx: target_form}
+                        try:
+                            rung_res = rewrite_all_say(
+                                post_swap_scene_prose,
+                                w,
+                                single_event_plan,
+                                _rung_client_proxy,
+                                input_mode=mode,
+                                focal_agent=focal_ag,
+                                goal_mode=resolved_goal_mode,
+                                checker_profile="d",
+                                base_url=active_ollama_base_url,
+                                model=effective_writer_pin.ollama_tag,
+                            )
+                        except _RewriteClientAbort as abort_exc:
+                            raise abort_exc.original from None
+                        sealed_call_counter = _seal_rewrite_entries(
+                            sealed_responses_path,
+                            scenario_id=sid,
+                            rendering_index=r_idx,
+                            focal_agent=focal_ag,
+                            phase_tag="stage5_rung",
+                            sealed_entries=rung_res.sealed,
+                            call_counter_start=sealed_call_counter,
+                            goal_mode=resolved_goal_mode,
+                            context_prose=post_swap_scene_prose,
+                        )
+                        ev_rec = rung_res.events[ev_idx - 1]
+                        rung_stats[mode]["attempts"] += 1
+                        if ev_rec.action == "rewritten":
+                            rung_stats[mode]["kept"] += 1
+            except BaseException:
+                rung_aborted_calls += current_rung_attempt_calls
+                step_timings_block["rung"]["end"] = _read_utc()
+                step_timings_block["rung"]["seconds"] = round(max(0.0, _read_mono() - rung_mono_start), 6)
+                step_timings_block["rung"]["calls"] = current_rung_attempt_calls
+                step_timings_block["rung"]["call_count"] = current_rung_attempt_calls
+                record["rung_aborted_calls"] = rung_aborted_calls
+                record["call_counts"]["rung_aborted_calls"] = rung_aborted_calls
+                record["call_counts"]["rung_calls"] = 0
+                record["progress"]["rung_done"] = False
+                record["progress"]["calls_made"]["rung_calls"] = 0
+                record["progress"]["calls_made"]["rung_aborted_calls"] = rung_aborted_calls
+                _write_record_and_status(
+                    record_path,
+                    status_path,
+                    record,
+                    status_state="stopped",
+                    failure_class="STAGE5_RUNG_ABORTED",
+                )
+                raise
+
+            rung_calls_made = current_rung_attempt_calls
+            step_timings_block["rung"]["end"] = _read_utc()
+            step_timings_block["rung"]["seconds"] = round(max(0.0, _read_mono() - rung_mono_start), 6)
+            step_timings_block["rung"]["calls"] = rung_calls_made
+            step_timings_block["rung"]["call_count"] = rung_calls_made
+            chosen_input = decide_rung_input_mode(
+                rung_stats["facts_only"]["attempts"],
+                rung_stats["facts_only"]["kept"],
+                rung_stats["with_draft"]["attempts"],
+                rung_stats["with_draft"]["kept"],
+            )
+            record["rung"] = {
+                "facts_only": rung_stats["facts_only"],
+                "with_draft": rung_stats["with_draft"],
+                "chosen": chosen_input,
+                "rule": STAGE5_RUNG_RULE,
+                "rung_scenario_overlap": rung_scenario_overlap,
+                "sampled_renderings": sampled_renderings_list,
+            }
+            record["rung_scenario_overlap"] = rung_scenario_overlap
+            record["call_counts"]["rung_calls"] = rung_calls_made
+            record["progress"]["rung_done"] = True
+            record["progress"]["calls_made"]["rung_calls"] = rung_calls_made
+            _write_record_and_status(record_path, status_path, record, status_state="running")
+
+        # -----------------------------------------------------------------------
+        # Phase 3: Swap, Rewrite, Final Check, and S >= B Stop
+        # -----------------------------------------------------------------------
+        model_endpoint_block["swap"] = active_ollama_base_url
+        step_timings_block["swap"]["start"] = _read_utc()
+        swap_mono_start = _read_mono()
+        swap_res_by_key: dict[tuple[str, int], SwapResult] = {}
         try:
-            sampled_rung_events, rung_scenario_overlap = _sample_rung_events_at_most_one_per_rendering(
-                eligible_by_target,
-                rung_seed,
-                per_target=STAGE5_RUNG_PER_TARGET,
-            )
-        except Stage5RungSampleShortError:
-            _write_record_and_status(
-                record_path,
-                status_path,
-                record,
-                status_state="stopped",
-                failure_class="STAGE5_RUNG_SAMPLE_SHORT",
-            )
-            raise
-
-        sampled_renderings_list = [
-            [str(sid), int(r_idx)] for sid, r_idx, _, _ in sampled_rung_events
-        ]
-
-        # Addendum 2 Item 13: Apply U2's deterministic swap pass (`swap_all_move_see`, with the run's plan)
-        # in memory to each sampled rendering's B before running the rung's two modes.
-        rung_post_swap_prose_by_key: dict[tuple[str, int], str] = {}
-        for sid, r_idx, _, _ in sampled_rung_events:
-            r_key = (sid, r_idx)
-            if r_key not in rung_post_swap_prose_by_key:
+            for r_entry in renderings_records:
+                if r_entry.get("ctx_over_cap"):
+                    continue
+                sid = str(r_entry["scenario_id"])
+                r_idx = int(r_entry["rendering_index"])
+                r_key = (sid, r_idx)
+                if resume and r_key in s_completed_keys:
+                    continue
                 w = worlds_by_sid[sid]
                 focal_ag = w.agents[r_idx]
                 scen_plan_by_idx = scen_plan_dict_by_sid[sid]
-                in_memory_swap = swap_all_move_see(
+                swap_res_by_key[r_key] = swap_all_move_see(
                     b_prose_by_key[r_key],
                     w,
                     scen_plan_by_idx,
@@ -1908,267 +2143,198 @@ def run_stage5_pipeline(
                     goal_mode=resolved_goal_mode,
                     checker_profile="d",
                 )
-                rung_post_swap_prose_by_key[r_key] = in_memory_swap.prose
+        finally:
+            step_timings_block["swap"]["end"] = _read_utc()
+            step_timings_block["swap"]["seconds"] = round(max(0.0, _read_mono() - swap_mono_start), 6)
+            step_timings_block["swap"]["calls"] = 0
+            step_timings_block["swap"]["call_count"] = 0
+            _write_record_and_status(record_path, status_path, record, status_state="running")
 
-        # Addendum 2 Item 6: Track current rung calls and propagate any client exception to abort mid-rung
-        current_rung_attempt_calls = 0
-        aborted_rung_exc: BaseException | None = None
-
-        def _rung_client_proxy(payload: dict[str, Any]) -> Any:
-            nonlocal current_rung_attempt_calls, aborted_rung_exc
-            current_rung_attempt_calls += 1
+        def _rewrite_client_proxy(payload: dict[str, Any]) -> Any:
             try:
                 return _invoke_rewrite_client(
                     active_rewrite_client,
-                    f"{ollama_base_url.rstrip('/')}/api/chat",
+                    f"{active_ollama_base_url}/api/chat",
                     payload,
                 )
             except BaseException as exc:
-                aborted_rung_exc = exc
-                raise
+                raise _RewriteClientAbort(exc) from exc
 
-        rung_stats: dict[str, dict[str, int]] = {
-            "facts_only": {"attempts": 0, "kept": 0},
-            "with_draft": {"attempts": 0, "kept": 0},
-        }
+        model_endpoint_block["rewrite"] = active_ollama_base_url
+        step_timings_block["rewrite"]["start"] = _read_utc()
+        rewrite_mono_start = _read_mono()
+        s_done_count = 0
         try:
-            for mode in rung_mode_order:
-                for sid, r_idx, ev_idx, target_form in sampled_rung_events:
-                    w = worlds_by_sid[sid]
-                    focal_ag = w.agents[r_idx]
-                    post_swap_scene_prose = rung_post_swap_prose_by_key[(sid, r_idx)]
-                    single_event_plan = {ev_idx: target_form}
-                    rung_res = rewrite_all_say(
-                        post_swap_scene_prose,
+            for r_entry in renderings_records:
+                sid = str(r_entry["scenario_id"])
+                r_idx = int(r_entry["rendering_index"])
+                r_key = (sid, r_idx)
+                w = worlds_by_sid[sid]
+                focal_ag = w.agents[r_idx]
+                scen_plan_by_idx = scen_plan_dict_by_sid[sid]
+
+                if r_entry.get("ctx_over_cap"):
+                    s_done_count += 1
+                    record["progress"]["s_done"] = s_done_count
+                    continue
+
+                if resume and r_key in s_completed_keys:
+                    s_done_count += 1
+                    record["progress"]["s_done"] = s_done_count
+                    continue
+
+                b_rows = b_rows_by_key[r_key]
+                swap_res = swap_res_by_key[r_key]
+
+                # 4. The rewrite pass (U3's rewrite_all_say, or swap_all_say for S-code fallback)
+                rewrite_res: RewriteResult | None = None
+                say_swap_res: SwapResult | None = None
+                if s_code_say:
+                    say_swap_res = swap_all_say(
+                        swap_res.prose,
                         w,
-                        single_event_plan,
-                        _rung_client_proxy,
-                        input_mode=mode,
+                        scen_plan_by_idx,
                         focal_agent=focal_ag,
                         goal_mode=resolved_goal_mode,
                         checker_profile="d",
-                        base_url=ollama_base_url,
-                        model=effective_writer_pin.ollama_tag,
                     )
-                    if aborted_rung_exc is not None:
-                        raise aborted_rung_exc
+                    s_prose = say_swap_res.prose
+                    seam_count = swap_res.seam_count + say_swap_res.seam_count
+                else:
+                    try:
+                        rewrite_res = rewrite_all_say(
+                            swap_res.prose,
+                            w,
+                            scen_plan_by_idx,
+                            _rewrite_client_proxy,
+                            input_mode=chosen_input,
+                            focal_agent=focal_ag,
+                            goal_mode=resolved_goal_mode,
+                            checker_profile="d",
+                            base_url=active_ollama_base_url,
+                            model=effective_writer_pin.ollama_tag,
+                        )
+                    except _RewriteClientAbort as abort_exc:
+                        raise abort_exc.original from None
+                    s_prose = rewrite_res.prose
+                    seam_count = swap_res.seam_count
+                    rewrite_calls_made += len(rewrite_res.sealed)
                     sealed_call_counter = _seal_rewrite_entries(
                         sealed_responses_path,
                         scenario_id=sid,
                         rendering_index=r_idx,
                         focal_agent=focal_ag,
-                        phase_tag="stage5_rung",
-                        sealed_entries=rung_res.sealed,
+                        phase_tag="stage5_rewrite",
+                        sealed_entries=rewrite_res.sealed,
                         call_counter_start=sealed_call_counter,
                         goal_mode=resolved_goal_mode,
-                        context_prose=post_swap_scene_prose,
                     )
-                    ev_rec = rung_res.events[ev_idx - 1]
-                    rung_stats[mode]["attempts"] += 1
-                    if ev_rec.action == "rewritten":
-                        rung_stats[mode]["kept"] += 1
-        except BaseException:
-            rung_aborted_calls += current_rung_attempt_calls
-            record["rung_aborted_calls"] = rung_aborted_calls
-            record["call_counts"]["rung_aborted_calls"] = rung_aborted_calls
-            record["call_counts"]["rung_calls"] = 0
-            record["progress"]["rung_done"] = False
-            record["progress"]["calls_made"]["rung_calls"] = 0
-            record["progress"]["calls_made"]["rung_aborted_calls"] = rung_aborted_calls
-            _write_record_and_status(
-                record_path,
-                status_path,
-                record,
-                status_state="stopped",
-                failure_class="STAGE5_RUNG_ABORTED",
-            )
-            raise
 
-        rung_calls_made = current_rung_attempt_calls
-        chosen_input = decide_rung_input_mode(
-            rung_stats["facts_only"]["attempts"],
-            rung_stats["facts_only"]["kept"],
-            rung_stats["with_draft"]["attempts"],
-            rung_stats["with_draft"]["kept"],
-        )
-        record["rung"] = {
-            "facts_only": rung_stats["facts_only"],
-            "with_draft": rung_stats["with_draft"],
-            "chosen": chosen_input,
-            "rule": STAGE5_RUNG_RULE,
-            "rung_scenario_overlap": rung_scenario_overlap,
-            "sampled_renderings": sampled_renderings_list,
-        }
-        record["rung_scenario_overlap"] = rung_scenario_overlap
-        record["call_counts"]["rung_calls"] = rung_calls_made
-        record["progress"]["rung_done"] = True
-        record["progress"]["calls_made"]["rung_calls"] = rung_calls_made
-        _write_record_and_status(record_path, status_path, record, status_state="running")
+                # Seal and flush S prose per rendering beside B in the sealed store BEFORE updating the record
+                sealed_call_counter += 1
+                s_sha, s_think_sha = compute_sealed_response_digests(s_prose, "")
+                _append_and_flush_sealed_response(
+                    sealed_responses_path,
+                    SealedResponseEntry(
+                        call_id=f"{sid}:r{r_idx}:s_final_{sealed_call_counter:04d}",
+                        call_index=sealed_call_counter,
+                        scenario_id=sid,
+                        rendering_index=r_idx,
+                        focal_agent=focal_ag,
+                        attempt=0,
+                        seed=derive_call_seed(int(w.seed), r_idx, 0),
+                        temperature=0.0,
+                        min_p=None,
+                        retry_form="stage5_s",
+                        response_text=s_prose,
+                        thinking_text="",
+                        response_sha256=s_sha,
+                        thinking_sha256=s_think_sha,
+                        goal_mode=resolved_goal_mode,
+                        presence_penalty=resolved_presence_penalty,
+                        constraint_layout="table",
+                    ),
+                )
 
-    # -----------------------------------------------------------------------
-    # Phase 3: Swap, Rewrite, Final Check, and S >= B Stop
-    # -----------------------------------------------------------------------
-    s_done_count = 0
-    for r_entry in renderings_records:
-        sid = str(r_entry["scenario_id"])
-        r_idx = int(r_entry["rendering_index"])
-        r_key = (sid, r_idx)
-        w = worlds_by_sid[sid]
-        focal_ag = w.agents[r_idx]
-        scen_plan_by_idx = scen_plan_dict_by_sid[sid]
+                # 5. The final check: profile d on S
+                s_faults = collect_prose_faults(
+                    s_prose,
+                    w,
+                    focal_agent=focal_ag,
+                    goal_mode=resolved_goal_mode,
+                    checker_profile="d",
+                )
+                s_passed = len(s_faults) == 0
+                s_fault_rule_ids = [f.rule_id for f in s_faults]
 
-        if r_entry.get("ctx_over_cap"):
-            s_done_count += 1
-            record["progress"]["s_done"] = s_done_count
-            continue
+                final_events = _assemble_final_events_for_rendering(
+                    w,
+                    focal_ag,
+                    scen_plan_by_idx,
+                    b_rows,
+                    s_prose,
+                    swap_res,
+                    rewrite_res,
+                    say_swap_res,
+                    None if s_code_say else chosen_input,
+                    goal_mode=resolved_goal_mode,
+                    checker_profile="d",
+                )
 
-        if resume and r_key in s_completed_keys:
-            s_done_count += 1
-            record["progress"]["s_done"] = s_done_count
-            continue
+                r_entry["s_passed"] = s_passed
+                r_entry["s_fault_rule_ids"] = s_fault_rule_ids
+                r_entry["seam_count"] = seam_count
+                r_entry["events"] = final_events
 
-        b_prose = b_prose_by_key[r_key]
-        b_rows = b_rows_by_key[r_key]
+                s_done_count += 1
+                record["call_counts"]["rewrite_calls"] = rewrite_calls_made
+                record["progress"]["s_done"] = s_done_count
+                record["progress"]["calls_made"]["rewrite_calls"] = rewrite_calls_made
+                record["summary"] = _recompute_summary(renderings_records)
 
-        # 3. The swap pass (U2's swap_all_move_see) on B
-        swap_res = swap_all_move_see(
-            b_prose,
-            w,
-            scen_plan_by_idx,
-            focal_agent=focal_ag,
-            goal_mode=resolved_goal_mode,
-            checker_profile="d",
-        )
+                # 6. The S >= B stop
+                if r_entry["b_passed"] and not s_passed:
+                    step_timings_block["rewrite"]["end"] = _read_utc()
+                    step_timings_block["rewrite"]["seconds"] = round(
+                        max(0.0, _read_mono() - rewrite_mono_start), 6
+                    )
+                    step_timings_block["rewrite"]["calls"] = rewrite_calls_made
+                    step_timings_block["rewrite"]["call_count"] = rewrite_calls_made
+                    record["stop_reason"] = "S_LT_B"
+                    record["stop_detail"] = {
+                        "failure_class": "STAGE5_S_LT_B",
+                        "scenario_id": sid,
+                        "rendering_index": r_idx,
+                        "b_fault_rule_ids": list(r_entry["b_fault_rule_ids"]),
+                        "s_fault_rule_ids": s_fault_rule_ids,
+                    }
+                    _write_record_and_status(
+                        record_path,
+                        status_path,
+                        record,
+                        status_state="stopped",
+                        failure_class="STAGE5_S_LT_B",
+                    )
+                    raise Stage5SLtBStopError(
+                        scenario_id=sid,
+                        rendering_index=r_idx,
+                        b_fault_rule_ids=r_entry["b_fault_rule_ids"],
+                        s_fault_rule_ids=s_fault_rule_ids,
+                    )
+        finally:
+            if step_timings_block["rewrite"]["end"] is None:
+                step_timings_block["rewrite"]["end"] = _read_utc()
+                step_timings_block["rewrite"]["seconds"] = round(
+                    max(0.0, _read_mono() - rewrite_mono_start), 6
+                )
+            step_timings_block["rewrite"]["calls"] = rewrite_calls_made
+            step_timings_block["rewrite"]["call_count"] = rewrite_calls_made
 
-        # 4. The rewrite pass (U3's rewrite_all_say, or swap_all_say for S-code fallback)
-        rewrite_res: RewriteResult | None = None
-        say_swap_res: SwapResult | None = None
-        if s_code_say:
-            say_swap_res = swap_all_say(
-                swap_res.prose,
-                w,
-                scen_plan_by_idx,
-                focal_agent=focal_ag,
-                goal_mode=resolved_goal_mode,
-                checker_profile="d",
-            )
-            s_prose = say_swap_res.prose
-            seam_count = swap_res.seam_count + say_swap_res.seam_count
-        else:
-            rewrite_res = rewrite_all_say(
-                swap_res.prose,
-                w,
-                scen_plan_by_idx,
-                active_rewrite_client,
-                input_mode=chosen_input,
-                focal_agent=focal_ag,
-                goal_mode=resolved_goal_mode,
-                checker_profile="d",
-                base_url=ollama_base_url,
-                model=effective_writer_pin.ollama_tag,
-            )
-            s_prose = rewrite_res.prose
-            seam_count = swap_res.seam_count
-            rewrite_calls_made += len(rewrite_res.sealed)
-            sealed_call_counter = _seal_rewrite_entries(
-                sealed_responses_path,
-                scenario_id=sid,
-                rendering_index=r_idx,
-                focal_agent=focal_ag,
-                phase_tag="stage5_rewrite",
-                sealed_entries=rewrite_res.sealed,
-                call_counter_start=sealed_call_counter,
-                goal_mode=resolved_goal_mode,
-            )
-
-        # Seal and flush S prose per rendering beside B in the sealed store BEFORE updating the record
-        sealed_call_counter += 1
-        s_sha, s_think_sha = compute_sealed_response_digests(s_prose, "")
-        _append_and_flush_sealed_response(
-            sealed_responses_path,
-            SealedResponseEntry(
-                call_id=f"{sid}:r{r_idx}:s_final_{sealed_call_counter:04d}",
-                call_index=sealed_call_counter,
-                scenario_id=sid,
-                rendering_index=r_idx,
-                focal_agent=focal_ag,
-                attempt=0,
-                seed=derive_call_seed(int(w.seed), r_idx, 0),
-                temperature=0.0,
-                min_p=None,
-                retry_form="stage5_s",
-                response_text=s_prose,
-                thinking_text="",
-                response_sha256=s_sha,
-                thinking_sha256=s_think_sha,
-                goal_mode=resolved_goal_mode,
-                presence_penalty=resolved_presence_penalty,
-                constraint_layout="table",
-            ),
-        )
-
-        # 5. The final check: profile d on S
-        s_faults = collect_prose_faults(
-            s_prose,
-            w,
-            focal_agent=focal_ag,
-            goal_mode=resolved_goal_mode,
-            checker_profile="d",
-        )
-        s_passed = len(s_faults) == 0
-        s_fault_rule_ids = [f.rule_id for f in s_faults]
-
-        final_events = _assemble_final_events_for_rendering(
-            w,
-            focal_ag,
-            scen_plan_by_idx,
-            b_rows,
-            s_prose,
-            swap_res,
-            rewrite_res,
-            say_swap_res,
-            None if s_code_say else chosen_input,
-            goal_mode=resolved_goal_mode,
-            checker_profile="d",
-        )
-
-        r_entry["s_passed"] = s_passed
-        r_entry["s_fault_rule_ids"] = s_fault_rule_ids
-        r_entry["seam_count"] = seam_count
-        r_entry["events"] = final_events
-
-        s_done_count += 1
-        record["call_counts"]["rewrite_calls"] = rewrite_calls_made
-        record["progress"]["s_done"] = s_done_count
-        record["progress"]["calls_made"]["rewrite_calls"] = rewrite_calls_made
+        record["stop_reason"] = None
+        record.pop("stop_detail", None)
         record["summary"] = _recompute_summary(renderings_records)
-
-        # 6. The S >= B stop
-        if r_entry["b_passed"] and not s_passed:
-            record["stop_reason"] = "S_LT_B"
-            record["stop_detail"] = {
-                "failure_class": "STAGE5_S_LT_B",
-                "scenario_id": sid,
-                "rendering_index": r_idx,
-                "b_fault_rule_ids": list(r_entry["b_fault_rule_ids"]),
-                "s_fault_rule_ids": s_fault_rule_ids,
-            }
-            _write_record_and_status(
-                record_path,
-                status_path,
-                record,
-                status_state="stopped",
-                failure_class="STAGE5_S_LT_B",
-            )
-            raise Stage5SLtBStopError(
-                scenario_id=sid,
-                rendering_index=r_idx,
-                b_fault_rule_ids=r_entry["b_fault_rule_ids"],
-                s_fault_rule_ids=s_fault_rule_ids,
-            )
-
-    record["stop_reason"] = None
-    record.pop("stop_detail", None)
-    record["summary"] = _recompute_summary(renderings_records)
-    _write_record_and_status(record_path, status_path, record, status_state="completed")
-    return record
+        _write_record_and_status(record_path, status_path, record, status_state="completed")
+        return record
+    finally:
+        if ollama_writer is not None:
+            ollama_writer.close()
