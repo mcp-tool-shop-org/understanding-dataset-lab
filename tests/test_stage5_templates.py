@@ -822,3 +822,340 @@ def test_rollback_11_two_events_trade_sentence_indices_neighbour_changed() -> No
     assert ev2_rec.action == "swap_rolled_back"
     assert ev2_rec.cause == fixtures["expected_cause"] == "neighbour_changed"
     assert [e.sentence_index for e in res.events] == [1, 0]
+
+
+# ---------------------------------------------------------------------------
+# Card U2-fix: Multi-block Stage 5 shape-plan tests (Do 2.1 - 2.6, 2.8)
+# ---------------------------------------------------------------------------
+
+_PLAN_STREAM_VARIANTS: dict[str, tuple[str, ...]] = {
+    "move_normal": MOVE_FORMS,
+    "move_occluded": MOVE_FORMS,
+    "see_unoccluded": SEE_UNOCCLUDED_FORMS,
+    "see_occluded": SEE_OCCLUDED_FORMS,
+    "say": SAY_FORMS,
+}
+
+
+def _make_multiblock_plan_worlds() -> list[World]:
+    """Build a 62-scenario bank where all 5 variant streams have >= 3 full blocks of 20 plus a non-zero tail."""
+    raw_worlds = [generate_world(cfg) for cfg in make_balanced_configs(62, base_seed=20261103)]
+    out_worlds: list[World] = []
+    occ_moves_added = 0
+    for w in raw_worlds:
+        new_evs: list[Event] = []
+        changed = False
+        for ev in w.events:
+            if event_shape_plan_variant(ev, w) == "move_normal" and occ_moves_added < 65:
+                occ_name = w.occluders_by_room[ev.room]
+                new_evs.append(replace(ev, occluded=True, occluder=occ_name))
+                occ_moves_added += 1
+                changed = True
+            else:
+                new_evs.append(ev)
+        if changed:
+            evs_t = tuple(new_evs)
+            w = replace(
+                w,
+                events=evs_t,
+                unknowable_spec=replace(w.unknowable_spec, trace_a=evs_t, trace_b=evs_t),
+            )
+        out_worlds.append(w)
+    return out_worlds
+
+
+def _assert_stream_plan_rules(
+    seq: list[str],
+    forms: tuple[str, ...],
+    *,
+    block_size: int = 20,
+    variant_name: str = "",
+) -> None:
+    """Assert per-block spread <= 1 (full and tail), global spread <= 1, and no three-in-a-row anywhere."""
+    from collections import Counter
+
+    for b_start in range(0, len(seq), block_size):
+        blk = seq[b_start : b_start + block_size]
+        counts = Counter(blk)
+        spread = max(counts.get(f, 0) for f in forms) - min(counts.get(f, 0) for f in forms)
+        assert spread <= 1, (
+            f"Stream {variant_name!r} block at {b_start} (len={len(blk)}) has spread {spread} > 1: {dict(counts)}"
+        )
+
+    global_counts = Counter(seq)
+    global_spread = max(global_counts.get(f, 0) for f in forms) - min(
+        global_counts.get(f, 0) for f in forms
+    )
+    assert global_spread <= 1, (
+        f"Stream {variant_name!r} global spread {global_spread} > 1: {dict(global_counts)}"
+    )
+
+    for edge_start in (18, 38):
+        if len(seq) >= edge_start + 4:
+            edge_slice = seq[edge_start : edge_start + 4]
+            assert not (edge_slice[0] == edge_slice[1] == edge_slice[2]) and not (
+                edge_slice[1] == edge_slice[2] == edge_slice[3]
+            ), f"Stream {variant_name!r} three-in-a-row across block edge {edge_start}..{edge_start + 3}: {edge_slice}"
+
+    for idx in range(len(seq) - 2):
+        assert not (seq[idx] == seq[idx + 1] == seq[idx + 2]), (
+            f"Stream {variant_name!r} three-in-a-row at index {idx}: {seq[idx : idx + 3]}"
+        )
+
+
+def test_plan_1_several_blocks_balance_and_no_triples() -> None:
+    """Card U2-fix Do 2.1: A bank where every stream has at least 3 full blocks plus a tail satisfies block spread <= 1, global spread <= 1, and no three in a row anywhere (including indices 18-21 and 38-41)."""
+    worlds = _make_multiblock_plan_worlds()
+    plan = generate_stage5_shape_plan(worlds, seed=20261103, block_size=20)
+    recs: list[dict[str, Any]] = plan["plan_records"]  # type: ignore[assignment]
+
+    for v, forms in _PLAN_STREAM_VARIANTS.items():
+        seq = [str(r["form_id"]) for r in recs if r["variant"] == v]
+        assert len(seq) > 60 and len(seq) % 20 != 0, (
+            f"Stream {v!r} must have >= 3 full blocks of 20 plus a non-zero tail, got len={len(seq)}"
+        )
+        _assert_stream_plan_rules(seq, forms, block_size=20, variant_name=v)
+
+
+def test_plan_2_rotation_across_three_blocks_k3() -> None:
+    """Card U2-fix Do 2.2: On a stream of exactly 3 blocks with k = 3 (`see_occluded`), rotation cycles the extra/short uses across the 3 blocks so global counts are exact."""
+    from collections import Counter
+
+    base_w = _make_base_archival_world()
+    occ_name = base_w.occluders_by_room["vault room"]
+    occ_see_ev = Event(
+        step=1,
+        kind="see",
+        actor="Ana",
+        room="vault room",
+        target_object="brass ledger",
+        from_location=FAR_SIDE_ALCOVE_STATION,
+        to_location=FAR_SIDE_ALCOVE_STATION,
+        occluded=True,
+        occluder=occ_name,
+    )
+
+    # 1. 3 blocks of block_size=10 (30 events, k=3, 10 = 3*3 + 1): each of SEE_3..5 gets the extra use (4 vs 3) in literally 1 block
+    worlds_30 = [
+        replace(
+            _make_custom_archival_world((replace(occ_see_ev, step=1), replace(occ_see_ev, step=2))),
+            scenario_id=f"scen_rot10_{i:04d}",
+        )
+        for i in range(15)
+    ]
+    plan_30 = generate_stage5_shape_plan(worlds_30, seed=20261103, block_size=10)
+    seq_30 = [
+        str(r["form_id"])
+        for r in plan_30["plan_records"]  # type: ignore[union-attr]
+        if r["variant"] == "see_occluded"
+    ]
+    assert len(seq_30) == 30
+    extra_block_counts_10: Counter[str] = Counter()
+    for b_idx in range(3):
+        blk = seq_30[b_idx * 10 : (b_idx + 1) * 10]
+        c = Counter(blk)
+        assert sorted(c[f] for f in SEE_OCCLUDED_FORMS) == [3, 3, 4]
+        for f in SEE_OCCLUDED_FORMS:
+            if c[f] == 4:
+                extra_block_counts_10[f] += 1
+    assert {f: extra_block_counts_10[f] for f in SEE_OCCLUDED_FORMS} == {
+        "SEE_3": 1,
+        "SEE_4": 1,
+        "SEE_5": 1,
+    }
+    assert Counter(seq_30) == {"SEE_3": 10, "SEE_4": 10, "SEE_5": 10}
+
+    # 2. 3 blocks of block_size=20 (60 events, k=3, 20 = 6*3 + 2): each form gets the short count (6) in 1 block and extra (7) in 2 blocks, totaling 20 each
+    worlds_60 = [
+        replace(
+            _make_custom_archival_world((replace(occ_see_ev, step=1), replace(occ_see_ev, step=2))),
+            scenario_id=f"scen_rot20_{i:04d}",
+        )
+        for i in range(30)
+    ]
+    plan_60 = generate_stage5_shape_plan(worlds_60, seed=20261103, block_size=20)
+    seq_60 = [
+        str(r["form_id"])
+        for r in plan_60["plan_records"]  # type: ignore[union-attr]
+        if r["variant"] == "see_occluded"
+    ]
+    assert len(seq_60) == 60
+    short_block_counts_20: Counter[str] = Counter()
+    for b_idx in range(3):
+        blk = seq_60[b_idx * 20 : (b_idx + 1) * 20]
+        c = Counter(blk)
+        assert sorted(c[f] for f in SEE_OCCLUDED_FORMS) == [6, 7, 7]
+        for f in SEE_OCCLUDED_FORMS:
+            if c[f] == 6:
+                short_block_counts_20[f] += 1
+    assert {f: short_block_counts_20[f] for f in SEE_OCCLUDED_FORMS} == {
+        "SEE_3": 1,
+        "SEE_4": 1,
+        "SEE_5": 1,
+    }
+    assert Counter(seq_60) == {"SEE_3": 20, "SEE_4": 20, "SEE_5": 20}
+
+
+def test_plan_3_tail_and_short_streams_7_and_47() -> None:
+    """Card U2-fix Do 2.3: A short stream of 7 events and a multi-block + tail stream of 47 events both meet all plan rules across every variant stream."""
+    for target_len in (7, 47):
+        worlds_n: list[World] = []
+        base_w = _make_base_archival_world()
+        occ_name = base_w.occluders_by_room["vault room"]
+        for i in range(target_len):
+            evs = (
+                Event(
+                    step=1,
+                    kind="move",
+                    actor="Ana",
+                    room="vault room",
+                    target_object="brass ledger",
+                    from_location="oak drawer",
+                    to_location="steel cabinet",
+                    occluded=False,
+                ),
+                Event(
+                    step=2,
+                    kind="move",
+                    actor="Ana",
+                    room="vault room",
+                    target_object="brass ledger",
+                    from_location="steel cabinet",
+                    to_location="oak drawer",
+                    occluded=True,
+                    occluder=occ_name,
+                ),
+                Event(
+                    step=3,
+                    kind="see",
+                    actor="Ana",
+                    room="vault room",
+                    target_object="brass ledger",
+                    from_location=CONTAINER_BAY_STATION,
+                    to_location="oak drawer",
+                    occluded=False,
+                ),
+                Event(
+                    step=4,
+                    kind="see",
+                    actor="Ana",
+                    room="vault room",
+                    target_object="brass ledger",
+                    from_location=FAR_SIDE_ALCOVE_STATION,
+                    to_location=FAR_SIDE_ALCOVE_STATION,
+                    occluded=True,
+                    occluder=occ_name,
+                ),
+                Event(
+                    step=5,
+                    kind="say",
+                    actor="Ana",
+                    room="vault room",
+                    utterance="The brass ledger is in the oak drawer.",
+                    noise_level=60,
+                    occluded=False,
+                ),
+            )
+            worlds_n.append(
+                replace(_make_custom_archival_world(evs), scenario_id=f"scen_len{target_len}_{i:04d}")
+            )
+
+        for s in (20261103, 20261104, 20261105):
+            plan = generate_stage5_shape_plan(worlds_n, seed=s, block_size=20)
+            recs: list[dict[str, Any]] = plan["plan_records"]  # type: ignore[assignment]
+            for v, forms in _PLAN_STREAM_VARIANTS.items():
+                seq = [str(r["form_id"]) for r in recs if r["variant"] == v]
+                assert len(seq) == target_len
+                _assert_stream_plan_rules(seq, forms, block_size=20, variant_name=f"{v}_len{target_len}_seed{s}")
+
+
+def test_plan_4_seed_sweep_200_seeds() -> None:
+    """Card U2-fix Do 2.4: The three plan properties hold across 200 seeds (1000..1199) on the multi-block bank in under 60 s."""
+    import time
+
+    worlds = _make_multiblock_plan_worlds()
+    t0 = time.perf_counter()
+    for s in range(1000, 1200):
+        plan = generate_stage5_shape_plan(worlds, seed=s, block_size=20)
+        recs: list[dict[str, Any]] = plan["plan_records"]  # type: ignore[assignment]
+        for v, forms in _PLAN_STREAM_VARIANTS.items():
+            seq = [str(r["form_id"]) for r in recs if r["variant"] == v]
+            _assert_stream_plan_rules(seq, forms, block_size=20, variant_name=f"{v}_seed{s}")
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 60.0, f"200-seed sweep took {elapsed:.2f}s >= 60.0s"
+
+
+def test_plan_5_determinism_byte_identical_plan() -> None:
+    """Card U2-fix Do 2.5: The same seed gives a byte-identical plan on the multi-block bank."""
+    worlds = _make_multiblock_plan_worlds()
+    plan_1 = generate_stage5_shape_plan(worlds, seed=20261103, block_size=20)
+    plan_2 = generate_stage5_shape_plan(worlds, seed=20261103, block_size=20)
+    bytes_1 = json.dumps(plan_1, sort_keys=True).encode("utf-8")
+    bytes_2 = json.dumps(plan_2, sort_keys=True).encode("utf-8")
+    assert bytes_1 == bytes_2
+
+
+def test_plan_6_named_failure_stage5_plan_generation_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Card U2-fix Do 2.6: A forced impossible case raises `STAGE5_PLAN_GENERATION_FAILED` naming the stream and block index."""
+    import udlab_generator.shape_templates as st_mod
+
+    # 1. Natural mathematical impossibility: 21-event stream (block 0 of 20 ending in (f*, f*) + 1-event tail block 1 with quota {f*: 1})
+    see_ev = Event(
+        step=1,
+        kind="see",
+        actor="Ana",
+        room="vault room",
+        target_object="brass ledger",
+        from_location=CONTAINER_BAY_STATION,
+        to_location="oak drawer",
+        occluded=False,
+    )
+    worlds_21 = [
+        replace(_make_custom_archival_world((see_ev,)), scenario_id=f"scen_imp_{i:04d}")
+        for i in range(21)
+    ]
+    with pytest.raises(RuntimeError, match="STAGE5_PLAN_GENERATION_FAILED") as nat_exc:
+        generate_stage5_shape_plan(worlds_21, seed=4, block_size=20)
+    nat_msg = str(nat_exc.value)
+    assert "STAGE5_PLAN_GENERATION_FAILED" in nat_msg
+    assert "stream=see_unoccluded" in nat_msg
+    assert "block=1" in nat_msg
+
+    # 2. Forced unsatisfiable block via sampler feasibility hook
+    worlds = [_make_base_archival_world()]
+    monkeypatch.setattr(st_mod, "_can_complete_stage5_plan_block", lambda *a, **kw: False, raising=False)
+    with pytest.raises(RuntimeError, match="STAGE5_PLAN_GENERATION_FAILED") as exc_info:
+        generate_stage5_shape_plan(worlds, seed=20261103, block_size=20)
+    msg = str(exc_info.value)
+    assert "STAGE5_PLAN_GENERATION_FAILED" in msg
+    assert "stream=move_normal" in msg
+    assert "block=0" in msg
+
+
+def test_plan_8_registered_switch_rate_band_200_seeds() -> None:
+    """Card U2-fix Do 2.8: Over the 200-seed sweep (1000..1199), the two-form stream (`see_unoccluded`, k=2) switch rate stays inside the registered 0.60-0.71 band alongside the three plan rules."""
+    from udlab_generator.render import SHAPE_PLAN_DESIGN_CHOICES
+
+    band = SHAPE_PLAN_DESIGN_CHOICES["two_form_switch_rate_band"]
+    low = float(band["low"])  # type: ignore[arg-type]
+    high = float(band["high"])  # type: ignore[arg-type]
+    assert (low, high) == (0.60, 0.71)
+
+    worlds = _make_multiblock_plan_worlds()
+    rates_by_stream: dict[str, list[float]] = {v: [] for v in _PLAN_STREAM_VARIANTS}
+    for s in range(1000, 1200):
+        plan = generate_stage5_shape_plan(worlds, seed=s, block_size=20)
+        recs: list[dict[str, Any]] = plan["plan_records"]  # type: ignore[assignment]
+        for v, forms in _PLAN_STREAM_VARIANTS.items():
+            seq = [str(r["form_id"]) for r in recs if r["variant"] == v]
+            _assert_stream_plan_rules(seq, forms, block_size=20, variant_name=f"{v}_seed{s}")
+            switches = sum(1 for i in range(1, len(seq)) if seq[i] != seq[i - 1])
+            sw_rate = switches / (len(seq) - 1)
+            rates_by_stream[v].append(sw_rate)
+            if len(forms) == 2:
+                assert low <= sw_rate <= high, (
+                    f"Two-form stream {v!r} seed={s} switch rate {sw_rate:.6f} outside [{low}, {high}]"
+                )
+

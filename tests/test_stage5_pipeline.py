@@ -1826,16 +1826,6 @@ def test_22_addendum2_item11_dry_mode_upper_bound_and_over_cap_count() -> None:
     assert dry_res["ctx_over_cap"] == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Addendum 2 Item 12 STOP & REPORT: generate_stage5_shape_plan (src/udlab_generator/shape_templates.py:969) "
-        "slices 20-scenario blocks rather than 20-event blocks per variant stream, resets last_kind_forms=[] on "
-        "every scenario and block boundary (allowing 3-in-a-row across boundaries), and samples extra remainder "
-        "forms independently per block without rotating the short shape (allowing global form spread > 1). "
-        "Per card U4 & Addendum 2 Item 12: do not modify shape_templates.py."
-    ),
-)
 def test_23_addendum2_item12_multi_block_plan_check() -> None:
     """Addendum 2 Item 12: Multi-block plan test over >= 3 blocks per variant stream against `generate_stage5_shape_plan` (`shape_templates.py:969`)."""
     worlds = [generate_world(cfg) for cfg in make_balanced_configs(60, base_seed=20261103)]
