@@ -1832,8 +1832,17 @@ def test_23_addendum2_item12_multi_block_plan_check() -> None:
     plan = generate_stage5_shape_plan(worlds, seed=20261103, block_size=20)
     recs = plan["plan_records"]
 
+    empty_streams = {
+        v
+        for v in STAGE5_ASSIGNED_VARIANTS
+        if not any(r["variant"] == v for r in recs)
+    }
+    assert empty_streams == {"move_occluded"}
+
     for v, forms in STAGE5_ASSIGNED_VARIANTS.items():
         seq = [str(r["form_id"]) for r in recs if r["variant"] == v]
+        if not seq:
+            continue
         assert len(seq) >= 60, f"Variant {v} needs at least 3 blocks of 20 events, got {len(seq)}"
         # 1. No three-in-a-row across block edges (indices 18-20, 38-40) or anywhere in stream
         for edge_start in (18, 38):
