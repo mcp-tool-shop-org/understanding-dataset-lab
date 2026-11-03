@@ -1,16 +1,18 @@
 # understanding-dataset-lab: how it works
 
-Mapped at 2026-11-03 from commit 71c2b96 by Atlas 1.24.0.
+Mapped at 2026-11-03 from commit d951db7 by Atlas 1.24.0.
 
 ## What this is
 
 understanding-dataset-lab (a prototype) plans multi-party scenes in code, puts them into prose with a local writer model, checks every rendering against the plan, and seals the code-made answer keys with a private seed. (written by a person)
 
-7 parts, mostly Python (22 files), CSS (2), TypeScript (2), Astro (1), JavaScript (1) and shell (1). Work enters through 3 doors; the busiest is ci, which reaches 3 parts. It deploys a site to GitHub Pages. People run udlab-gen.
+7 parts, mostly Python (22 files), CSS (2), TypeScript (2), shell (2), Astro (1) and JavaScript (1). Work enters through 3 doors; the busiest is ci, which reaches 3 parts. It deploys a site to GitHub Pages. People run udlab-gen.
 
-## What changed since the last map
+## What changed since 2026-11-03 (71c2b96)
 
-This is the first map.
+- scripts/colab/launch.sh is now read by tests/test_stage5_pipeline.py.
+- tests/test_generator.py is now read by tests/test_stage5_pipeline.py.
+- 10 files added and 10 changed content, across 5 parts.
 
 ## What comes in
 
@@ -47,13 +49,15 @@ ci writes nothing this map can see.
 - **src/udlab_generator/__init__.py** and **tests/test_generator.py** changed together in 22 of 38 commits, and the tests part imports the src part.
 - **src/udlab_generator/__init__.py** and **src/udlab_generator/cli.py** changed together in 16 of 30 commits, inside the src part.
 
-Confidence is low: fewer than 20 source files reach 10 revisions in the window.
+Confidence is low: fewer than 25 source files reach 10 revisions in the window.
 
 Window: 180 days; a pair counts from 3 shared commits, since 5 source files reach 10 revisions; the floor rises to 10 when 25 do.
 
 ## What no test touches
 
 Every code part is imported by at least one test.
+
+verify.sh runs in no workflow.
 
 ## Written but never read
 
@@ -82,6 +86,6 @@ Read those in order to follow one run of udlab-gen end to end. This path follows
 - 7 reads use paths built at run time and are not named here.
 - 26 writes and 56 reads go to a path their caller passes, not to this repository.
 - 4 reads go to the directory the command is run in, not to this repository.
-- Statistics confidence is low: fewer than 20 source files reach 10 revisions in the window.
+- Statistics confidence is low: fewer than 25 source files reach 10 revisions in the window.
 
 Regenerate with `npx --yes @dogfood-lab/atlas map`.

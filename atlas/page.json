@@ -28,7 +28,41 @@
     }
   ],
   "changes": {
-    "first": true
+    "fileCounts": {
+      "added": 10,
+      "changed": 10,
+      "moved": 0,
+      "parts": 5,
+      "removed": 0
+    },
+    "items": [
+      {
+        "kind": "landing",
+        "sentence": "scripts/colab/launch.sh is now read by tests/test_stage5_pipeline.py.",
+        "subjects": [
+          "scripts/colab/launch.sh",
+          "tests/test_stage5_pipeline.py"
+        ]
+      },
+      {
+        "kind": "landing",
+        "sentence": "tests/test_generator.py is now read by tests/test_stage5_pipeline.py.",
+        "subjects": [
+          "tests/test_generator.py",
+          "tests/test_stage5_pipeline.py"
+        ]
+      },
+      {
+        "kind": "counts",
+        "sentence": "10 files added and 10 changed content, across 5 parts.",
+        "subjects": []
+      }
+    ],
+    "since": {
+      "commit": "71c2b962518e9f84b3b9aac5840be5821b162e33",
+      "generatedAt": "2026-11-03T20:29:50.410Z"
+    },
+    "unchanged": false
   },
   "changesTogether": [
     {
@@ -108,13 +142,13 @@
     }
   ],
   "changesTogetherNote": [
-    "Confidence is low: fewer than 20 source files reach 10 revisions in the window.",
+    "Confidence is low: fewer than 25 source files reach 10 revisions in the window.",
     "Window: 180 days; a pair counts from 3 shared commits, since 5 source files reach 10 revisions; the floor rises to 10 when 25 do."
   ],
   "changesTogetherWithTests": 0,
-  "commit": "71c2b962518e9f84b3b9aac5840be5821b162e33",
+  "commit": "d951db755b91a7e38466fa75e67e601ef90ca9e1",
   "defaultBranch": "main",
-  "derived": "7 parts, mostly Python (22 files), CSS (2), TypeScript (2), Astro (1), JavaScript (1) and shell (1). Work enters through 3 doors; the busiest is ci, which reaches 3 parts. It deploys a site to GitHub Pages. People run udlab-gen.",
+  "derived": "7 parts, mostly Python (22 files), CSS (2), TypeScript (2), shell (2), Astro (1) and JavaScript (1). Work enters through 3 doors; the busiest is ci, which reaches 3 parts. It deploys a site to GitHub Pages. People run udlab-gen.",
   "doors": [
     {
       "checks": [],
@@ -221,12 +255,12 @@
   "edges": [],
   "engine": "1.24.0",
   "generated": [],
-  "generatedAt": "2026-11-03T20:29:50.410Z",
+  "generatedAt": "2026-11-03T22:24:20.484Z",
   "limits": [
     "7 reads use paths built at run time and are not named here.",
     "26 writes and 56 reads go to a path their caller passes, not to this repository.",
     "4 reads go to the directory the command is run in, not to this repository.",
-    "Statistics confidence is low: fewer than 20 source files reach 10 revisions in the window."
+    "Statistics confidence is low: fewer than 25 source files reach 10 revisions in the window."
   ],
   "mainDoor": ".github/workflows/ci.yml",
   "partLabels": {
@@ -262,6 +296,8 @@
   "unreadFiles": 0,
   "unreadNote": [],
   "untested": [],
-  "untestedNote": [],
+  "untestedNote": [
+    "verify.sh runs in no workflow."
+  ],
   "written": 0
 }
