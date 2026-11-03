@@ -1963,3 +1963,220 @@ def test_25_addendum2_item14_at_most_one_rung_event_per_rendering_and_overlap() 
         )
     assert "STAGE5_RUNG_SAMPLE_SHORT" in str(exc_short.value)
     assert exc_short.value.counts["SAY_2"] == 15
+
+
+def test_26_u4_fix1_f2_ollama_version_drift_refusal_on_real_writer_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U4-fix1 Item 1 (F2): On the real `ollama` writer path, `--resume` compares the owned server's live `version` before the first writer call, refuses with `STAGE5_RESUME_ENV_CHANGED` (`engine.ollama_version`) with zero writer calls, never overwrites the recorded version on close, and on a fresh run records the live version at start."""
+    from types import SimpleNamespace
+    from udlab_generator.render import (
+        DEFAULT_WRITER_MODEL_PIN,
+        GenerationCallRecord,
+        SealedResponseEntry,
+        append_sealed_response,
+        compute_sealed_response_digests,
+    )
+
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(2, base_seed=20261103)]
+    live_server_version = "0.6.1"
+    writer_calls: list[tuple[str, int]] = []
+    crash_on_second_call = True
+
+    class _FakeOllamaWriter:
+        def __init__(self, **kwargs: Any) -> None:
+            self._sealed_responses_path: Path | None = kwargs.get("sealed_responses_path")
+            self.owned_server = SimpleNamespace(
+                version=live_server_version,
+                ollama_version=live_server_version,
+                stop=lambda: None,
+            )
+            self.manifest_digest = DEFAULT_WRITER_MODEL_PIN.manifest_digest
+            self.call_records: list[GenerationCallRecord] = []
+            self.sealed_responses: list[SealedResponseEntry] = []
+            self._transport = lambda *a, **kw: {}
+
+        def _chat_render(
+            self,
+            *,
+            world: Any,
+            scenario_id: str,
+            rendering_index: int,
+            focal_agent: str,
+            prompt_text: str,
+            allow_refusal: bool = False,
+        ) -> str | None:
+            _ = (prompt_text, allow_refusal)
+            writer_calls.append((scenario_id, rendering_index))
+            if crash_on_second_call and len(writer_calls) >= 2:
+                raise RuntimeError("simulated crash after first B rendering")
+            prose = _render_mock_stage5_baseline(world, focal_agent)
+            c_idx = len(self.call_records) + 1
+            resp_sha, think_sha = compute_sealed_response_digests(prose, "")
+            rec = GenerationCallRecord(
+                call_id=f"{scenario_id}:r{rendering_index}:call_{c_idx:04d}",
+                call_index=c_idx,
+                scenario_id=scenario_id,
+                rendering_index=rendering_index,
+                focal_agent=focal_agent,
+                operation="render_scenario",
+                model=DEFAULT_WRITER_MODEL_PIN.ollama_tag,
+                manifest_digest=DEFAULT_WRITER_MODEL_PIN.manifest_digest,
+                model_layer_digest=DEFAULT_WRITER_MODEL_PIN.model_layer_digest,
+                licence_id=DEFAULT_WRITER_MODEL_PIN.licence_id,
+                prompt_sha256=resp_sha,
+                prompt_tokens_estimate=128,
+                prompt_tokens_exact=128,
+                prompt_eval_count=128,
+                eval_count=64,
+                thinking_words=0,
+                num_predict=DEFAULT_WRITER_NUM_PREDICT,
+                num_ctx=2048,
+                max_num_ctx=DEFAULT_WRITER_MAX_NUM_CTX,
+                think=False,
+                temperature=0.0,
+                min_p=None,
+                done_reason="stop",
+                seconds=0.01,
+                vram_peak_mib=0,
+                vram_halt_mib=26000,
+                grant_id="cpu-mock",
+                checks_passed=True,
+                refusal_reasons=(),
+                check_id=None,
+                attempt=0,
+                seed=12345,
+                response_sha256=resp_sha,
+                thinking_sha256=think_sha,
+            )
+            self.call_records.append(rec)
+            sealed_entry = SealedResponseEntry(
+                call_id=rec.call_id,
+                call_index=c_idx,
+                scenario_id=scenario_id,
+                rendering_index=rendering_index,
+                focal_agent=focal_agent,
+                attempt=0,
+                seed=12345,
+                response_text=prose,
+                thinking_text="",
+                response_sha256=resp_sha,
+                thinking_sha256=think_sha,
+            )
+            self.sealed_responses.append(sealed_entry)
+            if self._sealed_responses_path is not None:
+                append_sealed_response(self._sealed_responses_path, sealed_entry)
+            return prose
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(stage5_mod, "OllamaWriter", _FakeOllamaWriter)
+
+    out_dir = tmp_path / "run_26_f2"
+    version_at_first_call: list[str | None] = []
+
+    def _inspect_record_before_first_call(rec_path: Path) -> None:
+        loaded = json.loads(rec_path.read_text(encoding="utf-8"))
+        version_at_first_call.append(loaded["engine"]["ollama_version"])
+
+    with pytest.raises(RuntimeError, match="simulated crash after first B rendering"):
+        run_stage5_pipeline(
+            count=2,
+            base_seed=20261103,
+            output_dir=out_dir,
+            writer_kind="ollama",
+            stage5_plan_seed=20261103,
+            stage5_rung_seed=20261104,
+            s_code_say=True,
+            worlds=worlds,
+            on_before_first_writer_call=_inspect_record_before_first_call,
+        )
+
+    rec_after_crash = json.loads((out_dir / STAGE5_RUN_RECORD_FILENAME).read_text(encoding="utf-8"))
+    assert rec_after_crash["engine"]["ollama_version"] == "0.6.1"
+
+    # Now resume with a server reporting a different version ("0.6.2"): must refuse with STAGE5_RESUME_ENV_CHANGED and 0 writer calls
+    writer_calls.clear()
+    crash_on_second_call = False
+    live_server_version = "0.6.2"
+
+    with pytest.raises(Stage5ResumeEnvChangedError) as exc_info:
+        run_stage5_pipeline(
+            count=2,
+            base_seed=20261103,
+            output_dir=out_dir,
+            writer_kind="ollama",
+            resume=True,
+            s_code_say=True,
+            worlds=worlds,
+        )
+    assert "STAGE5_RESUME_ENV_CHANGED" in str(exc_info.value)
+    assert "engine.ollama_version" in exc_info.value.drifted_fields
+    assert len(writer_calls) == 0
+
+    # Recorded version on disk must never be overwritten on close during a refused resume
+    rec_after_refusal = json.loads((out_dir / STAGE5_RUN_RECORD_FILENAME).read_text(encoding="utf-8"))
+    assert rec_after_refusal["engine"]["ollama_version"] == "0.6.1"
+    # On a fresh run, the live version is recorded at start once the server reports it, before the first writer call
+    assert version_at_first_call == ["0.6.1"]
+
+
+def test_27_u4_fix1_f1_error_handler_scoped_to_stage5_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U4-fix1 Item 2 (F1): `except (Stage5PipelineError, MaxNumCtxRefusalError)` applies only to `--stage5`; non-stage5 runs with `max_num_ctx` over the cap behave identically to base `f6277c6d`."""
+    over_cap = DEFAULT_WRITER_MAX_NUM_CTX + 1
+
+    # 1. Direct call to build_and_probe_dataset propagates MaxNumCtxRefusalError
+    with pytest.raises(MaxNumCtxRefusalError, match="MAX_NUM_CTX_CAP"):
+        build_and_probe_dataset(
+            count=1,
+            base_seed=20261030,
+            output_dir=tmp_path / "non_stage5_direct",
+            writer_kind="mock",
+            max_num_ctx=over_cap,
+        )
+
+    # 2. CLI main() on non-stage5 mode hits the existing `except RenderCheckError` handler (at base f6277c6d),
+    # printing `format_non_sealed_refusal_reason(check_id="max_num_ctx_exceeded", ...)` and returning 1.
+    rc = cli_mod.main(
+        [
+            "--count",
+            "1",
+            "--seed",
+            "20261030",
+            "--writer",
+            "mock",
+            "--max-num-ctx",
+            str(over_cap),
+            "--out-dir",
+            str(tmp_path / "non_stage5_cli"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert (
+        captured.err.strip()
+        == "max_num_ctx_exceeded: event_index=None event_kind=None failing_sentence_sha256= failing_sentence_offset=None failing_sentence_length=None"
+    )
+
+    # 3. Verify that Stage5PipelineError is NOT caught by main() when --stage5 is False
+    def _raise_stage5_err(*args: Any, **kwargs: Any) -> Any:
+        raise Stage5ResumeNoPlanSeedError("unexpected stage5 error outside stage5")
+
+    monkeypatch.setattr(cli_mod, "build_and_probe_dataset", _raise_stage5_err)
+    with pytest.raises(Stage5ResumeNoPlanSeedError, match="unexpected stage5 error outside stage5"):
+        cli_mod.main(
+            [
+                "--count",
+                "1",
+                "--seed",
+                "20261030",
+                "--writer",
+                "mock",
+                "--out-dir",
+                str(tmp_path / "non_stage5_unhandled"),
+            ]
+        )
+

@@ -770,11 +770,33 @@ def _read_sealed_b_prose_for_rendering(
     return found_text
 
 
+def _fsync_directory_if_supported(dir_path: Path) -> None:
+    """Fsync `dir_path` where the platform allows (POSIX directories supporting `os.open` + `os.fsync`)."""
+    if not dir_path.is_dir():
+        return
+    flags = getattr(os, "O_RDONLY", 0) | getattr(os, "O_DIRECTORY", 0)
+    try:
+        dir_fd = os.open(str(dir_path), flags)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(dir_fd)
+        except OSError:
+            pass
+
+
 def _flush_sealed_store(sealed_responses_path: Path) -> None:
-    """Flush `responses.sealed.jsonl` to disk before updating the run record."""
+    """Flush and `os.fsync` `responses.sealed.jsonl` (and its directory where supported) to disk before updating the run record."""
     if sealed_responses_path.is_file():
         with sealed_responses_path.open("r+b") as fh:
             fh.flush()
+            os.fsync(fh.fileno())
+        _fsync_directory_if_supported(sealed_responses_path.parent)
 
 
 def _append_and_flush_sealed_response(
@@ -837,14 +859,16 @@ def _seal_rewrite_entries(
 
 
 def _atomic_write_json(target_path: Path, payload: Mapping[str, Any]) -> None:
-    """Write `payload` to a sibling `.tmp` file, flush, and atomically replace `target_path` via `os.replace`."""
+    """Write `payload` to a sibling `.tmp` file, flush + `os.fsync`, and atomically replace `target_path` via `os.replace`."""
     target_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = target_path.with_name(f".{target_path.name}.tmp")
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     with tmp_path.open("wb") as fh:
         fh.write(encoded)
         fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp_path, target_path)
+    _fsync_directory_if_supported(target_path.parent)
 
 
 def _write_record_and_status(
@@ -1386,11 +1410,6 @@ def run_stage5_pipeline(
         "renderings": renderings_records,
     }
 
-    # Write `plan_seed` and `rung_seed` to `stage5_run_record.json` BEFORE any writer call.
-    _write_record_and_status(record_path, status_path, record, status_state="running")
-    if on_before_first_writer_call is not None:
-        on_before_first_writer_call(record_path)
-
     # -----------------------------------------------------------------------
     # Phase 1: B (First Draft)
     # Stage 2/3 Prompt C: constraint_layout="table", accepted_forms_line="off", shape_plan="off", checker_profile="d"
@@ -1442,9 +1461,55 @@ def run_stage5_pipeline(
             popen_factory=popen_factory,
             prompt_token_counter=prompt_token_counter,
         )
+        live_ollama_version: str | None = None
+        live_model_digest: str | None = getattr(
+            ollama_writer, "manifest_digest", effective_writer_pin.manifest_digest
+        )
+        if ollama_writer.owned_server is not None:
+            live_ollama_version = getattr(ollama_writer.owned_server, "version", None)
+            if live_ollama_version is None:
+                live_ollama_version = getattr(ollama_writer.owned_server, "ollama_version", None)
+            owned_digest = getattr(ollama_writer.owned_server, "model_digest", None) or getattr(
+                ollama_writer.owned_server, "manifest_digest", None
+            )
+            if owned_digest is not None:
+                live_model_digest = str(owned_digest)
+        if existing_record is not None:
+            # U4-fix1 Item 1 (F2): Right after the owned server starts and reports its version, and BEFORE
+            # the first writer call, compare live version (and model digest) with the record's.
+            try:
+                _check_resume_environment_drift(
+                    existing_record,
+                    writer_kind=writer_kind,
+                    model_tag=effective_writer_pin.ollama_tag,
+                    model_digest=live_model_digest,
+                    ollama_version=live_ollama_version,
+                    num_predict=resolved_num_predict,
+                    max_num_ctx=int(max_num_ctx),
+                    current_module_sha256s=current_module_sha256s,
+                    check_ollama_version=True,
+                )
+            except BaseException:
+                ollama_writer.close()
+                raise
+        else:
+            # On a fresh run, record the live version at start once the server reports it, not only at close.
+            engine_block["ollama_version"] = live_ollama_version
+            engine_block["model_digest"] = live_model_digest
         if active_rewrite_client is None:
             active_rewrite_client = ollama_writer._transport
-    else:
+
+    # Write `plan_seed`, `rung_seed`, and `engine` (including live `ollama_version` on fresh run) BEFORE any writer call.
+    try:
+        _write_record_and_status(record_path, status_path, record, status_state="running")
+        if on_before_first_writer_call is not None:
+            on_before_first_writer_call(record_path)
+    except BaseException:
+        if ollama_writer is not None:
+            ollama_writer.close()
+        raise
+
+    if writer_kind != "ollama":
         renderer_fn = (
             mock_custom_renderer
             if mock_custom_renderer is not None
@@ -1732,8 +1797,8 @@ def run_stage5_pipeline(
             )
     finally:
         if ollama_writer is not None:
-            if ollama_writer.owned_server is not None:
-                engine_block["ollama_version"] = ollama_writer.owned_server.ollama_version
+            # U4-fix1 Item 1 (F2): Never overwrite the recorded version on close during a resume (and on a fresh
+            # run it was already recorded at start once the server reported it).
             ollama_writer.close()
         if rendering_execution_order is not None:
             canonical_index = {
