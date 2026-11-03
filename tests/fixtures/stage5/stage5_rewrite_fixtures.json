@@ -1,0 +1,44 @@
+{
+  "schema_version": "udlab.stage5.rewrite_fixtures.v1",
+  "description": "Synthetic non-bank fixtures (invented names, code-built strings, zero model text) for Stage 5 Card U3 spoken-line rewrite and guard tests.",
+  "fixture_scene": {
+    "scenario_id": "fixture_stage5_u3_invented",
+    "speaker": "Mira",
+    "focal_agent": "Oren",
+    "other_agent": "Lira",
+    "absent_party": "Kael",
+    "room": "archive vestibule",
+    "other_rooms": [
+      "copper gallery",
+      "slate study",
+      "granite hall"
+    ],
+    "utterance": "The bronze ledger is inside the cedar cabinet.",
+    "noise_level": 62,
+    "noise_threshold": 55,
+    "draft_say_3": "At 62 dB (threshold 55 dB), Mira said in the archive vestibule, \"The bronze ledger is inside the cedar cabinet.\"",
+    "valid_say_1": "Mira said at 62 dB in the archive vestibule, \"The bronze ledger is inside the cedar cabinet.\"",
+    "valid_say_2": "\"The bronze ledger is inside the cedar cabinet,\" Mira said at 62 dB in the archive vestibule.",
+    "valid_say_4": "Mira said at 62 dB, \"The bronze ledger is inside the cedar cabinet,\" in the archive vestibule."
+  },
+  "guard_cases": {
+    "case_1_two_sentences": "\"The bronze ledger is inside the cedar cabinet,\" Mira said at 62 dB in the archive vestibule. Mira waited by the door.",
+    "case_2_quote_first_inner_split": "\"The bronze ledger is inside the cedar cabinet!\" At 62 dB (approx. 62 dB) in the archive vestibule, Mira said so.",
+    "case_2_quote_first_period_split": "\"The bronze ledger is inside the cedar cabinet.\" At 62 dB (threshold 55. dB) in the archive vestibule, Mira said so.",
+    "case_3_extra_agent_outside_quote": "\"The bronze ledger is inside the cedar cabinet,\" Mira said to Lira at 62 dB in the archive vestibule.",
+    "case_3_extra_room_outside_quote": "\"The bronze ledger is inside the cedar cabinet,\" Mira said at 62 dB in the archive vestibule near the copper gallery.",
+    "case_3_extra_object_outside_quote": "Near the silver compass, \"The bronze ledger is inside the cedar cabinet,\" Mira said at 62 dB in the archive vestibule.",
+    "case_4_wrong_verb_claimed": "\"The bronze ledger is inside the cedar cabinet,\" Mira claimed at 62 dB in the archive vestibule.",
+    "case_4_wrong_verb_told": "\"The bronze ledger is inside the cedar cabinet,\" Mira told at 62 dB in the archive vestibule.",
+    "case_4_draft_claimed": "At 62 dB (threshold 55 dB), Mira claimed in the archive vestibule, \"The bronze ledger is inside the cedar cabinet.\"",
+    "case_4_reply_claimed": "\"The bronze ledger is inside the cedar cabinet,\" Mira claimed at 62 dB in the archive vestibule.",
+    "case_5_changed_utterance": "\"The bronze ledger is inside the iron locker,\" Mira said at 62 dB in the archive vestibule.",
+    "case_6_adds_fault_pronoun_subject": "In the archive vestibule at 62 dB, after Mira paused, she said, \"The bronze ledger is inside the cedar cabinet.\"",
+    "case_7_s0_only_matches_ev2": "At 62 dB (threshold 55 dB), Mira, near the intake, said in the archive vestibule, \"The bronze ledger is inside the cedar cabinet.\"",
+    "case_7_s1_matches_both_ev1_and_ev2": "At 62 dB (threshold 55 dB), Mira said in the archive vestibule, \"The bronze ledger is inside the cedar cabinet.\"",
+    "case_8_wrong_form_say_1_when_say_2_planned": "Mira said at 62 dB in the archive vestibule, \"The bronze ledger is inside the cedar cabinet.\"",
+    "case_9a_shape_key": "SAY_2: \"The bronze ledger is inside the cedar cabinet,\" Mira said at 62 dB in the archive vestibule by altered quote.",
+    "case_9a_tag_token": "MOVE_3 \"The bronze ledger is inside the iron locker,\" Mira said at 62 dB in the archive vestibule.",
+    "case_9a_bracket_label": "[speaker] \"The bronze ledger is inside the iron locker,\" Mira said at 62 dB in the archive vestibule."
+  }
+}
