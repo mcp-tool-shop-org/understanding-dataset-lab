@@ -93,6 +93,11 @@ from udlab_generator.sealing import (
     verify_written_dataset_recounts_and_prose,
     write_sealed_dataset,
 )
+from udlab_generator.stage5_pipeline import (
+    Stage5PipelineError,
+    run_stage5_dry,
+    run_stage5_pipeline,
+)
 from udlab_generator.world import World, generate_world, make_balanced_configs
 
 
@@ -1298,6 +1303,7 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     http_transport: OllamaHttpTransport | None = None,
+    rewrite_client: Any = None,
     vram_probe: Callable[[], int] | None = None,
     popen_factory: Callable[..., Any] | None = None,
 ) -> int:
@@ -1518,9 +1524,132 @@ def main(
         default=None,
         help="Optional presence_penalty passed in Ollama request options (omitted when not set).",
     )
+    parser.add_argument(
+        "--stage5",
+        action="store_true",
+        default=False,
+        help="Run the Stage 5 hybrid pipeline (B -> rewrite-input rung -> swap & rewrite -> S >= B check) and write stage5_run_record.json.",
+    )
+    parser.add_argument(
+        "--stage5-plan-seed",
+        type=int,
+        default=None,
+        help="Optional explicit plan seed for --stage5 (for replay and tests only; otherwise drawn once via secrets.randbelow(2**63)).",
+    )
+    parser.add_argument(
+        "--stage5-rung-seed",
+        type=int,
+        default=None,
+        help="Optional explicit rung seed for --stage5 (for replay and tests only; otherwise drawn once via secrets.randbelow(2**63)).",
+    )
+    parser.add_argument(
+        "--stage5-redo-b",
+        nargs="*",
+        default=None,
+        metavar="RENDERING",
+        help="Explicitly re-run B on --resume for --stage5 (all renderings if no argument is given, or specific scen_XXXX[:r] rendering(s)), resetting downstream fields.",
+    )
+    parser.add_argument(
+        "--stage5-redo-rung",
+        action="store_true",
+        default=False,
+        help="Explicitly reset and re-run the Stage 5 rewrite-input rung on --resume (reusing rung_seed).",
+    )
+    parser.add_argument(
+        "--stage5-s-code",
+        action="store_true",
+        default=False,
+        help="Run the Stage 5 S-code fallback (swap_all_say instead of rewrite_all_say).",
+    )
+    parser.add_argument(
+        "--stage5-seed-bank",
+        type=Path,
+        default=None,
+        help="Optional JSON list of scenario seeds for --stage5 (builds scenarios via world_from_scenario_seed, alias for --paired-seed-bank under --stage5).",
+    )
+    parser.add_argument(
+        "--dry",
+        action="store_true",
+        default=False,
+        help="With --stage5, build worlds and the plan and print counts without constructing a writer or writing files.",
+    )
     args = parser.parse_args(raw_argv)
 
     try:
+        if args.stage5:
+            if (
+                args.stage5_seed_bank is not None
+                and args.paired_seed_bank is not None
+                and args.stage5_seed_bank != args.paired_seed_bank
+            ):
+                parser.error("Cannot specify different paths for --stage5-seed-bank and --paired-seed-bank.")
+            resolved_stage5_seed_bank = (
+                args.stage5_seed_bank
+                if args.stage5_seed_bank is not None
+                else args.paired_seed_bank
+            )
+            try:
+                prompt_token_counter = resolve_prompt_token_counter(args.llama_tokenize, args.writer_gguf)
+            except (ValueError, FileNotFoundError) as exc:
+                parser.error(str(exc))
+            try:
+                if args.dry:
+                    dry_out = run_stage5_dry(
+                        count=args.count,
+                        base_seed=args.seed,
+                        seed_bank=resolved_stage5_seed_bank,
+                        stage5_plan_seed=args.stage5_plan_seed,
+                        max_retries=args.max_retries,
+                        num_predict=args.num_predict,
+                        max_num_ctx=args.max_num_ctx,
+                        think=bool(args.think),
+                        goal_mode=args.goal_mode,
+                        prompt_token_counter=prompt_token_counter,
+                    )
+                    print(json.dumps(dry_out, sort_keys=True))
+                    return 0
+                resolved_redo_b: bool | list[str]
+                if args.stage5_redo_b is None:
+                    resolved_redo_b = False
+                elif len(args.stage5_redo_b) == 0:
+                    resolved_redo_b = True
+                else:
+                    resolved_redo_b = list(args.stage5_redo_b)
+                stage5_rec = run_stage5_pipeline(
+                    count=args.count,
+                    base_seed=args.seed,
+                    seed_bank=resolved_stage5_seed_bank,
+                    output_dir=args.out_dir,
+                    writer_kind=args.writer,
+                    stage5_plan_seed=args.stage5_plan_seed,
+                    stage5_rung_seed=args.stage5_rung_seed,
+                    redo_b=resolved_redo_b,
+                    redo_rung=bool(args.stage5_redo_rung),
+                    s_code_say=bool(args.stage5_s_code),
+                    vram_halt_mib=args.vram_halt_mib,
+                    num_predict=args.num_predict,
+                    max_num_ctx=args.max_num_ctx,
+                    think=bool(args.think),
+                    max_retries=args.max_retries,
+                    retry_form=args.retry_form,
+                    multi_turn_retries=bool(args.multi_turn_retries),
+                    goal_mode=args.goal_mode,
+                    presence_penalty=args.presence_penalty,
+                    grant_id=args.grant_id,
+                    resume=bool(args.resume),
+                    server_port=args.server_port,
+                    http_transport=http_transport,
+                    rewrite_client=rewrite_client,
+                    vram_probe=vram_probe,
+                    popen_factory=popen_factory,
+                    prompt_token_counter=prompt_token_counter,
+                )
+            except (Stage5PipelineError, MaxNumCtxRefusalError) as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            print(json.dumps(stage5_rec["summary"], sort_keys=True))
+            return 0
+
         if args.diagnose_paired is not None:
             diag_summary = diagnose_paired_run(
                 args.diagnose_paired,

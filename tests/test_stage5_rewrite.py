@@ -1168,10 +1168,10 @@ def test_case_15_u2_public_wrapper_parity_and_count_changed() -> None:
     assert keep_count_changed.kept is False
     assert keep_count_changed.cause == "count_changed"
 
-    # 3. Verify U2's test file, render.py, and cli.py are unchanged at U3 commit a7ca5831 vs U2 base 842a2e6b
+    # 3. Verify render.py and cli.py are unchanged at U3 squash-merge commit f6277c6d on main vs U2 base 842a2e6b
     repo_root = Path(__file__).resolve().parent.parent
     u2_sha = "842a2e6b6ef15c46ca92fb85d2412ec82404d187"
-    u3_sha = "a7ca5831a96d2b034a9f995ac58ea0a85e73206f"
+    u3_sha = "f6277c6d6f52b6280b0f1cab518dd7d741a85c6e"
     for sha in (u2_sha, u3_sha):
         check_proc = subprocess.run(
             ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
@@ -1194,10 +1194,10 @@ def test_case_15_u2_public_wrapper_parity_and_count_changed() -> None:
         "src/udlab_generator/shape_templates.py",
         "src/udlab_generator/rewrite.py",
         "tests/test_stage5_rewrite.py",
+        "tests/test_stage5_templates.py",  # U3-fix1 authorized edit re-pinning U2's commit-range diff
         "tests/fixtures/stage5/stage5_rewrite_fixtures.json",
     }
     assert changed <= allowed_u3, f"Unexpected modified files vs U2 base: {sorted(changed - allowed_u3)}"
-    assert "tests/test_stage5_templates.py" not in changed
     assert "src/udlab_generator/render.py" not in changed
     assert "src/udlab_generator/cli.py" not in changed
 
