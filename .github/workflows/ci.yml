@@ -44,7 +44,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Run pytest with coverage (floor 90%)
-        run: uv run pytest -n auto --cov=udlab_generator --cov-report=term-missing --cov-report=xml --cov-fail-under=90
+        run: uv run pytest -n auto -v -rfE --durations=30 --cov=udlab_generator --cov-report=term-missing --cov-report=xml --cov-fail-under=90
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
