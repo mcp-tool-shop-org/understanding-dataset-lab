@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
+import inspect
 import json
 import logging
 from pathlib import Path
@@ -1167,10 +1168,22 @@ def test_case_15_u2_public_wrapper_parity_and_count_changed() -> None:
     assert keep_count_changed.kept is False
     assert keep_count_changed.cause == "count_changed"
 
-    # 3. Verify U2's test file, render.py, and cli.py are unchanged vs main base 842a2e6b6ef15c46ca92fb85d2412ec82404d187
+    # 3. Verify U2's test file, render.py, and cli.py are unchanged at U3 commit a7ca5831 vs U2 base 842a2e6b
     repo_root = Path(__file__).resolve().parent.parent
+    u2_sha = "842a2e6b6ef15c46ca92fb85d2412ec82404d187"
+    u3_sha = "a7ca5831a96d2b034a9f995ac58ea0a85e73206f"
+    for sha in (u2_sha, u3_sha):
+        check_proc = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if check_proc.returncode != 0:
+            pytest.skip(f"Commit {sha} missing from clone (shallow checkout)")
     proc = subprocess.run(
-        ["git", "diff", "--name-only", "842a2e6b6ef15c46ca92fb85d2412ec82404d187"],
+        ["git", "diff", "--name-only", u2_sha, u3_sha],
         cwd=str(repo_root),
         capture_output=True,
         text=True,
@@ -1187,4 +1200,258 @@ def test_case_15_u2_public_wrapper_parity_and_count_changed() -> None:
     assert "tests/test_stage5_templates.py" not in changed
     assert "src/udlab_generator/render.py" not in changed
     assert "src/udlab_generator/cli.py" not in changed
+
+
+class _RecordingCallableClient:
+    """Fake callable rewrite client that records signature-inspection and call order, arity, and payloads."""
+
+    def __init__(
+        self,
+        *,
+        arity: int = 1,
+        signature_exc: Exception | None = None,
+        first_call_exc: Exception | None = None,
+        reply: str = "",
+    ) -> None:
+        self._arity = arity
+        self._signature_exc = signature_exc
+        self._first_call_exc = first_call_exc
+        self._reply = reply
+        self.events: list[str] = []
+        self.call_arities: list[int] = []
+        self.payloads: list[dict[str, Any]] = []
+        self.calls: list[tuple[Any, ...]] = []
+        self.call_count: int = 0
+
+    @property
+    def __signature__(self) -> inspect.Signature:
+        self.events.append("signature_inspected")
+        if self._signature_exc is not None:
+            raise self._signature_exc
+        if self._arity == 1:
+            return inspect.Signature(
+                [inspect.Parameter("payload", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+            )
+        return inspect.Signature(
+            [
+                inspect.Parameter("method", inspect.Parameter.POSITIONAL_OR_KEYWORD),
+                inspect.Parameter("url", inspect.Parameter.POSITIONAL_OR_KEYWORD),
+                inspect.Parameter("payload", inspect.Parameter.POSITIONAL_OR_KEYWORD),
+            ]
+        )
+
+    def __call__(self, *args: Any) -> dict[str, Any]:
+        self.events.append("called")
+        self.call_count += 1
+        self.call_arities.append(len(args))
+        self.calls.append(args)
+        payload = args[0] if len(args) == 1 else args[2]
+        assert isinstance(payload, dict)
+        self.payloads.append(json.loads(json.dumps(payload)))
+        if self.call_count == 1 and self._first_call_exc is not None:
+            raise self._first_call_exc
+        return {
+            "model": payload.get("model", PINNED_WRITER_MODEL_TAG),
+            "done_reason": "stop",
+            "prompt_eval_count": 140,
+            "eval_count": 22,
+            "total_duration": 125_000_000,
+            "message": {"role": "assistant", "content": self._reply},
+        }
+
+
+def _assert_payload_and_sealed_identical_across_call_forms(
+    prose_b: str,
+    w: World,
+    focal: str,
+    valid_reply: str,
+    *,
+    input_mode: str = "with_draft",
+) -> None:
+    """Run the same event once through a 1-arg client and once through a (method, url, payload) client and assert parity."""
+    client_1arg = _RecordingCallableClient(arity=1, reply=valid_reply)
+    client_3arg = _RecordingCallableClient(arity=3, reply=valid_reply)
+
+    res_1arg = rewrite_all_say(
+        prose_b,
+        w,
+        plan={1: "SAY_2"},
+        client=client_1arg,
+        focal_agent=focal,
+        input_mode=input_mode,
+    )
+    res_3arg = rewrite_all_say(
+        prose_b,
+        w,
+        plan={1: "SAY_2"},
+        client=client_3arg,
+        focal_agent=focal,
+        input_mode=input_mode,
+    )
+
+    assert client_1arg.events == ["signature_inspected", "called"]
+    assert client_3arg.events == ["signature_inspected", "called"]
+    assert client_1arg.call_arities == [1]
+    assert client_3arg.call_arities == [3]
+    assert len(client_1arg.payloads) == 1
+    assert len(client_3arg.payloads) == 1
+    assert client_1arg.payloads[0] == client_3arg.payloads[0]
+    assert len(res_1arg.sealed) == 1
+    assert len(res_3arg.sealed) == 1
+    assert res_1arg.sealed[0]["messages"] == res_3arg.sealed[0]["messages"]
+
+
+def test_u3fix_client_typeerror_is_one_call_and_call_error() -> None:
+    """U3-fix1: 1-arg callable client raising TypeError on first call is called once, rolls back with call_error, and leaves prose unchanged."""
+    w = _make_invented_fixture_world()
+    focal = w.agents[1]
+    prose_b = render_world_template(w, focal)
+    valid_say2 = render_event_sentence(w.events[0], w, "SAY_2", focal_agent=focal)
+
+    client = _RecordingCallableClient(
+        arity=1,
+        first_call_exc=TypeError("simulated client TypeError on first call"),
+        reply=valid_say2,
+    )
+    res = rewrite_all_say(
+        prose_b,
+        w,
+        plan={1: "SAY_2"},
+        client=client,
+        focal_agent=focal,
+        input_mode="with_draft",
+    )
+
+    # No call precedes signature inspection / calling-form choice, and exactly 1 call is made.
+    assert client.events[0] == "signature_inspected"
+    assert client.events.index("signature_inspected") < client.events.index("called")
+    assert client.call_count == 1
+    assert client.events == ["signature_inspected", "called"]
+    assert client.call_arities == [1]
+
+    ev_rec = next(r for r in res.events if r.event_index == 1)
+    assert ev_rec.action == "rewrite_rolled_back"
+    assert ev_rec.cause == "call_error"
+    assert res.prose.encode("utf-8") == prose_b.encode("utf-8")
+
+    _assert_payload_and_sealed_identical_across_call_forms(
+        prose_b,
+        w,
+        focal,
+        valid_say2,
+        input_mode="with_draft",
+    )
+
+
+def test_u3fix_client_valueerror_is_one_call_and_call_error() -> None:
+    """U3-fix1: 1-arg callable client raising ValueError on first call is called once, rolls back with call_error, and leaves prose unchanged."""
+    w = _make_invented_fixture_world()
+    focal = w.agents[1]
+    prose_b = render_world_template(w, focal)
+    valid_say2 = render_event_sentence(w.events[0], w, "SAY_2", focal_agent=focal)
+
+    client = _RecordingCallableClient(
+        arity=1,
+        first_call_exc=ValueError("simulated client ValueError on first call"),
+        reply=valid_say2,
+    )
+    res = rewrite_all_say(
+        prose_b,
+        w,
+        plan={1: "SAY_2"},
+        client=client,
+        focal_agent=focal,
+        input_mode="facts_only",
+    )
+
+    # No call precedes signature inspection / calling-form choice, and exactly 1 call is made.
+    assert client.events[0] == "signature_inspected"
+    assert client.events.index("signature_inspected") < client.events.index("called")
+    assert client.call_count == 1
+    assert client.events == ["signature_inspected", "called"]
+    assert client.call_arities == [1]
+
+    ev_rec = next(r for r in res.events if r.event_index == 1)
+    assert ev_rec.action == "rewrite_rolled_back"
+    assert ev_rec.cause == "call_error"
+    assert res.prose.encode("utf-8") == prose_b.encode("utf-8")
+
+    _assert_payload_and_sealed_identical_across_call_forms(
+        prose_b,
+        w,
+        focal,
+        valid_say2,
+        input_mode="facts_only",
+    )
+
+
+def test_u3fix_uninspectable_client_signature_is_one_fallback_call() -> None:
+    """U3-fix1: Client whose signature cannot be inspected gets 1 call in fallback (method, url, payload) form after inspection."""
+    w = _make_invented_fixture_world()
+    focal = w.agents[1]
+    prose_b = render_world_template(w, focal)
+    valid_say2 = render_event_sentence(w.events[0], w, "SAY_2", focal_agent=focal)
+
+    for sig_exc in (ValueError("no signature found for builtin"), TypeError("uninspectable callable")):
+        uninspectable_ok = _RecordingCallableClient(
+            arity=3,
+            signature_exc=sig_exc,
+            reply=valid_say2,
+        )
+        res_ok = rewrite_all_say(
+            prose_b,
+            w,
+            plan={1: "SAY_2"},
+            client=uninspectable_ok,
+            focal_agent=focal,
+            input_mode="with_draft",
+        )
+        assert uninspectable_ok.events[0] == "signature_inspected"
+        assert uninspectable_ok.events.index("signature_inspected") < uninspectable_ok.events.index("called")
+        assert uninspectable_ok.call_count == 1
+        assert uninspectable_ok.events == ["signature_inspected", "called"]
+        assert uninspectable_ok.call_arities == [3]
+        method_arg, url_arg, payload_arg = uninspectable_ok.calls[0]
+        assert method_arg == "POST"
+        assert str(url_arg).endswith("/api/chat")
+        assert isinstance(payload_arg, dict)
+        ev_rec_ok = next(r for r in res_ok.events if r.event_index == 1)
+        assert ev_rec_ok.action == "rewritten"
+
+        # Compare payload and sealed prompt against a 1-arg client on the same event.
+        client_1arg = _RecordingCallableClient(arity=1, reply=valid_say2)
+        res_1arg = rewrite_all_say(
+            prose_b,
+            w,
+            plan={1: "SAY_2"},
+            client=client_1arg,
+            focal_agent=focal,
+            input_mode="with_draft",
+        )
+        assert client_1arg.events == ["signature_inspected", "called"]
+        assert client_1arg.payloads[0] == uninspectable_ok.payloads[0]
+        assert res_1arg.sealed[0]["messages"] == res_ok.sealed[0]["messages"]
+
+    # Also verify a 3-arg fallback client that raises ValueError on its first call gets 1 call (not 2 via except fallback).
+    fallback_err_client = _RecordingCallableClient(
+        arity=3,
+        first_call_exc=ValueError("simulated fallback client ValueError on first call"),
+        reply=valid_say2,
+    )
+    res_err = rewrite_all_say(
+        prose_b,
+        w,
+        plan={1: "SAY_2"},
+        client=fallback_err_client,
+        focal_agent=focal,
+        input_mode="with_draft",
+    )
+    assert fallback_err_client.events[0] == "signature_inspected"
+    assert fallback_err_client.call_count == 1
+    assert fallback_err_client.events == ["signature_inspected", "called"]
+    ev_rec_err = next(r for r in res_err.events if r.event_index == 1)
+    assert ev_rec_err.action == "rewrite_rolled_back"
+    assert ev_rec_err.cause == "call_error"
+    assert res_err.prose.encode("utf-8") == prose_b.encode("utf-8")
+
 

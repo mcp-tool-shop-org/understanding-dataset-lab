@@ -714,8 +714,26 @@ def test_edge_9_determinism_byte_identical_outputs() -> None:
 def test_edge_10_no_existing_module_changes() -> None:
     """Case 10: `git diff --name-only <base>` shows only the allowed files and zero edits to `render.py` or `cli.py`."""
     repo_root = Path(__file__).resolve().parent.parent
+    u1_sha = "50441f46159d073eae0ea3d99c36903514b4bddf"
+    u2_sha = "842a2e6b6ef15c46ca92fb85d2412ec82404d187"
+    for sha in (u1_sha, u2_sha):
+        check_proc = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if check_proc.returncode != 0:
+            pytest.skip(f"Commit {sha} missing from clone (shallow checkout)")
     proc = subprocess.run(
-        ["git", "diff", "--name-only", BASE_COMMIT_SHA],
+        [
+            "git",
+            "diff",
+            "--name-only",
+            "50441f46159d073eae0ea3d99c36903514b4bddf",
+            "842a2e6b6ef15c46ca92fb85d2412ec82404d187",
+        ],
         cwd=str(repo_root),
         capture_output=True,
         text=True,

@@ -456,18 +456,21 @@ def _invoke_rewrite_client(
     """Invoke the injected transport `client` (`OllamaHttpTransport` or adapter) with `payload`."""
     if callable(client):
         try:
-            sig = inspect.signature(client)
+            sig: inspect.Signature | None = inspect.signature(client)
+        except (ValueError, TypeError):
+            sig = None
+        use_single_arg = False
+        if sig is not None:
             params = [
                 p
                 for p in sig.parameters.values()
                 if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
             ]
             has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
-            if not has_varargs and len(params) == 1:
-                resp = client(payload)
-            else:
-                resp = client("POST", chat_url, payload)
-        except (ValueError, TypeError):
+            use_single_arg = not has_varargs and len(params) == 1
+        if use_single_arg:
+            resp = client(payload)
+        else:
             resp = client("POST", chat_url, payload)
     elif hasattr(client, "_transport") and callable(client._transport):
         base = str(getattr(client, "base_url", DEFAULT_OLLAMA_BASE_URL)).rstrip("/")
