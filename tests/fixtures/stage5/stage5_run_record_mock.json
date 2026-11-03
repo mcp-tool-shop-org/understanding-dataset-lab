@@ -12,6 +12,12 @@
     "writer_kind": "mock"
   },
   "max_num_ctx": 9216,
+  "model_endpoint": {
+    "b": "http://127.0.0.1:11434",
+    "rewrite": "http://127.0.0.1:11434",
+    "rung": "http://127.0.0.1:11434",
+    "swap": "http://127.0.0.1:11434"
+  },
   "module_sha256s": {
     "render.py": "0ea3d2388e4e0c8c775d36ac025151e5f905bfdee7a752a5df825efd6c560274",
     "rewrite.py": "95cd9bb38475498d90fb956303c50e71e4857fcbd21e2370ad87dc0ae23b0735",
@@ -47306,6 +47312,36 @@
   "schema_version": "stage5_run_record_v1",
   "seed_bank_sha256": null,
   "seed_bank_size": null,
+  "step_timings": {
+    "b": {
+      "call_count": 80,
+      "calls": 80,
+      "end": "2026-11-03T00:00:01Z",
+      "seconds": 1.0,
+      "start": "2026-11-03T00:00:00Z"
+    },
+    "rewrite": {
+      "call_count": 180,
+      "calls": 180,
+      "end": "2026-11-03T00:00:07Z",
+      "seconds": 1.0,
+      "start": "2026-11-03T00:00:06Z"
+    },
+    "rung": {
+      "call_count": 120,
+      "calls": 120,
+      "end": "2026-11-03T00:00:03Z",
+      "seconds": 1.0,
+      "start": "2026-11-03T00:00:02Z"
+    },
+    "swap": {
+      "call_count": 0,
+      "calls": 0,
+      "end": "2026-11-03T00:00:05Z",
+      "seconds": 1.0,
+      "start": "2026-11-03T00:00:04Z"
+    }
+  },
   "stop_reason": null,
   "summary": {
     "b_passed": 80,

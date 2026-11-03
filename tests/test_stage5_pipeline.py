@@ -183,6 +183,21 @@ def _assert_valid_stage5_record_schema(rec: Mapping[str, Any]) -> None:
     )
     assert isinstance(rec["module_sha256s"], dict)
     assert set(rec["module_sha256s"].keys()) == {"render.py", "shape_templates.py", "rewrite.py"}
+    assert isinstance(rec["model_endpoint"], dict)
+    assert set(rec["model_endpoint"].keys()) == {"b", "rung", "swap", "rewrite"}
+    for ep_val in rec["model_endpoint"].values():
+        assert isinstance(ep_val, str) and ep_val.startswith(("http://", "https://"))
+        assert "/" not in ep_val.split("://", 1)[1]
+    assert isinstance(rec["step_timings"], dict)
+    assert set(rec["step_timings"].keys()) == {"b", "rung", "swap", "rewrite"}
+    for st_val in rec["step_timings"].values():
+        assert isinstance(st_val, dict)
+        assert st_val["start"] is None or isinstance(st_val["start"], str)
+        assert st_val["end"] is None or isinstance(st_val["end"], str)
+        assert isinstance(st_val["seconds"], (int, float)) and not isinstance(st_val["seconds"], bool)
+        assert isinstance(st_val["calls"], int) and not isinstance(st_val["calls"], bool)
+        assert isinstance(st_val["call_count"], int) and not isinstance(st_val["call_count"], bool)
+        assert st_val["calls"] == st_val["call_count"]
     assert isinstance(rec["rung_aborted_calls"], int) and not isinstance(rec["rung_aborted_calls"], bool)
     assert isinstance(rec["rung_scenario_overlap"], int) and not isinstance(rec["rung_scenario_overlap"], bool)
 
@@ -290,10 +305,29 @@ def _assert_valid_stage5_record_schema(rec: Mapping[str, Any]) -> None:
 
 def test_1_full_mock_run_schema_and_summary(tmp_path: Path) -> None:
     """Test 1: Full mock run on a synthetic bank (n=40 >= 12) with a fake rewrite client validates schema, summary, and fixture parity."""
+    import datetime
+
     n = 40
     base_seed = 20261103
     worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
     client, calls = _make_fake_rewrite_client(worlds)
+
+    utc_tick = 0
+    mono_tick = 0
+
+    def _fixture_utc_clock() -> str:
+        nonlocal utc_tick
+        dt = datetime.datetime(2026, 11, 3, 0, 0, 0, tzinfo=datetime.timezone.utc) + datetime.timedelta(
+            seconds=utc_tick
+        )
+        utc_tick += 1
+        return dt.isoformat().replace("+00:00", "Z")
+
+    def _fixture_mono_clock() -> float:
+        nonlocal mono_tick
+        val = float(mono_tick)
+        mono_tick += 1
+        return val
 
     out_dir = tmp_path / "run_1"
     rec = run_stage5_pipeline(
@@ -305,6 +339,8 @@ def test_1_full_mock_run_schema_and_summary(tmp_path: Path) -> None:
         stage5_rung_seed=20261104,
         rewrite_client=client,
         worlds=worlds,
+        utc_clock=_fixture_utc_clock,
+        monotonic_clock=_fixture_mono_clock,
     )
 
     _assert_valid_stage5_record_schema(rec)
@@ -2178,4 +2214,366 @@ def test_27_u4_fix1_f1_error_handler_scoped_to_stage5_only(
                 str(tmp_path / "non_stage5_unhandled"),
             ]
         )
+
+
+def _make_fake_owned_server_stage5_harness(
+    worlds: list[Any],
+    *,
+    owned_port: int = 11499,
+    fail_on_phase3_rewrite_call: int | None = None,
+) -> dict[str, Any]:
+    """Build a fake `popen_factory` and `http_transport` for full Stage 5 runs (B, rung, rewrites) against an owned server."""
+    from types import SimpleNamespace
+
+    b_queue = [(w, r_idx, w.agents[r_idx]) for w in worlds for r_idx in (0, 1)]
+    b_idx = 0
+    rewrite_helper, rewrite_calls = _make_fake_rewrite_client(worlds)
+    recorded_requests: list[tuple[str, str, str]] = []
+    stop_events: list[int] = []
+    phase3_rewrite_calls = 0
+
+    def _fake_popen(cmd: list[str], **kwargs: Any) -> Any:
+        _ = (cmd, kwargs)
+        return SimpleNamespace(
+            pid=43210,
+            returncode=None,
+            poll=lambda: None,
+            terminate=lambda: None,
+            wait=lambda timeout=None: 0,
+            kill=lambda: None,
+        )
+
+    def _fake_pid_killer(pid: int) -> None:
+        _ = pid
+        stop_events.append(len(recorded_requests))
+
+    def _fake_transport(
+        method: str, url: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        nonlocal b_idx, phase3_rewrite_calls
+        if url.endswith("/api/version"):
+            recorded_requests.append((method, url, "version"))
+            return {"version": "0.6.1"}
+        if url.endswith("/api/tags"):
+            recorded_requests.append((method, url, "tags"))
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "digest": PINNED_WRITER_MANIFEST_DIGEST,
+                    }
+                ]
+            }
+        if url.endswith("/api/show"):
+            recorded_requests.append((method, url, "show"))
+            return {"parameters": "temperature 0.6"}
+        if url.endswith("/api/chat"):
+            if payload and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                recorded_requests.append((method, url, "unload"))
+                return {"done": True}
+            assert payload is not None
+            opts = payload.get("options") or {}
+            # Rewrite/rung calls set num_predict=80, num_ctx=2048; B calls set num_predict=DEFAULT_WRITER_NUM_PREDICT
+            if int(opts.get("num_predict", 0)) == 80 and int(opts.get("num_ctx", 0)) == 2048:
+                is_rung = len(rewrite_calls) < 120
+                recorded_requests.append((method, url, "rung" if is_rung else "rewrite"))
+                if not is_rung:
+                    phase3_rewrite_calls += 1
+                    if (
+                        fail_on_phase3_rewrite_call is not None
+                        and phase3_rewrite_calls == fail_on_phase3_rewrite_call
+                    ):
+                        raise RuntimeError(
+                            f"Simulated mid-rewrite transport error on call {phase3_rewrite_calls}"
+                        )
+                return rewrite_helper(payload)
+            recorded_requests.append((method, url, "b"))
+            w, _, focal = b_queue[b_idx]
+            b_idx += 1
+            prose = _render_mock_stage5_baseline(w, focal)
+            return {
+                "message": {"role": "assistant", "content": prose},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 3200,
+                "eval_count": 600,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    return {
+        "owned_port": owned_port,
+        "owned_base_url": f"http://127.0.0.1:{owned_port}",
+        "popen_factory": _fake_popen,
+        "pid_killer": _fake_pid_killer,
+        "http_transport": _fake_transport,
+        "recorded_requests": recorded_requests,
+        "stop_events": stop_events,
+    }
+
+
+def test_28_owned_server_single_url_closed_once_and_model_endpoint(tmp_path: Path) -> None:
+    """Card 2026-11-03 Items 1, 2, 3: Full mock Stage 5 run with a fake owned server sends 0 requests outside the owned URL, closes the owned server once after the last call, and records matching `model_endpoint` across `b`, `rung`, `swap`, `rewrite`."""
+    n = 40
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+    harness = _make_fake_owned_server_stage5_harness(worlds, owned_port=11499)
+
+    out_dir = tmp_path / "run_28_owned"
+    rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        server_port=11499,
+        start_owned_server=True,
+        popen_factory=harness["popen_factory"],
+        pid_killer=harness["pid_killer"],
+        http_transport=harness["http_transport"],
+        prompt_token_counter=lambda _: 3200,
+        worlds=worlds,
+    )
+
+    reqs = harness["recorded_requests"]
+    owned_url = harness["owned_base_url"]
+    outside_urls = [url for _, url, _ in reqs if not url.startswith(f"{owned_url}/")]
+    assert outside_urls == [], f"Requests sent outside owned server URL {owned_url}: {outside_urls[:5]}"
+    assert sum(1 for _, _, kind in reqs if kind == "b") == 80
+    assert sum(1 for _, _, kind in reqs if kind == "rung") == 120
+    assert sum(1 for _, _, kind in reqs if kind == "rewrite") > 0
+
+    # Owned server closed exactly once, after the last model call
+    assert harness["stop_events"] == [len(reqs)]
+
+    # Item 3: model_endpoint has scheme, host, and port only for b, rung, swap, rewrite, all equal under owned server
+    assert rec["model_endpoint"] == {
+        "b": owned_url,
+        "rung": owned_url,
+        "swap": owned_url,
+        "rewrite": owned_url,
+    }
+    assert len(set(rec["model_endpoint"].values())) == 1
+
+    # Also verify external URL (no owned server): every call uses that same URL
+    ext_harness = _make_fake_owned_server_stage5_harness(worlds, owned_port=11488)
+    ext_url = ext_harness["owned_base_url"]
+    rec_ext = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=tmp_path / "run_28_external",
+        writer_kind="ollama",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        ollama_base_url=ext_url,
+        start_owned_server=False,
+        http_transport=ext_harness["http_transport"],
+        prompt_token_counter=lambda _: 3200,
+        worlds=worlds,
+    )
+    ext_outside = [url for _, url, _ in ext_harness["recorded_requests"] if not url.startswith(f"{ext_url}/")]
+    assert ext_outside == []
+    assert ext_harness["stop_events"] == []
+    assert rec_ext["model_endpoint"] == {
+        "b": ext_url,
+        "rung": ext_url,
+        "swap": ext_url,
+        "rewrite": ext_url,
+    }
+
+
+def test_29_owned_server_closed_once_on_mid_rewrite_error(tmp_path: Path) -> None:
+    """Card 2026-11-03 Item 2 (error path): An exception mid-rewrite still sends 0 requests outside the owned URL and closes the owned server exactly once."""
+    n = 40
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+    harness = _make_fake_owned_server_stage5_harness(
+        worlds,
+        owned_port=11499,
+        fail_on_phase3_rewrite_call=3,
+    )
+
+    with pytest.raises(RuntimeError, match="Simulated mid-rewrite transport error on call 3"):
+        run_stage5_pipeline(
+            count=n,
+            base_seed=base_seed,
+            output_dir=tmp_path / "run_29_err",
+            writer_kind="ollama",
+            stage5_plan_seed=20261103,
+            stage5_rung_seed=20261104,
+            server_port=11499,
+            start_owned_server=True,
+            popen_factory=harness["popen_factory"],
+            pid_killer=harness["pid_killer"],
+            http_transport=harness["http_transport"],
+            prompt_token_counter=lambda _: 3200,
+            worlds=worlds,
+        )
+
+    reqs = harness["recorded_requests"]
+    owned_url = harness["owned_base_url"]
+    outside_urls = [url for _, url, _ in reqs if not url.startswith(f"{owned_url}/")]
+    assert outside_urls == []
+    assert sum(1 for _, _, kind in reqs if kind == "rewrite") == 3
+    assert harness["stop_events"] == [len(reqs)]
+
+
+def test_30_step_timings_in_record_and_mirrored_in_status_with_fake_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Card 2026-11-03 Item 4: `stage5_run_record.json` records `step_timings` for `b`, `rung`, `swap`, `rewrite` (`start`, `end`, `seconds`, call count), and `stage5_status.json` mirrors `step_timings` as the run progresses."""
+    import datetime
+
+    n = 40
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+    client, _ = _make_fake_rewrite_client(worlds)
+
+    utc_base = datetime.datetime(2026, 11, 3, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    utc_step = 0
+    mono_values = iter([100.0, 112.5, 200.0, 208.25, 300.0, 300.5, 400.0, 415.75])
+
+    def _fake_utc_clock() -> str:
+        nonlocal utc_step
+        dt = utc_base + datetime.timedelta(seconds=utc_step * 10)
+        utc_step += 1
+        return dt.isoformat().replace("+00:00", "Z")
+
+    def _fake_mono_clock() -> float:
+        return next(mono_values)
+
+    status_snapshots: list[dict[str, Any]] = []
+    orig_atomic_write = stage5_mod._atomic_write_json
+
+    def _spy_atomic_write(target_path: Path, payload: Mapping[str, Any]) -> None:
+        orig_atomic_write(target_path, payload)
+        if target_path.name == STAGE5_STATUS_FILENAME:
+            status_snapshots.append(json.loads(target_path.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(stage5_mod, "_atomic_write_json", _spy_atomic_write)
+
+    out_dir = tmp_path / "run_30_timers"
+    rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="mock",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        rewrite_client=client,
+        worlds=worlds,
+        utc_clock=_fake_utc_clock,
+        monotonic_clock=_fake_mono_clock,
+    )
+
+    timings = rec["step_timings"]
+    assert set(timings.keys()) == {"b", "rung", "swap", "rewrite"}
+    assert timings["b"] == {
+        "start": "2026-11-03T12:00:00Z",
+        "end": "2026-11-03T12:00:10Z",
+        "seconds": 12.5,
+        "calls": 80,
+        "call_count": 80,
+    }
+    assert timings["rung"] == {
+        "start": "2026-11-03T12:00:20Z",
+        "end": "2026-11-03T12:00:30Z",
+        "seconds": 8.25,
+        "calls": 120,
+        "call_count": 120,
+    }
+    assert timings["swap"] == {
+        "start": "2026-11-03T12:00:40Z",
+        "end": "2026-11-03T12:00:50Z",
+        "seconds": 0.5,
+        "calls": 0,
+        "call_count": 0,
+    }
+    expected_rw_calls = rec["call_counts"]["rewrite_calls"]
+    assert timings["rewrite"] == {
+        "start": "2026-11-03T12:01:00Z",
+        "end": "2026-11-03T12:01:10Z",
+        "seconds": 15.75,
+        "calls": expected_rw_calls,
+        "call_count": expected_rw_calls,
+    }
+
+    # Verify stage5_status.json mirrored step_timings as the run progressed
+    assert any(
+        s["step_timings"]["b"]["end"] is not None
+        and s["step_timings"]["rung"]["end"] is None
+        for s in status_snapshots
+    )
+    assert any(
+        s["step_timings"]["rung"]["end"] is not None
+        and s["step_timings"]["swap"]["end"] is None
+        for s in status_snapshots
+    )
+    assert any(
+        s["step_timings"]["swap"]["end"] is not None
+        and s["step_timings"]["rewrite"]["end"] is None
+        for s in status_snapshots
+    )
+    assert status_snapshots[-1]["step_timings"] == timings
+
+
+def test_31_colab_launch_reconcile_default_empty_and_no_rnd_local_in_tracked_files() -> None:
+    """Card 2026-11-03 Item 5: `scripts/colab/launch.sh:104` defaults `RECONCILE_SH` to empty, keeps the `-x` check, and no tracked file outside leak-guard tests contains the private workspace marker."""
+    import subprocess
+
+    launch_sh = REPO_ROOT / "scripts" / "colab" / "launch.sh"
+    lines = launch_sh.read_text(encoding="utf-8").splitlines()
+    assert lines[103].strip() == 'RECONCILE_SH="${COLAB_RECONCILE_SH:-}"'
+    assert any('if [[ -x "$RECONCILE_SH" ]]; then' in ln for ln in lines)
+
+    needle = "-".join(("rnd", "local"))
+    tracked_out = subprocess.check_output(
+        ["git", "ls-files"], cwd=REPO_ROOT, text=True, encoding="utf-8"
+    )
+    offending: list[str] = []
+    for rel_path in tracked_out.splitlines():
+        rel = rel_path.strip()
+        if not rel or rel == "tests/test_generator.py":
+            continue
+        p = REPO_ROOT / rel
+        if p.is_file():
+            txt = p.read_text(encoding="utf-8", errors="replace")
+            if needle in txt:
+                offending.append(rel)
+    assert offending == [], f"Tracked files outside leak-guard tests contain {needle!r}: {offending}"
+
+
+def test_32_plan_statistics_per_stream_20_event_blocks_and_planted_imbalance() -> None:
+    """Card 2026-11-03 Item 6: `_compute_plan_statistics` uses per-stream 20-event blocks matching `generate_stage5_shape_plan` (`<= 1` on `count=80`) and catches a planted block imbalance."""
+    dry_res = run_stage5_dry(
+        count=80,
+        base_seed=20261030,
+        stage5_plan_seed=20261103,
+    )
+    spread_by_variant = dry_res["block_balance_max_spread_by_variant"]
+    assert isinstance(spread_by_variant, dict)
+    assert all(v <= 1 for v in spread_by_variant.values()), f"Expected <= 1 per variant, got {spread_by_variant}"
+    assert dry_res["block_balance_max_spread"] <= 1
+
+    # Plant an imbalance in the first 20-event block of the `say` stream
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(20, base_seed=20261030)]
+    plan_bundle = generate_stage5_shape_plan(worlds, seed=20261103, block_size=20)
+    tampered_by_sid = {
+        sid: [dict(r) for r in recs]
+        for sid, recs in plan_bundle["plan_by_scenario_id"].items()
+    }
+    say_seen = 0
+    for w in worlds:
+        for r in tampered_by_sid[w.scenario_id]:
+            if r["variant"] == "say" and say_seen < 20:
+                r["form_id"] = "SAY_1"
+                say_seen += 1
+    tampered_bundle = dict(plan_bundle)
+    tampered_bundle["plan_by_scenario_id"] = tampered_by_sid
+    _, _, planted_spread = stage5_mod._compute_plan_statistics(
+        worlds, tampered_bundle, block_size=20
+    )
+    assert planted_spread["say"] == 20
+
 
