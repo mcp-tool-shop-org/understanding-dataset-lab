@@ -28,7 +28,9 @@ jobs:
   # Python 3.15, the only supported version (requires-python >=3.15): coverage with its floor, then the Atlas check.
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 45 min for pull requests (the fast set, the required check). The full suite (push to main, dispatch) gets
+    # 90: measured 2026-11-04, it does not finish in 45 min on a private 2-core runner (public runners have 4).
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 45 || 90 }}
     permissions:
       contents: read
       id-token: write

@@ -17,7 +17,8 @@ The first public release, as a **prototype**.
 - 759 tests, using synthetic seeds and invented scenes only.
 - README, MIT `LICENSE`, `SECURITY.md`, `SHIP_GATE.md`, CI with coverage and the Atlas map, a landing page and a
   handbook. CI runs a fast set on pull requests (the slow Stage 5 tests listed in `tests/conftest.py` left out) and
-  the full suite on every push to main.
+  the full suite on every push to main. The full suite's job timeout is 90 minutes instead of 45, because it
+  measured over 45 minutes on a private 2-core runner (public runners have 4).
 - `.gitattributes` keeps every file byte-exact, since the legend and several fixtures are pinned by SHA-256.
 
 ### Changed
