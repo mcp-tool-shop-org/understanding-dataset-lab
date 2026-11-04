@@ -1,18 +1,16 @@
 # understanding-dataset-lab: how it works
 
-Mapped at 2026-11-03 from commit d951db7 by Atlas 1.24.0.
+Mapped at 2026-11-04 from commit 81765f0 by Atlas 1.24.0.
 
 ## What this is
 
 understanding-dataset-lab (a prototype) plans multi-party scenes in code, puts them into prose with a local writer model, checks every rendering against the plan, and seals the code-made answer keys with a private seed. (written by a person)
 
-7 parts, mostly Python (22 files), CSS (2), TypeScript (2), shell (2), Astro (1) and JavaScript (1). Work enters through 3 doors; the busiest is ci, which reaches 3 parts. It deploys a site to GitHub Pages. People run udlab-gen.
+7 parts, mostly Python (23 files), CSS (2), TypeScript (2), shell (2), Astro (1) and JavaScript (1). Work enters through 3 doors; the busiest is ci, which reaches 3 parts. It deploys a site to GitHub Pages. People run udlab-gen.
 
-## What changed since 2026-11-03 (71c2b96)
+## What changed since 2026-11-03 (d951db7)
 
-- scripts/colab/launch.sh is now read by tests/test_stage5_pipeline.py.
-- tests/test_generator.py is now read by tests/test_stage5_pipeline.py.
-- 10 files added and 10 changed content, across 5 parts.
+Nothing structural changed since 2026-11-03; 1 file added and 3 changed content.
 
 ## What comes in
 

@@ -9,7 +9,7 @@
       "externals": 0,
       "files": [
         {
-          "hash": "4a8024c32b23880f44cd9486202d7436a26e20dd4ee00cb984896fc949125ee5",
+          "hash": "2f616c1d852e6d3a5c2aa338622b55b4dd8f7db07570b21bae2521df1ceafedd",
           "path": ".github/workflows/ci.yml"
         },
         {
@@ -79,7 +79,7 @@
           "path": ".python-version"
         },
         {
-          "hash": "1318e63ac6d5769c8ba257237ec7a58c2db449858201458eb02b8819b7b2f55f",
+          "hash": "207a2d4b870ffc9daaf31f1aa04ddb01a0dd92706c6b19f99fb712d403f6c68d",
           "path": "CHANGELOG.md"
         },
         {
@@ -9303,6 +9303,15 @@
           "path": "tests/TESTING-NOTES.md"
         },
         {
+          "exports": [
+            "pytest_collection_modifyitems",
+            "pytest_configure"
+          ],
+          "hash": "b19a5f12aa36e0af8c1403526a4e26c24b15f1a09f506309c5c94f9627666f28",
+          "path": "tests/conftest.py",
+          "testFramework": "pytest"
+        },
+        {
           "hash": "1ac3e4b73651a9358752c4f621633fc7cd4a01cb1c864bcb3a02ff9faf593e8e",
           "path": "tests/fixtures/checker_tightening/move.json"
         },
@@ -9400,7 +9409,7 @@
             "test_uv_archive_sha_mismatch_and_version_refusal",
             "test_writer_model_digest_mismatch_refusal"
           ],
-          "hash": "03158e83864f1626b88c883ac91408c6a694835c8f85e55d303c906707acf281",
+          "hash": "768fb92fe9050382495079c85229a48e4673d56b3c57b69875501f045b3a18f2",
           "importsFiles": [
             "scripts/colab/vm_udlab.py"
           ],
@@ -9821,7 +9830,7 @@
           "programs": [
             "uv"
           ],
-          "step": "Run pytest with coverage (floor 90%)"
+          "step": "Run pytest with coverage (fast set on pull requests, full suite on main and dispatch)"
         },
         {
           "dir": "",
@@ -9885,7 +9894,7 @@
         {
           "boundary": "tests",
           "depth": 0,
-          "files": 10
+          "files": 11
         },
         {
           "boundary": "scripts",
@@ -9934,10 +9943,10 @@
         {
           "config": "pyproject.toml",
           "coverage": true,
-          "files": 10,
+          "files": 11,
           "job": "test",
           "runner": "pytest",
-          "step": "Run pytest with coverage (floor 90%)"
+          "step": "Run pytest with coverage (fast set on pull requests, full suite on main and dispatch)"
         }
       ],
       "triggers": [
@@ -10186,8 +10195,8 @@
   ],
   "engine": "1.24.0",
   "generatedFrom": {
-    "commit": "d951db755b91a7e38466fa75e67e601ef90ca9e1",
-    "tracked": 83
+    "commit": "81765f0771ad08be34a18e52305b9f39b5fb4421",
+    "tracked": 84
   },
   "landings": [
     {
@@ -10639,6 +10648,6 @@
   "overlaps": [],
   "submodules": [],
   "symlinks": [],
-  "testFiles": 25,
+  "testFiles": 26,
   "unassigned": []
 }

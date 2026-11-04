@@ -43,10 +43,22 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Run pytest with coverage (floor 90%)
-        run: uv run pytest -n auto -v -rfE --durations=30 --cov=udlab_generator --cov-report=term-missing --cov-report=xml --cov-fail-under=90
+      # Pull requests run the fast set (the tests marked slow in tests/conftest.py are left out), with its own
+      # floor at its measurement: fast set 87.37%, floor 87. Pushes to main and manual dispatch run the full suite,
+      # including the registered Gate 0 self-test and the Stage 5 pipeline tests: full suite 90.75%, floor 90.
+      - name: Run pytest with coverage (fast set on pull requests, full suite on main and dispatch)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            uv run pytest -n auto -v -rfE --durations=30 -m "not slow" --cov=udlab_generator --cov-report=term-missing --cov-fail-under=87
+          else
+            uv run pytest -n auto -v -rfE --durations=30 --cov=udlab_generator --cov-report=term-missing --cov-report=xml --cov-fail-under=90
+          fi
 
+      # Only the full suite uploads, so the 90% Codecov targets are never measured against the fast set.
       - name: Upload coverage to Codecov
+        if: github.event_name != 'pull_request'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           version: v11.3.1

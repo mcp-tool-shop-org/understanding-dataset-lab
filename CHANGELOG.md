@@ -16,7 +16,8 @@ The first public release, as a **prototype**.
 - The writer prompt for `qwen3.6:35b`, the Stage 4 legend, and a Colab launcher for the writer on a rented GPU.
 - 759 tests, using synthetic seeds and invented scenes only.
 - README, MIT `LICENSE`, `SECURITY.md`, `SHIP_GATE.md`, CI with coverage and the Atlas map, a landing page and a
-  handbook.
+  handbook. CI runs a fast set on pull requests (the slow Stage 5 tests listed in `tests/conftest.py` left out) and
+  the full suite on every push to main.
 - `.gitattributes` keeps every file byte-exact, since the legend and several fixtures are pinned by SHA-256.
 
 ### Changed
