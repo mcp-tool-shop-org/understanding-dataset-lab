@@ -3,7 +3,7 @@
 All notable changes to understanding-dataset-lab are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the package (`udlab-generator`) follows Semantic Versioning.
 
-## [0.1.0] - 2026-11-03
+## [0.1.0] - 2026-11-04
 
 The first public release, as a **prototype**.
 

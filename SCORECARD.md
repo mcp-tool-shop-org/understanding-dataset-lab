@@ -1,49 +1,19 @@
 # Scorecard
 
-> Score a repo before remediation. Fill this out first, then use SHIP_GATE.md to fix.
+**Repo:** understanding-dataset-lab
+**Date:** 2026-11-04
+**Release:** v0.1.0 (prototype)
+**Source:** `npx @mcptoolshop/shipcheck audit` against [SHIP_GATE.md](SHIP_GATE.md); exit 0, all hard gates pass.
 
-**Repo:** <!-- repo name -->
-**Date:** <!-- YYYY-MM-DD -->
-**Type tags:** <!-- [npm] [mcp] [cli] etc. -->
+| Gate | Checked | Skipped (with reason) | Unchecked |
+|------|---------|-----------------------|-----------|
+| A. Security baseline (hard) | 5 | 3 | 0 |
+| B. Error handling (hard) | 3 | 4 | 0 |
+| C. Operator docs (hard) | 4 | 3 | 0 |
+| D. Shipping hygiene (hard) | 4 | 7 | 0 |
+| E. Identity (soft) | 4 | 0 | 0 |
+| Gate rules | 1 | 1 | 0 |
+| **Total** | **21** | **18** | **0** |
 
-## Pre-Remediation Assessment
-
-| Category | Score | Notes |
-|----------|-------|-------|
-| A. Security | /10 | |
-| B. Error Handling | /10 | |
-| C. Operator Docs | /10 | |
-| D. Shipping Hygiene | /10 | |
-| E. Identity (soft) | /10 | |
-| **Overall** | **/50** | |
-
-## Key Gaps
-
-<!-- List the 3-5 most critical gaps that need fixing. Be specific. -->
-
-1.
-2.
-3.
-
-## Remediation Priority
-
-<!-- What to fix first, second, third. Informed by the gaps above. -->
-
-| Priority | Item | Estimated effort |
-|----------|------|-----------------|
-| 1 | | |
-| 2 | | |
-| 3 | | |
-
-## Post-Remediation
-
-<!-- Fill this out after applying SHIP_GATE.md -->
-
-| Category | Before | After |
-|----------|--------|-------|
-| A. Security | /10 | /10 |
-| B. Error Handling | /10 | /10 |
-| C. Operator Docs | /10 | /10 |
-| D. Shipping Hygiene | /10 | /10 |
-| E. Identity (soft) | /10 | /10 |
-| **Overall** | /50 | /50 |
+Each skip names its reason in SHIP_GATE.md. Most are for surfaces udlab doesn't have: no npm package, MCP server,
+desktop app or operated service.

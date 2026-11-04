@@ -57,10 +57,10 @@
 
 ## E. Identity (soft gate — does not block ship)
 
-- [ ] `[all]` Logo in README header — pending brand PR (logos/understanding-dataset-lab, opened right after the visibility flip); ticked in the release commit
+- [x] `[all]` Logo in README header (2026-11-04) — brand PR #114 merged; the README's raw logo URL returns 200
 - [x] `[all]` Translations (polyglot-mcp, 8 languages) (2026-11-03) — README in English plus ja, zh, es, fr, hi, it and pt-BR, made locally by `translate-all.mjs` (translategemma:27b); one Stage 5 table cell each in ja, zh and fr pinned by hand in `.polyglot-pins.json` so every cell keeps its numbers
 - [x] `[org]` Landing page (@mcptoolshop/site-theme) (2026-11-03) — `site/` with a six-page Starlight handbook, deployed by `pages.yml`
-- [ ] `[all]` GitHub repo metadata: description, homepage, topics
+- [x] `[all]` GitHub repo metadata: description, homepage, topics (2026-11-04) — set at the visibility change
 
 ---
 
