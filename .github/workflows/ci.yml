@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - .python-version
+      - src/**
+      - tests/**
+      - prompts/**
+      - scripts/**
+      - site/package*.json
+      - atlas/**
+      - .github/workflows/**
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Python 3.15, the only supported version (requires-python >=3.15): coverage with its floor, then the Atlas check.
+  test:
+    runs-on: ubuntu-latest
+    # 45 min for pull requests (the fast set, the required check). The full suite (push to main, dispatch) gets
+    # 90: measured 2026-11-04, it does not finish in 45 min on a private 2-core runner (public runners have 4).
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 45 || 90 }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+          python-version: "3.15"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # Pull requests run the fast set (the tests marked slow in tests/conftest.py are left out), with its own
+      # floor at its measurement: fast set 87.37%, floor 87. Pushes to main and manual dispatch run the full suite,
+      # including the registered Gate 0 self-test and the Stage 5 pipeline tests: full suite 90.75%, floor 90.
+      - name: Run pytest with coverage (fast set on pull requests, full suite on main and dispatch)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            uv run pytest -n auto -v -rfE --durations=30 -m "not slow" --cov=udlab_generator --cov-report=term-missing --cov-fail-under=87
+          else
+            uv run pytest -n auto -v -rfE --durations=30 --cov=udlab_generator --cov-report=term-missing --cov-report=xml --cov-fail-under=90
+          fi
+
+      # Only the full suite uploads, so the 90% Codecov targets are never measured against the fast set.
+      - name: Upload coverage to Codecov
+        if: github.event_name != 'pull_request'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          version: v11.3.1
+          use_oidc: true
+          fail_ci_if_error: false
+          disable_search: true
+          files: coverage.xml
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Atlas check
+        run: npx --yes @dogfood-lab/atlas@1.24.0 check
+
+      - name: Audit the site's npm tree
+        working-directory: site
+        run: npm ci && npm audit --audit-level=high

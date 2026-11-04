@@ -645,8 +645,15 @@ if subcmd == "exec":
             time.sleep(sleep_s)
             sys.stderr.write(f"Execution timed out after {{timeout_s}}s\\n")
             raise SystemExit(124)
+        # The fake VM reports a Colab-sized disk, so vm_udlab.py's 40 GiB check measures the VM it would run
+        # on, not the test machine (CI runners have less free disk). A test that patches shutil.disk_usage
+        # itself (through sitecustomize) keeps its own patch.
+        vm_free_bytes = int(os.environ.get("FAKE_COLAB_VM_FREE_BYTES", str(100 * 1024**3)))
         kernel_code = (
-            "import sys,runpy; "
+            "import sys,runpy,shutil; "
+            "_vm_free = " + str(vm_free_bytes) + "; "
+            "shutil.disk_usage = (lambda _p: shutil._ntuple_diskusage(_vm_free * 2, _vm_free, _vm_free)) "
+            "if getattr(shutil.disk_usage, '__module__', '') == 'shutil' else shutil.disk_usage; "
             "sys.argv=['colab_kernel_launcher.py','-f','/tmp/kernel-fake.json']; "
             f"runpy.run_path({{str(py_path)!r}}, run_name='__main__')"
         )
@@ -2127,7 +2134,10 @@ def test_fix5_1_and_3_kernel_argv_entry_and_honest_fake_exec(
         sys.executable,
         "-c",
         (
-            "import sys,runpy; "
+            # A Colab-sized disk, as in the fake colab exec: the 40 GiB check measures the VM, not this machine.
+            "import sys,runpy,shutil; "
+            f"_vm_free = {100 * 1024**3}; "
+            "shutil.disk_usage = lambda _p: shutil._ntuple_diskusage(_vm_free * 2, _vm_free, _vm_free); "
             "sys.argv=['colab_kernel_launcher.py','-f','/tmp/kernel-fake.json']; "
             f"runpy.run_path({str(VM_UDLAB_PY)!r}, run_name='__main__')"
         ),

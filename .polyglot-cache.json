@@ -1,0 +1,1671 @@
+{
+  "version": 1,
+  "entries": {
+    "147a9de3e0379800": {
+      "translation": "**プロトタイプ。** udlabは、現在進行中のオープンな研究プロジェクトです。その方法とコードは、ここで確認・実行できます。これまでの結果は、開発環境で、シーンをどれだけうまく生成できるかの検証です。最終的な結果や確定された結果、トレーニングされたモデルは存在せず、AIが誰かを理解しているかどうかについても、断定的な主張はしていません。シーンの作成方法は、今後も変更される可能性があります。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067882,
+      "source": "> **Prototype.** udlab is open research in progress. The method and the code are here to read and run. Its results\n> so far are checks of how well it generates scenes, on development banks. It has no final or sealed result, no\n> trained model, and makes no claim about whether any AI understands anyone. Stages can still change how scenes are made.",
+      "targetLang": "ja"
+    },
+    "19df4ae3e77eb31a": {
+      "translation": "**理解力データセットラボ（udlab）は、認知的な共感のためのテストシナリオを作成します。つまり、モデルが、シーン内の各登場人物が何を知っていて、何を信じ、何を望み、何が必要としているのかを正確に把握できるかどうかを検証します。** 複数の登場人物が登場する短いシーンをコードで計画し、その後、ローカルのライターモデルによって文章に変換します。シーンに関するすべての質問の答えは、コードの計画から得られ、モデルからは決して得られません。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067882,
+      "source": "**understanding-dataset-lab (udlab) builds test scenarios for cognitive empathy: whether a model can keep an accurate\npicture of what each party in a scene knows, believes, wants and needs.** Short scenes with several people are planned\nby code, then put into prose by a local writer model. The answer to every question about a scene comes from the code's\nplan, never from a model.",
+      "targetLang": "ja"
+    },
+    "97e09ed719d17e72": {
+      "translation": "これは、パズルや検証項目について同様の検証を行う[reasoning-dataset-lab](⟦0⟧)の関連プロジェクトです。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067882,
+      "source": "It is the companion to [reasoning-dataset-lab](⟦0⟧), which does\nthe same for puzzles and verification items.",
+      "targetLang": "ja"
+    },
+    "b0419f260f1c619f": {
+      "translation": "コードで作成されたキーを持つシーンを使用する理由",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067882,
+      "source": "Why scenes with code-made keys",
+      "targetLang": "ja"
+    },
+    "f8a884bb0b145784": {
+      "translation": "計画されたシーンでは、正しい答えは、出来事から必然的に導き出されます。誰がどこへ移動したか、誰が見ることができたか、誰が何を言ったか、誰がそれを聞いたか、などです。ある物体が移動したときに視界から外れていた人物は、その物体が最後に見た場所にまだあると信じています。これらのルールはコードに記述されているため、キーは判断されるのではなく、計算されます。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "In a planned scene, the right answer follows mechanically from the events: who moved where, who could see, who said\nwhat, and who heard it. Someone who was out of sight when an object was moved still believes it is where they last\nsaw it. Because those rules are in code, the key is computed, not judged.",
+      "targetLang": "ja"
+    },
+    "efb844f76b3851da": {
+      "translation": "*コードで作成されたキー*とは、次のことを意味します。\n- 答えは、シーンのコードによる計画から得られます。\n- 秘密のシードで保護されています。\n- モデルによって作成または評価されることはありません。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "A *code-made key* means:\n- the answer comes from the code's plan of the scene;\n- it is sealed with a private seed;\n- it is never written or graded by a model.",
+      "targetLang": "ja"
+    },
+    "ba6d0edcb369f171": {
+      "translation": "すべての文章のレンダリングは、カウントされる前に、コードによって計画と比較して検証されます。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "Every prose rendering is checked by code against the plan before it counts.",
+      "targetLang": "ja"
+    },
+    "1bfbcaad766abb66": {
+      "translation": "ステータス：これまでに試したこと",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "Status: what has been tried",
+      "targetLang": "ja"
+    },
+    "cdadb28659285e10": {
+      "translation": "結果は、160件のレンダリングの、開発環境でのカウントです。否定的な結果は、デザインに影響を与えたため、最初に示します。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "Results are counts on development banks of 160 renderings. The negative results come first, because they shaped the\ndesign.",
+      "targetLang": "ja"
+    },
+    "362a27a3e4ed43f7": {
+      "translation": "段階",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "Stage",
+      "targetLang": "ja"
+    },
+    "03647cff61d7bac1": {
+      "translation": "試したこと",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "What was tried",
+      "targetLang": "ja"
+    },
+    "50f138fe447b0176": {
+      "translation": "結果",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "Result",
+      "targetLang": "ja"
+    },
+    "f7766ac9341ef393": {
+      "translation": "採用されたか？",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "Adopted?",
+      "targetLang": "ja"
+    },
+    "713e42840f97fae6": {
+      "translation": "ライターのプロンプトで受け入れられた文の形式のリスト",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "A list of accepted sentence forms in the writer's prompt",
+      "targetLang": "ja"
+    },
+    "7b2b4b8ce24d619d": {
+      "translation": "⟦0⟧件のレンダリングが合格し、ベースラインプロンプトでは⟦1⟧件でした。ライターは、リストに記載されている形式を使用しませんでした。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "⟦0⟧ renderings passed, against ⟦1⟧ for the baseline prompt. The writer didn't use the listed forms.",
+      "targetLang": "ja"
+    },
+    "5631def157855a09": {
+      "translation": "**いいえ**、事前に登録されたルールによる",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "**No**, by the pre-registered rule",
+      "targetLang": "ja"
+    },
+    "ec3b1d12084789cb": {
+      "translation": "コードによって割り当てられた文の形式",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "Sentence shapes assigned by code",
+      "targetLang": "ja"
+    },
+    "ac798a5d76ea7dd5": {
+      "translation": "⟦0⟧件、ベースラインでは⟦1⟧件。開発ゲートに失敗したため、確認のための実行は行われませんでした。プロンプトと出力の予算の合計が、ライターのコンテキスト制限を超えたため、16件のレンダリング（10％）は生成されませんでした。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "⟦0⟧, against ⟦1⟧ for the baseline. The development gate failed, so there was no confirmatory run. 16 renderings per arm (10%) were never generated, because the prompt plus the output budget went over the writer's context limit.",
+      "targetLang": "ja"
+    },
+    "b99c3bb8717b57c9": {
+      "translation": "コードによる移動と書き換えられた会話（改訂版2）",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "Code moves and rewritten speech (revision 2)",
+      "targetLang": "ja"
+    },
+    "73b6aa689cc9f9e8": {
+      "translation": "開発実行では、事前に登録されたすべてのゲートに合格しました。最初のドラフト：⟦0⟧件、最低値は112件。パイプライン後：⟦1⟧件。コードの入れ替えにより、⟦2⟧件が維持されました。会話の書き換えにより、⟦3⟧件が維持されました。コンテキスト制限を超えるレンダリングは0件でした。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "The development run passed all 7 pre-registered gates. First drafts: ⟦0⟧, against a floor of 112; ⟦1⟧ after the pipeline. Code swaps kept ⟦2⟧. Speech rewrites kept ⟦3⟧. 0 renderings went over the context limit.",
+      "targetLang": "ja"
+    },
+    "d6cfdec31aaff2db": {
+      "translation": "開発ゲートに合格",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "Passed its development gates",
+      "targetLang": "ja"
+    },
+    "b8b8a1330859143f": {
+      "translation": "**まだ示されていないこと：**\n- 段階5の、秘密保持された確認実行は行われていません。\n- udlabデータでトレーニングされたモデルはありません。\n- シーン内の登場人物を、どのモデルが理解しているかについては、まだ何もわかりません。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "**Not yet shown:**\n- no sealed confirmatory run of Stage 5;\n- no model trained on udlab data;\n- nothing yet about whether any model understands the people in a scene.",
+      "targetLang": "ja"
+    },
+    "7092ef3ee4efe378": {
+      "translation": "ここに何があるか",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "What is here",
+      "targetLang": "ja"
+    },
+    "d11d3035d46fd53e": {
+      "translation": "- **⟦0⟧**、ジェネレーター。シナリオを計画し、段階5のパイプラインを実行し、各セットのキーを秘密のシードで保護し、書き換えられたセットを再レンダリングして比較することで、検証します。\n- **ショートカットプローブ**。これは、シーンの表面的な特徴が答えを明らかにするかどうかをテストするために、独立して実行されます。\n- **ライタープロンプト**（⟦1⟧）。ライターは、ローカルでOllamaを通じて実行される⟦2⟧です。\n- レンタルGPUでライターを実行するための**Colabランチャー**（⟦3⟧）。\n- **753件のテスト**。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "- **⟦0⟧**, the generator. It plans scenarios, runs the Stage 5 pipeline, seals each set's keys with a private\n  seed, and verifies a written set by re-rendering and diffing it.\n- **Shortcut probes**, run out of fold. They test whether surface features of a scene give the answer away.\n- **The writer prompt** (⟦1⟧). The writer is ⟦2⟧, run locally through Ollama.\n- **A Colab launcher** (⟦3⟧) for running the writer on a rented GPU.\n- **753 tests.**",
+      "targetLang": "ja"
+    },
+    "101f3bbc89a4ec7f": {
+      "translation": "GPUなしで試す",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "Try it without a GPU",
+      "targetLang": "ja"
+    },
+    "2ea32f39b6a5758e": {
+      "translation": "デフォルトのライターはCPUモックであるため、パイプライン全体はどのマシンでも実行できます。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "The default writer is a CPU mock, so the whole pipeline runs on any machine:",
+      "targetLang": "ja"
+    },
+    "a14bcf8fd8dc13b1": {
+      "translation": "- Python 3.15以降。必要に応じて、⟦0⟧がインストールします。\n- 最初のコマンドは、公開部分（⟦1⟧）と、秘密保持されたストア（⟦2⟧）を、Gitによって無視されるフォルダである⟦3⟧の下に書き込みます。\n- ⟦4⟧は、すべてのオプションをリストします。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "- Python 3.15 or newer; ⟦0⟧ installs it if needed.\n- The first command writes a public part (⟦1⟧) and a sealed store (⟦2⟧) under ⟦3⟧,\n  a folder Git ignores.\n- ⟦4⟧ lists every option.",
+      "targetLang": "ja"
+    },
+    "3224d8b56053cbd1": {
+      "translation": "秘密にされるもの",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067883,
+      "source": "What stays private",
+      "targetLang": "ja"
+    },
+    "6dcc3350c7820c30": {
+      "translation": "これらは秘密にされます。なぜなら、これらを公開すると、答えが明らかになってしまうからです。\n- 秘密保持されたテストバンクと、開発用シードバンク。\n- 秘密保持されたすべてのストアと、生成ログ。\n- 計画シードを含む、実行記録。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067884,
+      "source": "These stay private, because publishing them would give the answers away:\n- the sealed test bank and the development seed banks;\n- every sealed store and generation log;\n- the run records with their plan seeds.",
+      "targetLang": "ja"
+    },
+    "d0f02783ff4f5974": {
+      "translation": "これらはすべて、このリポジトリまたはその履歴に含まれていません。テストでは、合成シードと架空のシーンのみが使用されます。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067884,
+      "source": "None of them is in this repository or its history. The tests use synthetic seeds and invented scenes only.",
+      "targetLang": "ja"
+    },
+    "b6fc3ffef8ac557a": {
+      "translation": "セキュリティと信頼",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067884,
+      "source": "Security and trust",
+      "targetLang": "ja"
+    },
+    "626e5172690588be": {
+      "translation": "- **アクセスされるデータ：** 選択した⟦0⟧内のファイルと、ライタープロンプト。⟦1⟧を使用すると、ローカルのOllamaサーバーも呼び出されます。\n- **アクセスされないデータ：** 出力フォルダ外のものは何もありません。テレメトリはなく、ローカルのOllamaサーバーと、実行した場合のColabランチャーへのネットワーク呼び出しのみです。\n- **権限：** 出力フォルダの読み書き以上の権限はありません。GPUモードでは、ビデオメモリが⟦2⟧を超えると、起動したOllamaサーバーを停止します。\n- セキュリティの問題は、[SECURITY.md](⟦3⟧)に記載されている方法で報告してください。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067884,
+      "source": "- **Data touched:** files under the ⟦0⟧ you choose, and the writer prompt. With ⟦1⟧, it also\n  calls a local Ollama server.\n- **Data not touched:** nothing outside the output folder. There is no telemetry, and no network calls except to the\n  local Ollama server and, if you run it, the Colab launcher.\n- **Permissions:** none beyond reading and writing the output folder. In GPU mode, it stops the Ollama server it\n  started if video memory goes over ⟦2⟧.\n- Report security issues as [SECURITY.md](⟦3⟧) describes.",
+      "targetLang": "ja"
+    },
+    "9277fd1746bd1373": {
+      "translation": "ライセンス",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067884,
+      "source": "Licence",
+      "targetLang": "ja"
+    },
+    "d7ff681a21a421f2": {
+      "translation": "コードとリポジトリ自体のテキストは、[MITライセンス](⟦0⟧)の対象です。ロゴの下に引用されている定義は、Wiktionaryからのもので、[CC ⟦1⟧ 4.0](⟦2⟧)のままです。これは、データセットまたはプロンプトで使用されません。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738067884,
+      "source": "The code and the repository's own text are under the [MIT licence](⟦0⟧). The definition quoted under the logo is\nfrom Wiktionary and stays under [CC ⟦1⟧ 4.0](⟦2⟧). It is not used in\nany dataset or prompt.",
+      "targetLang": "ja"
+    },
+    "8829b086f89c5bd8": {
+      "translation": "**原型。** udlab 是一项正在进行中的开放研究。方法和代码都可以在这里查看和运行。到目前为止，它的结果是对其生成场景的能力的检查，用于开发数据集。它没有最终或确定的结果，也没有经过训练的模型，并且没有声称任何人工智能是否能够理解任何人。各个阶段仍然可以改变场景的生成方式。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "> **Prototype.** udlab is open research in progress. The method and the code are here to read and run. Its results\n> so far are checks of how well it generates scenes, on development banks. It has no final or sealed result, no\n> trained model, and makes no claim about whether any AI understands anyone. Stages can still change how scenes are made.",
+      "targetLang": "zh"
+    },
+    "7368c9d5fa30fc54": {
+      "translation": "**理解数据集实验室 (udlab) 构建认知同理心的测试场景：即模型是否能够准确地掌握场景中每个参与者所知道、相信、想要和需要的信息。** 通过代码规划包含多个角色的简短场景，然后由本地的写作模型将其转化为文字。对于场景中的每个问题，答案都来自代码的规划，而不是来自模型。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "**understanding-dataset-lab (udlab) builds test scenarios for cognitive empathy: whether a model can keep an accurate\npicture of what each party in a scene knows, believes, wants and needs.** Short scenes with several people are planned\nby code, then put into prose by a local writer model. The answer to every question about a scene comes from the code's\nplan, never from a model.",
+      "targetLang": "zh"
+    },
+    "24567f145f9cd27b": {
+      "translation": "它是 [reasoning-dataset-lab](⟦0⟧) 的配套项目，后者对谜题和验证项目执行相同的操作。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "It is the companion to [reasoning-dataset-lab](⟦0⟧), which does\nthe same for puzzles and verification items.",
+      "targetLang": "zh"
+    },
+    "bff9407115866e3e": {
+      "translation": "为什么使用代码生成的关键要素的场景？",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "Why scenes with code-made keys",
+      "targetLang": "zh"
+    },
+    "b768424eb081ecd4": {
+      "translation": "在规划好的场景中，正确的答案会根据事件机械地得出：谁移动到哪里，谁能看到，谁说了什么，以及谁听到了。当一个物体被移动时，如果有人当时不在视野范围内，他们仍然会认为该物体位于他们上次看到的位置。由于这些规则都包含在代码中，因此关键要素是计算出来的，而不是判断出来的。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "In a planned scene, the right answer follows mechanically from the events: who moved where, who could see, who said\nwhat, and who heard it. Someone who was out of sight when an object was moved still believes it is where they last\nsaw it. Because those rules are in code, the key is computed, not judged.",
+      "targetLang": "zh"
+    },
+    "62bf4c43f5127ab4": {
+      "translation": "*代码生成的关键要素*意味着：\n- 答案来自代码对场景的规划；\n- 它使用私有种子进行密封；\n- 它绝不会被模型写入或评分。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "A *code-made key* means:\n- the answer comes from the code's plan of the scene;\n- it is sealed with a private seed;\n- it is never written or graded by a model.",
+      "targetLang": "zh"
+    },
+    "01f7b7667eb9039d": {
+      "translation": "在将其计入结果之前，每个文字描述都会通过代码与规划进行检查。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "Every prose rendering is checked by code against the plan before it counts.",
+      "targetLang": "zh"
+    },
+    "2f6eed958bf272b6": {
+      "translation": "状态：已经尝试过的内容",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "Status: what has been tried",
+      "targetLang": "zh"
+    },
+    "c63360036d541292": {
+      "translation": "结果是基于 160 个文字描述的开发数据集的统计数据。负面结果首先呈现，因为它们塑造了设计。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "Results are counts on development banks of 160 renderings. The negative results come first, because they shaped the\ndesign.",
+      "targetLang": "zh"
+    },
+    "83e8b21df9393e6e": {
+      "translation": "阶段",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "Stage",
+      "targetLang": "zh"
+    },
+    "87b5330cca2ab070": {
+      "translation": "尝试过的内容",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "What was tried",
+      "targetLang": "zh"
+    },
+    "0a865c809144c1d0": {
+      "translation": "结果",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "Result",
+      "targetLang": "zh"
+    },
+    "ee552a4566028af1": {
+      "translation": "是否采用？",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "Adopted?",
+      "targetLang": "zh"
+    },
+    "4381efd90f11aa66": {
+      "translation": "写作模型提示中接受的句子形式列表",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "A list of accepted sentence forms in the writer's prompt",
+      "targetLang": "zh"
+    },
+    "af74f5f5f2815305": {
+      "translation": "⟦0⟧ 个文字描述通过了测试，而基准提示的通过率为 ⟦1⟧。写作模型没有使用列出的形式。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "⟦0⟧ renderings passed, against ⟦1⟧ for the baseline prompt. The writer didn't use the listed forms.",
+      "targetLang": "zh"
+    },
+    "692c52601b824052": {
+      "translation": "**否**，根据预先注册的规则",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "**No**, by the pre-registered rule",
+      "targetLang": "zh"
+    },
+    "c7744ce4f8963802": {
+      "translation": "由代码分配的句子形式",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "Sentence shapes assigned by code",
+      "targetLang": "zh"
+    },
+    "1bf3991624cc1bae": {
+      "translation": "⟦0⟧，而基准提示的通过率为 ⟦1⟧。开发测试失败，因此没有进行确认测试。由于提示加上输出预算超过了写作模型的上下文限制，因此从未生成 16 个文字描述（10%）。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "⟦0⟧, against ⟦1⟧ for the baseline. The development gate failed, so there was no confirmatory run. 16 renderings per arm (10%) were never generated, because the prompt plus the output budget went over the writer's context limit.",
+      "targetLang": "zh"
+    },
+    "093e471a31481ab6": {
+      "translation": "代码移动和重写对话（修订版 2）",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "Code moves and rewritten speech (revision 2)",
+      "targetLang": "zh"
+    },
+    "5ef236887410439f": {
+      "translation": "开发测试通过了所有 7 个预先注册的测试。初稿：⟦0⟧，低于 112 的最低值；流水线之后为 ⟦1⟧。代码交换保持 ⟦2⟧。对话重写保持 ⟦3⟧。没有文字描述超过上下文限制。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "The development run passed all 7 pre-registered gates. First drafts: ⟦0⟧, against a floor of 112; ⟦1⟧ after the pipeline. Code swaps kept ⟦2⟧. Speech rewrites kept ⟦3⟧. 0 renderings went over the context limit.",
+      "targetLang": "zh"
+    },
+    "382967b89ccd6e1d": {
+      "translation": "通过了其开发测试",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088620,
+      "source": "Passed its development gates",
+      "targetLang": "zh"
+    },
+    "00a4e387c3d85b6e": {
+      "translation": "**尚未展示：**\n- 没有对第 5 阶段进行密封的确认测试；\n- 没有使用 udlab 数据训练的模型；\n- 尚未研究任何模型是否能够理解场景中的人物。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088621,
+      "source": "**Not yet shown:**\n- no sealed confirmatory run of Stage 5;\n- no model trained on udlab data;\n- nothing yet about whether any model understands the people in a scene.",
+      "targetLang": "zh"
+    },
+    "8bd07f6f02771a10": {
+      "translation": "这里有什么",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088621,
+      "source": "What is here",
+      "targetLang": "zh"
+    },
+    "2484795c98b4e44f": {
+      "translation": "- **⟦0⟧**，生成器。它规划场景，运行第 5 阶段的流水线，使用私有种子密封每个数据集的关键要素，并通过重新渲染和比较来验证书面数据集。\n- **快捷测试**，在独立环境中运行。它们测试场景的表面特征是否会泄露答案。\n- **写作模型提示**（⟦1⟧）。写作模型是 ⟦2⟧，通过 Ollama 在本地运行。\n- **Colab 启动器**（⟦3⟧），用于在租用的 GPU 上运行写作模型。\n- **753 个测试。**",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088621,
+      "source": "- **⟦0⟧**, the generator. It plans scenarios, runs the Stage 5 pipeline, seals each set's keys with a private\n  seed, and verifies a written set by re-rendering and diffing it.\n- **Shortcut probes**, run out of fold. They test whether surface features of a scene give the answer away.\n- **The writer prompt** (⟦1⟧). The writer is ⟦2⟧, run locally through Ollama.\n- **A Colab launcher** (⟦3⟧) for running the writer on a rented GPU.\n- **753 tests.**",
+      "targetLang": "zh"
+    },
+    "89c80a665af54403": {
+      "translation": "尝试在没有 GPU 的情况下运行",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088621,
+      "source": "Try it without a GPU",
+      "targetLang": "zh"
+    },
+    "987d96fc80913a96": {
+      "translation": "默认写作模型是一个 CPU 模拟器，因此整个流水线可以在任何机器上运行：",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088621,
+      "source": "The default writer is a CPU mock, so the whole pipeline runs on any machine:",
+      "targetLang": "zh"
+    },
+    "084ab296f5bd2eca": {
+      "translation": "- Python 3.15 或更高版本；如果需要，⟦0⟧ 会安装它。\n- 第一个命令会在 ⟦3⟧ 下写入公共部分（⟦1⟧）和密封存储（⟦2⟧），该文件夹会被 Git 忽略。\n- ⟦4⟧ 列出了所有选项。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088621,
+      "source": "- Python 3.15 or newer; ⟦0⟧ installs it if needed.\n- The first command writes a public part (⟦1⟧) and a sealed store (⟦2⟧) under ⟦3⟧,\n  a folder Git ignores.\n- ⟦4⟧ lists every option.",
+      "targetLang": "zh"
+    },
+    "ed26a274455d659f": {
+      "translation": "哪些内容保持私有",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088621,
+      "source": "What stays private",
+      "targetLang": "zh"
+    },
+    "ceb3789918ed452d": {
+      "translation": "以下内容保持私有，因为发布它们会泄露答案：\n- 密封的测试数据集和开发种子数据集；\n- 每一个密封存储和生成日志；\n- 包含其计划种子的运行记录。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088621,
+      "source": "These stay private, because publishing them would give the answers away:\n- the sealed test bank and the development seed banks;\n- every sealed store and generation log;\n- the run records with their plan seeds.",
+      "targetLang": "zh"
+    },
+    "267eb6282f863f87": {
+      "translation": "这些内容都不在此仓库或其历史记录中。测试仅使用合成种子和虚构的场景。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088621,
+      "source": "None of them is in this repository or its history. The tests use synthetic seeds and invented scenes only.",
+      "targetLang": "zh"
+    },
+    "abca28b9a23aad06": {
+      "translation": "安全性和信任",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088621,
+      "source": "Security and trust",
+      "targetLang": "zh"
+    },
+    "a3cf58b62e52fc96": {
+      "translation": "- **访问的数据：** 您选择的 ⟦0⟧ 下的文件以及写作模型提示。使用 ⟦1⟧ 时，它还会调用本地 Ollama 服务器。\n- **未访问的数据：** 输出文件夹之外的任何内容。没有遥测数据，也没有除了到本地 Ollama 服务器以及（如果运行）Colab 启动器的网络调用。\n- **权限：** 除了读取和写入输出文件夹之外，没有其他权限。在 GPU 模式下，如果视频内存超过 ⟦2⟧，它会停止启动的 Ollama 服务器。\n- 按照 [SECURITY.md](⟦3⟧) 中描述的方式报告安全问题。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088621,
+      "source": "- **Data touched:** files under the ⟦0⟧ you choose, and the writer prompt. With ⟦1⟧, it also\n  calls a local Ollama server.\n- **Data not touched:** nothing outside the output folder. There is no telemetry, and no network calls except to the\n  local Ollama server and, if you run it, the Colab launcher.\n- **Permissions:** none beyond reading and writing the output folder. In GPU mode, it stops the Ollama server it\n  started if video memory goes over ⟦2⟧.\n- Report security issues as [SECURITY.md](⟦3⟧) describes.",
+      "targetLang": "zh"
+    },
+    "0dd5b13f2e1e045b": {
+      "translation": "许可证",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088622,
+      "source": "Licence",
+      "targetLang": "zh"
+    },
+    "297ddc10fedf40f5": {
+      "translation": "代码和仓库自身的文本采用 [MIT 许可证](⟦0⟧)。在徽标下引用的定义来自 Wiktionary，并采用 [CC ⟦1⟧ 4.0](⟦2⟧)。它不用于任何数据集或提示。",
+      "model": "translategemma:27b",
+      "timestamp": 1793738088622,
+      "source": "The code and the repository's own text are under the [MIT licence](⟦0⟧). The definition quoted under the logo is\nfrom Wiktionary and stays under [CC ⟦1⟧ 4.0](⟦2⟧). It is not used in\nany dataset or prompt.",
+      "targetLang": "zh"
+    },
+    "60f1656e0027a66a": {
+      "translation": "> **Prototipo.** udlab es una investigación abierta en curso. El método y el código están disponibles para leer y ejecutar. Sus resultados\n> hasta ahora son comprobaciones de qué tan bien genera escenas, en bancos de desarrollo. No tiene un resultado final o definitivo, ni\n> un modelo entrenado, y no hace ninguna afirmación sobre si alguna IA comprende a alguien. Las etapas aún pueden cambiar la forma en que se crean las escenas.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "> **Prototype.** udlab is open research in progress. The method and the code are here to read and run. Its results\n> so far are checks of how well it generates scenes, on development banks. It has no final or sealed result, no\n> trained model, and makes no claim about whether any AI understands anyone. Stages can still change how scenes are made.",
+      "targetLang": "es"
+    },
+    "b784538e82bb0c74": {
+      "translation": "**understanding-dataset-lab (udlab) crea escenarios de prueba para la empatía cognitiva: si un modelo puede mantener una\nimagen precisa de lo que cada parte en una escena sabe, cree, desea y necesita.** Se planifican escenas cortas con varias personas\nmediante código, y luego se redactan en prosa por un modelo de escritor local. La respuesta a cada pregunta sobre una escena proviene del plan del código, nunca de un modelo.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "**understanding-dataset-lab (udlab) builds test scenarios for cognitive empathy: whether a model can keep an accurate\npicture of what each party in a scene knows, believes, wants and needs.** Short scenes with several people are planned\nby code, then put into prose by a local writer model. The answer to every question about a scene comes from the code's\nplan, never from a model.",
+      "targetLang": "es"
+    },
+    "c4567b32d13c4cf2": {
+      "translation": "Es el complemento de [reasoning-dataset-lab](⟦0⟧), que hace\nlo mismo para los rompecabezas y los elementos de verificación.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "It is the companion to [reasoning-dataset-lab](⟦0⟧), which does\nthe same for puzzles and verification items.",
+      "targetLang": "es"
+    },
+    "a5f30540c9046c6b": {
+      "translation": "¿Por qué escenas con claves creadas con código?",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "Why scenes with code-made keys",
+      "targetLang": "es"
+    },
+    "a92e0d675468eec3": {
+      "translation": "En una escena planificada, la respuesta correcta se deduce mecánicamente de los eventos: quién se movió a dónde, quién podía ver, quién dijo\nqué y quién lo escuchó. Alguien que no estaba a la vista cuando se movió un objeto todavía cree que está donde lo vio por última vez. Debido a que esas reglas están en el código, la clave se calcula, no se juzga.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "In a planned scene, the right answer follows mechanically from the events: who moved where, who could see, who said\nwhat, and who heard it. Someone who was out of sight when an object was moved still believes it is where they last\nsaw it. Because those rules are in code, the key is computed, not judged.",
+      "targetLang": "es"
+    },
+    "f73824b45e9b684d": {
+      "translation": "Una *clave creada con código* significa:\n- la respuesta proviene del plan del código de la escena;\n- está sellada con una semilla privada;\n- nunca es escrita o calificada por un modelo.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "A *code-made key* means:\n- the answer comes from the code's plan of the scene;\n- it is sealed with a private seed;\n- it is never written or graded by a model.",
+      "targetLang": "es"
+    },
+    "b22f05debf0202d6": {
+      "translation": "Cada versión en prosa se verifica mediante código con el plan antes de que se tenga en cuenta.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "Every prose rendering is checked by code against the plan before it counts.",
+      "targetLang": "es"
+    },
+    "8769bc71e1fcf0fd": {
+      "translation": "Estado: qué se ha probado",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "Status: what has been tried",
+      "targetLang": "es"
+    },
+    "10aa138b41994001": {
+      "translation": "Los resultados son conteos en bancos de desarrollo de 160 versiones. Los resultados negativos se presentan primero, porque dieron forma al\ndiseño.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "Results are counts on development banks of 160 renderings. The negative results come first, because they shaped the\ndesign.",
+      "targetLang": "es"
+    },
+    "6b99a87ba6005ea0": {
+      "translation": "Etapa",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "Stage",
+      "targetLang": "es"
+    },
+    "27424d36af57f3d7": {
+      "translation": "Qué se probó",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "What was tried",
+      "targetLang": "es"
+    },
+    "cece66d543a2e7c6": {
+      "translation": "Resultado",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "Result",
+      "targetLang": "es"
+    },
+    "dcab2671f8938699": {
+      "translation": "¿Adoptado?",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "Adopted?",
+      "targetLang": "es"
+    },
+    "2f115ca723154672": {
+      "translation": "Una lista de las formas de oración aceptadas en el mensaje del escritor",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "A list of accepted sentence forms in the writer's prompt",
+      "targetLang": "es"
+    },
+    "c15779adabf1ab37": {
+      "translation": "⟦0⟧ versiones pasaron, en comparación con ⟦1⟧ para el mensaje de referencia. El escritor no utilizó las formas enumeradas.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "⟦0⟧ renderings passed, against ⟦1⟧ for the baseline prompt. The writer didn't use the listed forms.",
+      "targetLang": "es"
+    },
+    "a23f85d1624dd08e": {
+      "translation": "**No**, según la regla preestablecida",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "**No**, by the pre-registered rule",
+      "targetLang": "es"
+    },
+    "c4071ecb1b21de69": {
+      "translation": "Formas de oración asignadas por código",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "Sentence shapes assigned by code",
+      "targetLang": "es"
+    },
+    "7744a507c6b77167": {
+      "translation": "⟦0⟧, en comparación con ⟦1⟧ para el mensaje de referencia. La puerta de desarrollo falló, por lo que no hubo una ejecución de confirmación. 16 versiones por rama (10%) nunca se generaron, porque el mensaje más el presupuesto de salida excedieron el límite de contexto del escritor.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116340,
+      "source": "⟦0⟧, against ⟦1⟧ for the baseline. The development gate failed, so there was no confirmatory run. 16 renderings per arm (10%) were never generated, because the prompt plus the output budget went over the writer's context limit.",
+      "targetLang": "es"
+    },
+    "b80b22ee12aa66d1": {
+      "translation": "Movimientos de código y discurso reescrito (revisión 2)",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116341,
+      "source": "Code moves and rewritten speech (revision 2)",
+      "targetLang": "es"
+    },
+    "9913e3823b9d718c": {
+      "translation": "La ejecución de desarrollo pasó todas las 7 puertas preestablecidas. Primeros borradores: ⟦0⟧, en comparación con un mínimo de 112; ⟦1⟧ después de la canalización. Los intercambios de código mantuvieron ⟦2⟧. Las reescrituras del discurso mantuvieron ⟦3⟧. 0 versiones excedieron el límite de contexto.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116341,
+      "source": "The development run passed all 7 pre-registered gates. First drafts: ⟦0⟧, against a floor of 112; ⟦1⟧ after the pipeline. Code swaps kept ⟦2⟧. Speech rewrites kept ⟦3⟧. 0 renderings went over the context limit.",
+      "targetLang": "es"
+    },
+    "bdb62c15838a30a8": {
+      "translation": "Pasó sus puertas de desarrollo",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116341,
+      "source": "Passed its development gates",
+      "targetLang": "es"
+    },
+    "11fd857eaa6f470e": {
+      "translation": "**Aún no se ha demostrado:**\n- no hay una ejecución de confirmación sellada de la etapa 5;\n- no hay un modelo entrenado con datos de udlab;\n- aún no hay nada sobre si algún modelo comprende a las personas en una escena.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116341,
+      "source": "**Not yet shown:**\n- no sealed confirmatory run of Stage 5;\n- no model trained on udlab data;\n- nothing yet about whether any model understands the people in a scene.",
+      "targetLang": "es"
+    },
+    "3b889ac541b61cf7": {
+      "translation": "Qué hay aquí",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116341,
+      "source": "What is here",
+      "targetLang": "es"
+    },
+    "ecceca604a7aa456": {
+      "translation": "- **⟦0⟧**, el generador. Planifica escenarios, ejecuta la canalización de la etapa 5, sella las claves de cada conjunto con una semilla privada\ny verifica un conjunto escrito volviéndolo a renderizar y comparándolo.\n- **Sondas de acceso directo**, ejecutadas fuera del bucle. Prueban si las características superficiales de una escena revelan la respuesta.\n- **El mensaje del escritor** (⟦1⟧). El escritor es ⟦2⟧, que se ejecuta localmente a través de Ollama.\n- **Un lanzador de Colab** (⟦3⟧) para ejecutar el escritor en una GPU alquilada.\n- **753 pruebas.**",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116341,
+      "source": "- **⟦0⟧**, the generator. It plans scenarios, runs the Stage 5 pipeline, seals each set's keys with a private\n  seed, and verifies a written set by re-rendering and diffing it.\n- **Shortcut probes**, run out of fold. They test whether surface features of a scene give the answer away.\n- **The writer prompt** (⟦1⟧). The writer is ⟦2⟧, run locally through Ollama.\n- **A Colab launcher** (⟦3⟧) for running the writer on a rented GPU.\n- **753 tests.**",
+      "targetLang": "es"
+    },
+    "043a7b52879f84ca": {
+      "translation": "Pruébalo sin una GPU",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116341,
+      "source": "Try it without a GPU",
+      "targetLang": "es"
+    },
+    "18c79296b0102ee1": {
+      "translation": "El escritor predeterminado es un simulacro de CPU, por lo que toda la canalización se ejecuta en cualquier máquina:",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116341,
+      "source": "The default writer is a CPU mock, so the whole pipeline runs on any machine:",
+      "targetLang": "es"
+    },
+    "b9c7d4cbb93eca35": {
+      "translation": "- Python 3.15 o posterior; ⟦0⟧ lo instala si es necesario.\n- El primer comando escribe una parte pública (⟦1⟧) y un almacén sellado (⟦2⟧) en ⟦3⟧,\nuna carpeta que Git ignora.\n- ⟦4⟧ enumera todas las opciones.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116341,
+      "source": "- Python 3.15 or newer; ⟦0⟧ installs it if needed.\n- The first command writes a public part (⟦1⟧) and a sealed store (⟦2⟧) under ⟦3⟧,\n  a folder Git ignores.\n- ⟦4⟧ lists every option.",
+      "targetLang": "es"
+    },
+    "22a75c8ad6329b1c": {
+      "translation": "Qué permanece privado",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116355,
+      "source": "What stays private",
+      "targetLang": "es"
+    },
+    "c7061d3cd57b57c1": {
+      "translation": "Estos permanecen privados, porque publicarlos revelaría las respuestas:\n- el banco de pruebas sellado y los bancos de semillas de desarrollo;\n- cada almacén sellado y registro de generación;\n- los registros de ejecución con sus semillas de plan.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116355,
+      "source": "These stay private, because publishing them would give the answers away:\n- the sealed test bank and the development seed banks;\n- every sealed store and generation log;\n- the run records with their plan seeds.",
+      "targetLang": "es"
+    },
+    "0e8a7e70d45838df": {
+      "translation": "Ninguno de ellos está en este repositorio ni en su historial. Las pruebas utilizan solo semillas sintéticas y escenas inventadas.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116355,
+      "source": "None of them is in this repository or its history. The tests use synthetic seeds and invented scenes only.",
+      "targetLang": "es"
+    },
+    "65abafa10dafcbdd": {
+      "translation": "Seguridad y confianza",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116355,
+      "source": "Security and trust",
+      "targetLang": "es"
+    },
+    "80c8ceda775175d5": {
+      "translation": "- **Datos accedidos:** archivos en el ⟦0⟧ que elijas y el mensaje del escritor. Con ⟦1⟧, también\nllama a un servidor local de Ollama.\n- **Datos no accedidos:** nada fuera de la carpeta de salida. No hay telemetría y no hay llamadas de red, excepto al\nservidor local de Ollama y, si lo ejecutas, al lanzador de Colab.\n- **Permisos:** ninguno más allá de la lectura y la escritura de la carpeta de salida. En el modo GPU, detiene el servidor de Ollama que\ninició si la memoria de video supera ⟦2⟧.\n- Informa sobre los problemas de seguridad según lo que describe [SECURITY.md](⟦3⟧).",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116355,
+      "source": "- **Data touched:** files under the ⟦0⟧ you choose, and the writer prompt. With ⟦1⟧, it also\n  calls a local Ollama server.\n- **Data not touched:** nothing outside the output folder. There is no telemetry, and no network calls except to the\n  local Ollama server and, if you run it, the Colab launcher.\n- **Permissions:** none beyond reading and writing the output folder. In GPU mode, it stops the Ollama server it\n  started if video memory goes over ⟦2⟧.\n- Report security issues as [SECURITY.md](⟦3⟧) describes.",
+      "targetLang": "es"
+    },
+    "718511716dd353af": {
+      "translation": "Licencia",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116355,
+      "source": "Licence",
+      "targetLang": "es"
+    },
+    "5812ab2360032134": {
+      "translation": "El código y el texto propio del repositorio están bajo la [licencia MIT](⟦0⟧). La definición citada debajo del logotipo es\nde Wiktionary y permanece bajo [CC ⟦1⟧ 4.0](⟦2⟧). No se utiliza en\nningún conjunto de datos ni mensaje.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738116355,
+      "source": "The code and the repository's own text are under the [MIT licence](⟦0⟧). The definition quoted under the logo is\nfrom Wiktionary and stays under [CC ⟦1⟧ 4.0](⟦2⟧). It is not used in\nany dataset or prompt.",
+      "targetLang": "es"
+    },
+    "30c643e3f8730525": {
+      "translation": "> **Prototype.** udlab est un projet de recherche en cours et ouvert. La méthode et le code sont disponibles pour être consultés et exécutés. Jusqu’à présent, ses résultats consistent en des vérifications de la qualité de la génération de scènes, sur des bases de données de développement. Il n’y a pas de résultat final ou définitif, pas de modèle entraîné, et il n’est fait aucune affirmation quant à savoir si une IA est capable de comprendre qui que ce soit. Les étapes peuvent encore modifier la manière dont les scènes sont créées.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143024,
+      "source": "> **Prototype.** udlab is open research in progress. The method and the code are here to read and run. Its results\n> so far are checks of how well it generates scenes, on development banks. It has no final or sealed result, no\n> trained model, and makes no claim about whether any AI understands anyone. Stages can still change how scenes are made.",
+      "targetLang": "fr"
+    },
+    "95717a068ba4cf00": {
+      "translation": "**understanding-dataset-lab (udlab) crée des scénarios de test pour l’empathie cognitive : déterminer si un modèle est capable de conserver une image précise de ce que chaque partie prenante d’une scène sait, croit, veut et a besoin.** Des scènes courtes avec plusieurs personnes sont planifiées par le biais d’un code, puis transformées en prose par un modèle d’écriture local. La réponse à chaque question concernant une scène provient du plan du code, et non d’un modèle.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143024,
+      "source": "**understanding-dataset-lab (udlab) builds test scenarios for cognitive empathy: whether a model can keep an accurate\npicture of what each party in a scene knows, believes, wants and needs.** Short scenes with several people are planned\nby code, then put into prose by a local writer model. The answer to every question about a scene comes from the code's\nplan, never from a model.",
+      "targetLang": "fr"
+    },
+    "d00303aa985c4b5f": {
+      "translation": "Il s’agit du complément de [reasoning-dataset-lab](⟦0⟧), qui fait la même chose pour les énigmes et les éléments de vérification.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143024,
+      "source": "It is the companion to [reasoning-dataset-lab](⟦0⟧), which does\nthe same for puzzles and verification items.",
+      "targetLang": "fr"
+    },
+    "1be4f4b08dfc4231": {
+      "translation": "Pourquoi des scènes avec des éléments définis par un code ?",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143024,
+      "source": "Why scenes with code-made keys",
+      "targetLang": "fr"
+    },
+    "9ce33d07f955e1d1": {
+      "translation": "Dans une scène planifiée, la réponse correcte découle mécaniquement des événements : qui s’est déplacé où, qui pouvait voir, qui a dit quoi et qui l’a entendu. Une personne qui n’était pas visible lorsqu’un objet a été déplacé croit toujours qu’il se trouve à l’endroit où elle l’a vu pour la dernière fois. Étant donné que ces règles sont intégrées dans le code, la clé est calculée, et non jugée.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143024,
+      "source": "In a planned scene, the right answer follows mechanically from the events: who moved where, who could see, who said\nwhat, and who heard it. Someone who was out of sight when an object was moved still believes it is where they last\nsaw it. Because those rules are in code, the key is computed, not judged.",
+      "targetLang": "fr"
+    },
+    "5506ae1b369cbcd1": {
+      "translation": "Une *clé définie par un code* signifie :\n- la réponse provient du plan de la scène établi par le code ;\n- elle est scellée avec une clé privée ;\n- elle n’est jamais écrite ou évaluée par un modèle.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143024,
+      "source": "A *code-made key* means:\n- the answer comes from the code's plan of the scene;\n- it is sealed with a private seed;\n- it is never written or graded by a model.",
+      "targetLang": "fr"
+    },
+    "8aa2c23cdffc0f78": {
+      "translation": "Chaque version en prose est vérifiée par le code par rapport au plan avant d’être prise en compte.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143024,
+      "source": "Every prose rendering is checked by code against the plan before it counts.",
+      "targetLang": "fr"
+    },
+    "0812295851171857": {
+      "translation": "État : ce qui a été essayé",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "Status: what has been tried",
+      "targetLang": "fr"
+    },
+    "25983ef6b0edbc52": {
+      "translation": "Les résultats sont des comptages effectués sur des bases de données de développement, portant sur 160 versions. Les résultats négatifs sont présentés en premier, car ils ont façonné la conception.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "Results are counts on development banks of 160 renderings. The negative results come first, because they shaped the\ndesign.",
+      "targetLang": "fr"
+    },
+    "f7e87762969ea75b": {
+      "translation": "Étape",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "Stage",
+      "targetLang": "fr"
+    },
+    "1c3733e1cbe394ea": {
+      "translation": "Ce qui a été essayé",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "What was tried",
+      "targetLang": "fr"
+    },
+    "cca40447927916e8": {
+      "translation": "Résultat",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "Result",
+      "targetLang": "fr"
+    },
+    "215e1dc55c9cf56b": {
+      "translation": "Adopté ?",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "Adopted?",
+      "targetLang": "fr"
+    },
+    "6307e4bbeb57f63e": {
+      "translation": "Une liste des formes de phrases acceptées dans l’invite de l’écrivain",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "A list of accepted sentence forms in the writer's prompt",
+      "targetLang": "fr"
+    },
+    "15f39dc103975d62": {
+      "translation": "⟦0⟧ versions ont réussi, contre ⟦1⟧ pour l’invite de référence. L’écrivain n’a pas utilisé les formes répertoriées.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "⟦0⟧ renderings passed, against ⟦1⟧ for the baseline prompt. The writer didn't use the listed forms.",
+      "targetLang": "fr"
+    },
+    "cb8ef3921ad086a6": {
+      "translation": "**Non**, en vertu de la règle préenregistrée",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "**No**, by the pre-registered rule",
+      "targetLang": "fr"
+    },
+    "1bf1119c358e8d14": {
+      "translation": "Formes de phrases attribuées par le code",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "Sentence shapes assigned by code",
+      "targetLang": "fr"
+    },
+    "dc7a277dbae1b2d7": {
+      "translation": "⟦0⟧, contre ⟦1⟧ pour la référence. La validation de développement a échoué, il n’y a donc pas eu d’exécution de confirmation. 16 versions par branche (10 %) n’ont jamais été générées, car l’invite et le budget de sortie ont dépassé la limite de contexte de l’écrivain.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "⟦0⟧, against ⟦1⟧ for the baseline. The development gate failed, so there was no confirmatory run. 16 renderings per arm (10%) were never generated, because the prompt plus the output budget went over the writer's context limit.",
+      "targetLang": "fr"
+    },
+    "c2165815d11722f0": {
+      "translation": "Déplacements du code et discours réécrits (révision 2)",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "Code moves and rewritten speech (revision 2)",
+      "targetLang": "fr"
+    },
+    "dc1860465f3b53f6": {
+      "translation": "L’exécution de développement a réussi toutes les 7 validations préenregistrées. Premières ébauches : ⟦0⟧, contre un minimum de 112 ; ⟦1⟧ après le pipeline. Les échanges de code ont permis de conserver ⟦2⟧. Les réécritures de discours ont permis de conserver ⟦3⟧. Aucune version n’a dépassé la limite de contexte.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "The development run passed all 7 pre-registered gates. First drafts: ⟦0⟧, against a floor of 112; ⟦1⟧ after the pipeline. Code swaps kept ⟦2⟧. Speech rewrites kept ⟦3⟧. 0 renderings went over the context limit.",
+      "targetLang": "fr"
+    },
+    "aaa32ee31ae15155": {
+      "translation": "A réussi ses validations de développement",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "Passed its development gates",
+      "targetLang": "fr"
+    },
+    "daf23298d6de2d72": {
+      "translation": "**Pas encore démontré :**\n- aucune exécution de confirmation scellée de l’étape 5 ;\n- aucun modèle entraîné sur les données udlab ;\n- rien pour l’instant sur le fait qu’un modèle comprenne les personnes dans une scène.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "**Not yet shown:**\n- no sealed confirmatory run of Stage 5;\n- no model trained on udlab data;\n- nothing yet about whether any model understands the people in a scene.",
+      "targetLang": "fr"
+    },
+    "61ac20db12c9bc14": {
+      "translation": "Ce qui est proposé ici",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "What is here",
+      "targetLang": "fr"
+    },
+    "7bf0b1c6a374e80d": {
+      "translation": "- **⟦0⟧**, le générateur. Il planifie les scénarios, exécute le pipeline de l’étape 5, scelle les clés de chaque ensemble avec une clé privée et vérifie un ensemble écrit en le rendant à nouveau et en comparant les deux versions.\n- **Sondes de raccourci**, exécutées en dehors du processus principal. Elles testent si les caractéristiques superficielles d’une scène révèlent la réponse.\n- **L’invite de l’écrivain** (⟦1⟧). L’écrivain est ⟦2⟧, exécuté localement via Ollama.\n- **Un lanceur Colab** (⟦3⟧) pour exécuter l’écrivain sur un GPU loué.\n- **753 tests.**",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "- **⟦0⟧**, the generator. It plans scenarios, runs the Stage 5 pipeline, seals each set's keys with a private\n  seed, and verifies a written set by re-rendering and diffing it.\n- **Shortcut probes**, run out of fold. They test whether surface features of a scene give the answer away.\n- **The writer prompt** (⟦1⟧). The writer is ⟦2⟧, run locally through Ollama.\n- **A Colab launcher** (⟦3⟧) for running the writer on a rented GPU.\n- **753 tests.**",
+      "targetLang": "fr"
+    },
+    "7e0d28f3ed9c9a6b": {
+      "translation": "Essayez-le sans GPU",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "Try it without a GPU",
+      "targetLang": "fr"
+    },
+    "8ded4366ce3c9308": {
+      "translation": "L’écrivain par défaut est un modèle CPU, de sorte que tout le pipeline s’exécute sur n’importe quelle machine :",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143025,
+      "source": "The default writer is a CPU mock, so the whole pipeline runs on any machine:",
+      "targetLang": "fr"
+    },
+    "6cdb87e7ad40abb1": {
+      "translation": "- Python 3.15 ou version ultérieure ; ⟦0⟧ l’installe si nécessaire.\n- La première commande écrit une partie publique (⟦1⟧) et un stockage scellé (⟦2⟧) dans ⟦3⟧, un dossier que Git ignore.\n- ⟦4⟧ répertorie toutes les options.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143026,
+      "source": "- Python 3.15 or newer; ⟦0⟧ installs it if needed.\n- The first command writes a public part (⟦1⟧) and a sealed store (⟦2⟧) under ⟦3⟧,\n  a folder Git ignores.\n- ⟦4⟧ lists every option.",
+      "targetLang": "fr"
+    },
+    "1bbc8ae808a9fc2c": {
+      "translation": "Ce qui reste privé",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143026,
+      "source": "What stays private",
+      "targetLang": "fr"
+    },
+    "ccf76cd78f217487": {
+      "translation": "Les éléments suivants restent privés, car leur publication révélerait les réponses :\n- la base de données de test scellée et les bases de données de clés de développement ;\n- tous les stockages scellés et les journaux de génération ;\n- les enregistrements d’exécution avec leurs clés de plan.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143026,
+      "source": "These stay private, because publishing them would give the answers away:\n- the sealed test bank and the development seed banks;\n- every sealed store and generation log;\n- the run records with their plan seeds.",
+      "targetLang": "fr"
+    },
+    "7e00ebb3257ab3e8": {
+      "translation": "Aucun de ces éléments ne se trouve dans ce dépôt ou dans son historique. Les tests utilisent uniquement des clés synthétiques et des scènes inventées.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143026,
+      "source": "None of them is in this repository or its history. The tests use synthetic seeds and invented scenes only.",
+      "targetLang": "fr"
+    },
+    "b64df95fe3ecc1b5": {
+      "translation": "Sécurité et confiance",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143026,
+      "source": "Security and trust",
+      "targetLang": "fr"
+    },
+    "1329bab611c473e3": {
+      "translation": "- **Données concernées :** fichiers dans le dossier ⟦0⟧ que vous choisissez, et l’invite de l’écrivain. Avec ⟦1⟧, il appelle également un serveur Ollama local.\n- **Données non concernées :** rien en dehors du dossier de sortie. Il n’y a pas de télémétrie et aucune communication réseau, à l’exception du serveur Ollama local et, si vous l’exécutez, du lanceur Colab.\n- **Autorisations :** aucune autorisation au-delà de la lecture et de l’écriture dans le dossier de sortie. En mode GPU, il arrête le serveur Ollama qu’il a démarré si la mémoire vidéo dépasse ⟦2⟧.\n- Signalez les problèmes de sécurité comme le décrit [SECURITY.md](⟦3⟧).",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143026,
+      "source": "- **Data touched:** files under the ⟦0⟧ you choose, and the writer prompt. With ⟦1⟧, it also\n  calls a local Ollama server.\n- **Data not touched:** nothing outside the output folder. There is no telemetry, and no network calls except to the\n  local Ollama server and, if you run it, the Colab launcher.\n- **Permissions:** none beyond reading and writing the output folder. In GPU mode, it stops the Ollama server it\n  started if video memory goes over ⟦2⟧.\n- Report security issues as [SECURITY.md](⟦3⟧) describes.",
+      "targetLang": "fr"
+    },
+    "0404bfbef888607a": {
+      "translation": "Licence",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143026,
+      "source": "Licence",
+      "targetLang": "fr"
+    },
+    "8d561bd194230a19": {
+      "translation": "Le code et le texte du dépôt sont soumis à la [licence MIT](⟦0⟧). La définition citée sous le logo provient de Wiktionnaire et reste sous [CC ⟦1⟧ 4.0](⟦2⟧). Elle n’est pas utilisée dans un ensemble de données ou une invite.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738143026,
+      "source": "The code and the repository's own text are under the [MIT licence](⟦0⟧). The definition quoted under the logo is\nfrom Wiktionary and stays under [CC ⟦1⟧ 4.0](⟦2⟧). It is not used in\nany dataset or prompt.",
+      "targetLang": "fr"
+    },
+    "bb314948926d8188": {
+      "translation": "**प्रोटोटाइप।** udlab एक चल रही खुली अनुसंधान परियोजना है। विधि और कोड यहां पढ़ने और चलाने के लिए उपलब्ध हैं। अब तक के परिणाम यह जांचते हैं कि यह दृश्यों को कितनी अच्छी तरह से उत्पन्न करता है, विकास बैंकों पर। इसमें कोई अंतिम या निश्चित परिणाम नहीं है, कोई प्रशिक्षित मॉडल नहीं है, और यह दावा नहीं करता है कि कोई भी एआई किसी को समझता है या नहीं। चरण अभी भी बदल सकते हैं, जिससे दृश्यों के निर्माण का तरीका प्रभावित हो सकता है।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168555,
+      "source": "> **Prototype.** udlab is open research in progress. The method and the code are here to read and run. Its results\n> so far are checks of how well it generates scenes, on development banks. It has no final or sealed result, no\n> trained model, and makes no claim about whether any AI understands anyone. Stages can still change how scenes are made.",
+      "targetLang": "hi"
+    },
+    "24c6f9bebda9ab68": {
+      "translation": "**समझ-डेटासेट-लैब (udlab) संज्ञानात्मक सहानुभूति के लिए परीक्षण परिदृश्य बनाता है: क्या कोई मॉडल प्रत्येक पात्र के ज्ञान, विश्वास, इच्छा और आवश्यकताओं का सटीक विवरण रख सकता है।** कई लोगों वाले छोटे दृश्यों की योजना कोड द्वारा बनाई जाती है, फिर एक स्थानीय लेखक मॉडल द्वारा उन्हें गद्य में लिखा जाता है। किसी दृश्य के बारे में हर प्रश्न का उत्तर कोड की योजना से आता है, न कि किसी मॉडल से।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168555,
+      "source": "**understanding-dataset-lab (udlab) builds test scenarios for cognitive empathy: whether a model can keep an accurate\npicture of what each party in a scene knows, believes, wants and needs.** Short scenes with several people are planned\nby code, then put into prose by a local writer model. The answer to every question about a scene comes from the code's\nplan, never from a model.",
+      "targetLang": "hi"
+    },
+    "cc552e32f0bb2443": {
+      "translation": "यह [रीज़निंग-डेटासेट-लैब](⟦0⟧) का सहयोगी है, जो पहेलियों और सत्यापन वस्तुओं के लिए भी यही काम करता है।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "It is the companion to [reasoning-dataset-lab](⟦0⟧), which does\nthe same for puzzles and verification items.",
+      "targetLang": "hi"
+    },
+    "9a323bd6ae5d1cff": {
+      "translation": "कोड द्वारा बनाए गए संकेतों वाले दृश्यों का उपयोग क्यों करें?",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "Why scenes with code-made keys",
+      "targetLang": "hi"
+    },
+    "cc792926d8efb40f": {
+      "translation": "एक नियोजित दृश्य में, सही उत्तर घटनाओं से यांत्रिक रूप से निकलता है: किसने कहां स्थानांतरित किया, कौन क्या देख सकता था, किसने क्या कहा, और किसने इसे सुना। जब किसी वस्तु को स्थानांतरित किया गया था, तब जो व्यक्ति दृष्टि से बाहर था, वह अभी भी मानता है कि वह वहीं है जहां उसने उसे पिछली बार देखा था। क्योंकि ये नियम कोड में हैं, इसलिए कुंजी की गणना की जाती है, न कि आकलित।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "In a planned scene, the right answer follows mechanically from the events: who moved where, who could see, who said\nwhat, and who heard it. Someone who was out of sight when an object was moved still believes it is where they last\nsaw it. Because those rules are in code, the key is computed, not judged.",
+      "targetLang": "hi"
+    },
+    "27cb18f58f48e082": {
+      "translation": "*कोड द्वारा बनाई गई कुंजी* का अर्थ है:\n- उत्तर दृश्य की कोड योजना से आता है;\n- यह एक निजी बीज के साथ सील किया गया है;\n- इसे कभी भी किसी मॉडल द्वारा नहीं लिखा या मूल्यांकित किया जाता है।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "A *code-made key* means:\n- the answer comes from the code's plan of the scene;\n- it is sealed with a private seed;\n- it is never written or graded by a model.",
+      "targetLang": "hi"
+    },
+    "8d503018ac55bff2": {
+      "translation": "प्रत्येक गद्य प्रस्तुति की जांच कोड द्वारा योजना के विरुद्ध की जाती है, इससे पहले कि इसे गिना जाए।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "Every prose rendering is checked by code against the plan before it counts.",
+      "targetLang": "hi"
+    },
+    "7411866c74ffeb61": {
+      "translation": "स्थिति: क्या प्रयास किया गया है",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "Status: what has been tried",
+      "targetLang": "hi"
+    },
+    "77a9fa815c47f503": {
+      "translation": "परिणाम 160 प्रस्तुतियों के विकास बैंकों पर गणना किए गए हैं। नकारात्मक परिणाम पहले आते हैं, क्योंकि उन्होंने डिजाइन को आकार दिया।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "Results are counts on development banks of 160 renderings. The negative results come first, because they shaped the\ndesign.",
+      "targetLang": "hi"
+    },
+    "941df50da8ed53b6": {
+      "translation": "चरण",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "Stage",
+      "targetLang": "hi"
+    },
+    "705a179c8ff70c68": {
+      "translation": "क्या प्रयास किया गया",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "What was tried",
+      "targetLang": "hi"
+    },
+    "9681f9f3f14bcfc5": {
+      "translation": "परिणाम",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "Result",
+      "targetLang": "hi"
+    },
+    "10a11dacc7567272": {
+      "translation": "स्वीकृत?",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "Adopted?",
+      "targetLang": "hi"
+    },
+    "245e1a804a99c369": {
+      "translation": "लेखक के संकेत में स्वीकृत वाक्य रूपों की सूची",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "A list of accepted sentence forms in the writer's prompt",
+      "targetLang": "hi"
+    },
+    "29db5f8e5b38c253": {
+      "translation": "⟦0⟧ प्रस्तुतियाँ उत्तीर्ण हुईं, जबकि आधारभूत संकेत के लिए ⟦1⟧। लेखक ने सूचीबद्ध रूपों का उपयोग नहीं किया।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "⟦0⟧ renderings passed, against ⟦1⟧ for the baseline prompt. The writer didn't use the listed forms.",
+      "targetLang": "hi"
+    },
+    "bf9e9ae90b5c0c0d": {
+      "translation": "**नहीं**, पूर्व-पंजीकृत नियम के अनुसार",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "**No**, by the pre-registered rule",
+      "targetLang": "hi"
+    },
+    "1a91a9a27cdf531b": {
+      "translation": "कोड द्वारा निर्दिष्ट वाक्य आकार",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "Sentence shapes assigned by code",
+      "targetLang": "hi"
+    },
+    "ddc9e54cbfc5b466": {
+      "translation": "⟦0⟧, जबकि आधारभूत के लिए ⟦1⟧। विकास गेट विफल रहा, इसलिए कोई पुष्टिकरण परीक्षण नहीं किया गया। प्रति शाखा 16 प्रस्तुतियाँ (10%) कभी भी उत्पन्न नहीं हुईं, क्योंकि संकेत और आउटपुट बजट लेखक की संदर्भ सीमा से अधिक हो गए।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "⟦0⟧, against ⟦1⟧ for the baseline. The development gate failed, so there was no confirmatory run. 16 renderings per arm (10%) were never generated, because the prompt plus the output budget went over the writer's context limit.",
+      "targetLang": "hi"
+    },
+    "e1fec224c541b6ce": {
+      "translation": "कोड द्वारा किए गए परिवर्तन और पुनर्लिखित भाषण (संशोधन 2)",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "Code moves and rewritten speech (revision 2)",
+      "targetLang": "hi"
+    },
+    "5464cf5245f04e89": {
+      "translation": "विकास परीक्षण ने सभी 7 पूर्व-पंजीकृत गेटों को पास कर लिया। प्रारंभिक मसौदे: ⟦0⟧, न्यूनतम 112 के मुकाबले; पाइपलाइन के बाद ⟦1⟧। कोड स्वैप ने ⟦2⟧ को बनाए रखा। भाषण पुनर्लेखन ने ⟦3⟧ को बनाए रखा। 0 प्रस्तुतियाँ संदर्भ सीमा से अधिक हो गईं।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168556,
+      "source": "The development run passed all 7 pre-registered gates. First drafts: ⟦0⟧, against a floor of 112; ⟦1⟧ after the pipeline. Code swaps kept ⟦2⟧. Speech rewrites kept ⟦3⟧. 0 renderings went over the context limit.",
+      "targetLang": "hi"
+    },
+    "960666157987ee46": {
+      "translation": "इसके विकास गेटों को पास कर लिया",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "Passed its development gates",
+      "targetLang": "hi"
+    },
+    "1a01296e17be9efa": {
+      "translation": "**अभी तक नहीं दिखाया गया:**\n- चरण 5 का कोई सील पुष्टिकरण परीक्षण नहीं;\n- udlab डेटा पर प्रशिक्षित कोई मॉडल नहीं;\n- अभी तक यह नहीं बताया गया है कि क्या कोई मॉडल दृश्य में लोगों को समझता है।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "**Not yet shown:**\n- no sealed confirmatory run of Stage 5;\n- no model trained on udlab data;\n- nothing yet about whether any model understands the people in a scene.",
+      "targetLang": "hi"
+    },
+    "d770fa3a9159a66f": {
+      "translation": "यहां क्या है",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "What is here",
+      "targetLang": "hi"
+    },
+    "82fb2060a956f26f": {
+      "translation": "- **⟦0⟧**, जनरेटर। यह परिदृश्यों की योजना बनाता है, चरण 5 पाइपलाइन चलाता है, प्रत्येक सेट की कुंजियों को एक निजी बीज के साथ सील करता है, और एक लिखित सेट को फिर से प्रस्तुत करके और उसकी तुलना करके सत्यापित करता है।\n- **शॉर्टकट जांच**, जो अलग से चलाई जाती हैं। वे परीक्षण करते हैं कि क्या दृश्य की सतही विशेषताएं उत्तर को प्रकट करती हैं।\n- **लेखक संकेत** (⟦1⟧)। लेखक ⟦2⟧ है, जो स्थानीय रूप से ओलामा के माध्यम से चलता है।\n- किराए पर लिए गए GPU पर लेखक को चलाने के लिए एक **कोलाब लॉन्चर** (⟦3⟧)।\n- **753 परीक्षण।**",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "- **⟦0⟧**, the generator. It plans scenarios, runs the Stage 5 pipeline, seals each set's keys with a private\n  seed, and verifies a written set by re-rendering and diffing it.\n- **Shortcut probes**, run out of fold. They test whether surface features of a scene give the answer away.\n- **The writer prompt** (⟦1⟧). The writer is ⟦2⟧, run locally through Ollama.\n- **A Colab launcher** (⟦3⟧) for running the writer on a rented GPU.\n- **753 tests.**",
+      "targetLang": "hi"
+    },
+    "ed2855ab153de4ef": {
+      "translation": "इसे GPU के बिना आज़माएं",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "Try it without a GPU",
+      "targetLang": "hi"
+    },
+    "85c80ded61fa81db": {
+      "translation": "डिफ़ॉल्ट लेखक एक CPU मॉक है, इसलिए पूरी पाइपलाइन किसी भी मशीन पर चलती है:",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "The default writer is a CPU mock, so the whole pipeline runs on any machine:",
+      "targetLang": "hi"
+    },
+    "a53e2cc09deaf720": {
+      "translation": "- पायथन 3.15 या नया; ⟦0⟧ यदि आवश्यक हो तो इसे स्थापित करता है।\n- पहला कमांड एक सार्वजनिक भाग (⟦1⟧) और एक सील स्टोर (⟦2⟧) को ⟦3⟧ के अंतर्गत लिखता है, जो एक ऐसा फ़ोल्डर है जिसे गिट अनदेखा करता है।\n- ⟦4⟧ प्रत्येक विकल्प को सूचीबद्ध करता है।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "- Python 3.15 or newer; ⟦0⟧ installs it if needed.\n- The first command writes a public part (⟦1⟧) and a sealed store (⟦2⟧) under ⟦3⟧,\n  a folder Git ignores.\n- ⟦4⟧ lists every option.",
+      "targetLang": "hi"
+    },
+    "0a99d2532f24821a": {
+      "translation": "क्या निजी रखा जाता है",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "What stays private",
+      "targetLang": "hi"
+    },
+    "479a723e04e3d404": {
+      "translation": "ये निजी रहते हैं, क्योंकि उन्हें प्रकाशित करने से उत्तर प्रकट हो जाएंगे:\n- सील परीक्षण बैंक और विकास बीज बैंक;\n- प्रत्येक सील स्टोर और पीढ़ी लॉग;\n- उनके योजना बीजों के साथ रन रिकॉर्ड।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "These stay private, because publishing them would give the answers away:\n- the sealed test bank and the development seed banks;\n- every sealed store and generation log;\n- the run records with their plan seeds.",
+      "targetLang": "hi"
+    },
+    "6b8d1b96866f8d7f": {
+      "translation": "इनमें से कोई भी इस रिपॉजिटरी या उसके इतिहास में नहीं है। परीक्षण केवल सिंथेटिक बीजों और आविष्कार किए गए दृश्यों का उपयोग करते हैं।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "None of them is in this repository or its history. The tests use synthetic seeds and invented scenes only.",
+      "targetLang": "hi"
+    },
+    "4916032b1bef5957": {
+      "translation": "सुरक्षा और विश्वास",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "Security and trust",
+      "targetLang": "hi"
+    },
+    "fe488865272a9a48": {
+      "translation": "- **स्पर्श किया गया डेटा:** आपके द्वारा चुने गए ⟦0⟧ के अंतर्गत फ़ाइलें, और लेखक संकेत। ⟦1⟧ के साथ, यह एक स्थानीय ओलामा सर्वर को भी कॉल करता है।\n- **स्पर्श नहीं किया गया डेटा:** आउटपुट फ़ोल्डर के बाहर कुछ भी नहीं। कोई टेलीमेट्री नहीं है, और स्थानीय ओलामा सर्वर और, यदि आप इसे चलाते हैं, तो कोलाब लॉन्चर के लिए कोई नेटवर्क कॉल नहीं है।\n- **अनुमतियाँ:** आउटपुट फ़ोल्डर को पढ़ने और लिखने से परे कोई अनुमति नहीं। GPU मोड में, यदि वीडियो मेमोरी ⟦2⟧ से अधिक हो जाती है, तो यह उस ओलामा सर्वर को बंद कर देता है जिसे उसने शुरू किया था।\n- सुरक्षा संबंधी मुद्दों की सूचना [SECURITY.md](⟦3⟧) में बताए अनुसार दें।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "- **Data touched:** files under the ⟦0⟧ you choose, and the writer prompt. With ⟦1⟧, it also\n  calls a local Ollama server.\n- **Data not touched:** nothing outside the output folder. There is no telemetry, and no network calls except to the\n  local Ollama server and, if you run it, the Colab launcher.\n- **Permissions:** none beyond reading and writing the output folder. In GPU mode, it stops the Ollama server it\n  started if video memory goes over ⟦2⟧.\n- Report security issues as [SECURITY.md](⟦3⟧) describes.",
+      "targetLang": "hi"
+    },
+    "df2fb5755b405f03": {
+      "translation": "लाइसेंस",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "Licence",
+      "targetLang": "hi"
+    },
+    "b660618bde3c2c39": {
+      "translation": "कोड और रिपॉजिटरी का अपना पाठ [MIT लाइसेंस](⟦0⟧) के अंतर्गत है। लोगो के नीचे उद्धृत परिभाषा विक्शनरी से है और [CC ⟦1⟧ 4.0](⟦2⟧) के अंतर्गत रहती है। इसका उपयोग किसी भी डेटासेट या संकेत में नहीं किया जाता है।",
+      "model": "translategemma:27b",
+      "timestamp": 1793738168557,
+      "source": "The code and the repository's own text are under the [MIT licence](⟦0⟧). The definition quoted under the logo is\nfrom Wiktionary and stays under [CC ⟦1⟧ 4.0](⟦2⟧). It is not used in\nany dataset or prompt.",
+      "targetLang": "hi"
+    },
+    "b564689942ac5ccd": {
+      "translation": "> **Prototipo.** udlab è un progetto di ricerca aperto in corso. Il metodo e il codice sono disponibili per essere consultati ed eseguiti. Finora, i risultati consistono in verifiche sull'efficacia con cui genera scene, utilizzando database di sviluppo. Non ci sono risultati definitivi o conclusivi, né modelli addestrati, e non si fa alcuna affermazione sul fatto che un'intelligenza artificiale possa comprendere qualcun altro. Le fasi possono ancora cambiare il modo in cui vengono create le scene.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "> **Prototype.** udlab is open research in progress. The method and the code are here to read and run. Its results\n> so far are checks of how well it generates scenes, on development banks. It has no final or sealed result, no\n> trained model, and makes no claim about whether any AI understands anyone. Stages can still change how scenes are made.",
+      "targetLang": "it"
+    },
+    "9bcc7e9f3ebb83cb": {
+      "translation": "**understanding-dataset-lab (udlab) crea scenari di test per l'empatia cognitiva: se un modello è in grado di mantenere una rappresentazione accurata di ciò che ogni partecipante in una scena conosce, crede, desidera e di cui ha bisogno.** Scene brevi con diverse persone sono pianificate tramite codice, quindi trasformate in prosa da un modello di scrittura locale. La risposta a ogni domanda su una scena deriva dal piano del codice, mai da un modello.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "**understanding-dataset-lab (udlab) builds test scenarios for cognitive empathy: whether a model can keep an accurate\npicture of what each party in a scene knows, believes, wants and needs.** Short scenes with several people are planned\nby code, then put into prose by a local writer model. The answer to every question about a scene comes from the code's\nplan, never from a model.",
+      "targetLang": "it"
+    },
+    "2bcede400f0c7865": {
+      "translation": "È il complemento di [reasoning-dataset-lab](⟦0⟧), che fa la stessa cosa per enigmi e elementi di verifica.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "It is the companion to [reasoning-dataset-lab](⟦0⟧), which does\nthe same for puzzles and verification items.",
+      "targetLang": "it"
+    },
+    "dd8008f596d7b962": {
+      "translation": "Perché scene con elementi creati tramite codice?",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "Why scenes with code-made keys",
+      "targetLang": "it"
+    },
+    "d699305aff98c2ce": {
+      "translation": "In una scena pianificata, la risposta corretta deriva meccanicamente dagli eventi: chi si è spostato dove, chi poteva vedere, chi ha detto cosa e chi l'ha sentito. Qualcuno che non era in vista quando un oggetto è stato spostato continua a credere che si trovi dove l'ha visto l'ultima volta. Poiché queste regole sono nel codice, la chiave viene calcolata, non giudicata.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "In a planned scene, the right answer follows mechanically from the events: who moved where, who could see, who said\nwhat, and who heard it. Someone who was out of sight when an object was moved still believes it is where they last\nsaw it. Because those rules are in code, the key is computed, not judged.",
+      "targetLang": "it"
+    },
+    "7e234873bb4ef318": {
+      "translation": "Una *chiave creata tramite codice* significa:\n- la risposta deriva dal piano della scena del codice;\n- è sigillata con un seme privato;\n- non viene mai scritta o valutata da un modello.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "A *code-made key* means:\n- the answer comes from the code's plan of the scene;\n- it is sealed with a private seed;\n- it is never written or graded by a model.",
+      "targetLang": "it"
+    },
+    "d3b1356ee9e37043": {
+      "translation": "Ogni versione in prosa viene verificata dal codice rispetto al piano prima di essere considerata valida.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "Every prose rendering is checked by code against the plan before it counts.",
+      "targetLang": "it"
+    },
+    "099c507977d7eed7": {
+      "translation": "Stato: cosa è stato provato",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "Status: what has been tried",
+      "targetLang": "it"
+    },
+    "90a384e1aeb2da92": {
+      "translation": "I risultati sono conteggi su database di sviluppo di 160 versioni. I risultati negativi vengono presentati per primi, perché hanno plasmato il progetto.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "Results are counts on development banks of 160 renderings. The negative results come first, because they shaped the\ndesign.",
+      "targetLang": "it"
+    },
+    "11a89a1b7d0bf458": {
+      "translation": "Fase",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "Stage",
+      "targetLang": "it"
+    },
+    "8654b97d2c0b4e4b": {
+      "translation": "Cosa è stato provato",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "What was tried",
+      "targetLang": "it"
+    },
+    "90def822b8d972eb": {
+      "translation": "Risultato",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "Result",
+      "targetLang": "it"
+    },
+    "6cfceb154293b9c1": {
+      "translation": "Adottato?",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "Adopted?",
+      "targetLang": "it"
+    },
+    "89d499b1e0ed7c80": {
+      "translation": "Un elenco di forme di frase accettate nel prompt dello scrittore",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "A list of accepted sentence forms in the writer's prompt",
+      "targetLang": "it"
+    },
+    "f6501f64d35b1582": {
+      "translation": "⟦0⟧ versioni hanno superato il test, rispetto a ⟦1⟧ per il prompt di base. Lo scrittore non ha utilizzato le forme elencate.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "⟦0⟧ renderings passed, against ⟦1⟧ for the baseline prompt. The writer didn't use the listed forms.",
+      "targetLang": "it"
+    },
+    "15fa01480e696240": {
+      "translation": "**No**, in base alla regola preregistrata",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "**No**, by the pre-registered rule",
+      "targetLang": "it"
+    },
+    "12ea8b1e028319f3": {
+      "translation": "Forme di frase assegnate tramite codice",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "Sentence shapes assigned by code",
+      "targetLang": "it"
+    },
+    "c33e0fe499851fe2": {
+      "translation": "⟦0⟧, rispetto a ⟦1⟧ per il prompt di base. Il test di sviluppo è fallito, quindi non è stata eseguita alcuna verifica. 16 versioni per ramo (10%) non sono state generate, perché il prompt più il budget di output hanno superato il limite di contesto dello scrittore.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "⟦0⟧, against ⟦1⟧ for the baseline. The development gate failed, so there was no confirmatory run. 16 renderings per arm (10%) were never generated, because the prompt plus the output budget went over the writer's context limit.",
+      "targetLang": "it"
+    },
+    "8db0dd7a5f9b5890": {
+      "translation": "Modifiche al codice e riscrittura del discorso (revisione 2)",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "Code moves and rewritten speech (revision 2)",
+      "targetLang": "it"
+    },
+    "39ff71df6bc82a4b": {
+      "translation": "Il test di sviluppo ha superato tutti i 7 controlli preregistrati. Bozze iniziali: ⟦0⟧, rispetto a un minimo di 112; ⟦1⟧ dopo la pipeline. Le modifiche al codice hanno mantenuto ⟦2⟧. Le riscritture del discorso hanno mantenuto ⟦3⟧. 0 versioni hanno superato il limite di contesto.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "The development run passed all 7 pre-registered gates. First drafts: ⟦0⟧, against a floor of 112; ⟦1⟧ after the pipeline. Code swaps kept ⟦2⟧. Speech rewrites kept ⟦3⟧. 0 renderings went over the context limit.",
+      "targetLang": "it"
+    },
+    "bfd91482e4f94cb8": {
+      "translation": "Ha superato i controlli di sviluppo",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "Passed its development gates",
+      "targetLang": "it"
+    },
+    "cbf627939db34ee1": {
+      "translation": "**Non ancora mostrato:**\n- nessuna esecuzione di verifica definitiva della fase 5;\n- nessun modello addestrato sui dati di udlab;\n- al momento, nulla sul fatto che un modello possa comprendere le persone in una scena.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "**Not yet shown:**\n- no sealed confirmatory run of Stage 5;\n- no model trained on udlab data;\n- nothing yet about whether any model understands the people in a scene.",
+      "targetLang": "it"
+    },
+    "9aa1bc794914bed2": {
+      "translation": "Cosa c'è qui",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192830,
+      "source": "What is here",
+      "targetLang": "it"
+    },
+    "654cb0cf58e898f3": {
+      "translation": "- **⟦0⟧**, il generatore. Pianifica gli scenari, esegue la pipeline della fase 5, sigilla le chiavi di ogni set con un seme privato e verifica un set scritto rielaborandolo e confrontandolo.\n- **Sonde di scorciatoia**, eseguite in modo indipendente. Verificano se le caratteristiche superficiali di una scena rivelano la risposta.\n- **Il prompt dello scrittore** (⟦1⟧). Lo scrittore è ⟦2⟧, eseguito localmente tramite Ollama.\n- **Un lanciatore Colab** (⟦3⟧) per eseguire lo scrittore su una GPU in affitto.\n- **753 test.**",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192831,
+      "source": "- **⟦0⟧**, the generator. It plans scenarios, runs the Stage 5 pipeline, seals each set's keys with a private\n  seed, and verifies a written set by re-rendering and diffing it.\n- **Shortcut probes**, run out of fold. They test whether surface features of a scene give the answer away.\n- **The writer prompt** (⟦1⟧). The writer is ⟦2⟧, run locally through Ollama.\n- **A Colab launcher** (⟦3⟧) for running the writer on a rented GPU.\n- **753 tests.**",
+      "targetLang": "it"
+    },
+    "d564e687f2226251": {
+      "translation": "Provalo senza una GPU",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192831,
+      "source": "Try it without a GPU",
+      "targetLang": "it"
+    },
+    "3a991cec2fc0d779": {
+      "translation": "Lo scrittore predefinito è un simulacro CPU, quindi l'intera pipeline viene eseguita su qualsiasi macchina:",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192831,
+      "source": "The default writer is a CPU mock, so the whole pipeline runs on any machine:",
+      "targetLang": "it"
+    },
+    "77680335a3dde3e3": {
+      "translation": "- Python 3.15 o successivo; ⟦0⟧ lo installa se necessario.\n- Il primo comando scrive una parte pubblica (⟦1⟧) e un archivio sigillato (⟦2⟧) in ⟦3⟧, una cartella che Git ignora.\n- ⟦4⟧ elenca tutte le opzioni.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192831,
+      "source": "- Python 3.15 or newer; ⟦0⟧ installs it if needed.\n- The first command writes a public part (⟦1⟧) and a sealed store (⟦2⟧) under ⟦3⟧,\n  a folder Git ignores.\n- ⟦4⟧ lists every option.",
+      "targetLang": "it"
+    },
+    "cb1492272e6464c5": {
+      "translation": "Cosa rimane privato",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192831,
+      "source": "What stays private",
+      "targetLang": "it"
+    },
+    "469485ec5d4ce160": {
+      "translation": "Questi rimangono privati, perché pubblicarli rivelerebbe le risposte:\n- il database di test sigillato e i database di semi di sviluppo;\n- ogni archivio sigillato e registro di generazione;\n- i registri di esecuzione con i relativi semi di piano.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192831,
+      "source": "These stay private, because publishing them would give the answers away:\n- the sealed test bank and the development seed banks;\n- every sealed store and generation log;\n- the run records with their plan seeds.",
+      "targetLang": "it"
+    },
+    "712e1a044dc31ca0": {
+      "translation": "Nessuno di questi si trova in questo repository o nella sua cronologia. I test utilizzano solo semi sintetici e scene inventate.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192831,
+      "source": "None of them is in this repository or its history. The tests use synthetic seeds and invented scenes only.",
+      "targetLang": "it"
+    },
+    "18e73e393ecd73ab": {
+      "translation": "Sicurezza e affidabilità",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192831,
+      "source": "Security and trust",
+      "targetLang": "it"
+    },
+    "3762df5c11e025d8": {
+      "translation": "- **Dati interessati:** file nella cartella ⟦0⟧ che scegli e il prompt dello scrittore. Con ⟦1⟧, chiama anche un server Ollama locale.\n- **Dati non interessati:** nulla al di fuori della cartella di output. Non c'è telemetria e non ci sono chiamate di rete, tranne al server Ollama locale e, se lo esegui, al lanciatore Colab.\n- **Autorizzazioni:** nessuna, oltre alla lettura e alla scrittura della cartella di output. In modalità GPU, interrompe il server Ollama che ha avviato se la memoria video supera ⟦2⟧.\n- Segnala i problemi di sicurezza come descritto in [SECURITY.md](⟦3⟧).",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192831,
+      "source": "- **Data touched:** files under the ⟦0⟧ you choose, and the writer prompt. With ⟦1⟧, it also\n  calls a local Ollama server.\n- **Data not touched:** nothing outside the output folder. There is no telemetry, and no network calls except to the\n  local Ollama server and, if you run it, the Colab launcher.\n- **Permissions:** none beyond reading and writing the output folder. In GPU mode, it stops the Ollama server it\n  started if video memory goes over ⟦2⟧.\n- Report security issues as [SECURITY.md](⟦3⟧) describes.",
+      "targetLang": "it"
+    },
+    "5902ae48c77f3ecb": {
+      "translation": "Licenza",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192831,
+      "source": "Licence",
+      "targetLang": "it"
+    },
+    "de4e2324b2d1855b": {
+      "translation": "Il codice e il testo del repository sono soggetti alla [licenza MIT](⟦0⟧). La definizione citata sotto il logo proviene da Wiktionary e rimane soggetta a [CC ⟦1⟧ 4.0](⟦2⟧). Non viene utilizzata in nessun set di dati o prompt.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738192831,
+      "source": "The code and the repository's own text are under the [MIT licence](⟦0⟧). The definition quoted under the logo is\nfrom Wiktionary and stays under [CC ⟦1⟧ 4.0](⟦2⟧). It is not used in\nany dataset or prompt.",
+      "targetLang": "it"
+    },
+    "022319e24307ed2e": {
+      "translation": "> **Protótipo.** udlab é uma pesquisa em andamento, de código aberto. O método e o código estão disponíveis para leitura e execução. Seus resultados até o momento são verificações de quão bem ele gera cenas, em bancos de dados de desenvolvimento. Não possui resultados finais ou definitivos, nem um modelo treinado, e não faz nenhuma afirmação sobre se alguma IA compreende alguém. As etapas ainda podem mudar a forma como as cenas são criadas.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216957,
+      "source": "> **Prototype.** udlab is open research in progress. The method and the code are here to read and run. Its results\n> so far are checks of how well it generates scenes, on development banks. It has no final or sealed result, no\n> trained model, and makes no claim about whether any AI understands anyone. Stages can still change how scenes are made.",
+      "targetLang": "pt"
+    },
+    "1731cf3231b5dc7a": {
+      "translation": "**understanding-dataset-lab (udlab) cria cenários de teste para empatia cognitiva: se um modelo consegue manter uma imagem precisa do que cada participante em uma cena sabe, acredita, deseja e precisa.** Cenas curtas com várias pessoas são planejadas por meio de código e, em seguida, transformadas em prosa por um modelo de escrita local. A resposta para cada pergunta sobre uma cena vem do plano do código, nunca de um modelo.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216957,
+      "source": "**understanding-dataset-lab (udlab) builds test scenarios for cognitive empathy: whether a model can keep an accurate\npicture of what each party in a scene knows, believes, wants and needs.** Short scenes with several people are planned\nby code, then put into prose by a local writer model. The answer to every question about a scene comes from the code's\nplan, never from a model.",
+      "targetLang": "pt"
+    },
+    "55eec5697188257b": {
+      "translation": "É o complemento de [reasoning-dataset-lab](⟦0⟧), que faz o mesmo para quebra-cabeças e itens de verificação.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "It is the companion to [reasoning-dataset-lab](⟦0⟧), which does\nthe same for puzzles and verification items.",
+      "targetLang": "pt"
+    },
+    "cad19289ecba8c32": {
+      "translation": "Por que cenas com elementos criados por código?",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "Why scenes with code-made keys",
+      "targetLang": "pt"
+    },
+    "5d8f70605753a950": {
+      "translation": "Em uma cena planejada, a resposta correta segue mecanicamente dos eventos: quem se moveu para onde, quem podia ver, quem disse o quê e quem ouviu. Alguém que estava fora do alcance visual quando um objeto foi movido ainda acredita que ele está onde foi visto pela última vez. Como essas regras estão no código, a chave é calculada, não julgada.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "In a planned scene, the right answer follows mechanically from the events: who moved where, who could see, who said\nwhat, and who heard it. Someone who was out of sight when an object was moved still believes it is where they last\nsaw it. Because those rules are in code, the key is computed, not judged.",
+      "targetLang": "pt"
+    },
+    "7ea9669ee4962fa0": {
+      "translation": "Uma *chave criada por código* significa:\n- a resposta vem do plano do código para a cena;\n- ela é selada com uma semente privada;\n- ela nunca é escrita ou avaliada por um modelo.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "A *code-made key* means:\n- the answer comes from the code's plan of the scene;\n- it is sealed with a private seed;\n- it is never written or graded by a model.",
+      "targetLang": "pt"
+    },
+    "59d11d3a6eb1e68a": {
+      "translation": "Cada versão em prosa é verificada pelo código em relação ao plano antes de ser considerada válida.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "Every prose rendering is checked by code against the plan before it counts.",
+      "targetLang": "pt"
+    },
+    "6bbcaf2dd2e4d5a2": {
+      "translation": "Status: o que foi testado",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "Status: what has been tried",
+      "targetLang": "pt"
+    },
+    "93f8f8baec304b93": {
+      "translation": "Os resultados são contagens em bancos de dados de desenvolvimento de 160 versões. Os resultados negativos vêm primeiro, porque moldaram o projeto.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "Results are counts on development banks of 160 renderings. The negative results come first, because they shaped the\ndesign.",
+      "targetLang": "pt"
+    },
+    "446a4926f02207f9": {
+      "translation": "Etapa",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "Stage",
+      "targetLang": "pt"
+    },
+    "75e01f325a7a44e7": {
+      "translation": "O que foi testado",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "What was tried",
+      "targetLang": "pt"
+    },
+    "9e2f8bb2e14e5fc1": {
+      "translation": "Resultado",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "Result",
+      "targetLang": "pt"
+    },
+    "24c83efc6bf7c2b3": {
+      "translation": "Adotado?",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "Adopted?",
+      "targetLang": "pt"
+    },
+    "5586f8919e98a5d9": {
+      "translation": "Uma lista de formas de frases aceitas no prompt do escritor",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "A list of accepted sentence forms in the writer's prompt",
+      "targetLang": "pt"
+    },
+    "013f34aa4e65817d": {
+      "translation": "⟦0⟧ versões foram aprovadas, em comparação com ⟦1⟧ para o prompt de referência. O escritor não usou as formas listadas.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "⟦0⟧ renderings passed, against ⟦1⟧ for the baseline prompt. The writer didn't use the listed forms.",
+      "targetLang": "pt"
+    },
+    "81dc93985ab06643": {
+      "translation": "**Não**, pela regra pré-registrada",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "**No**, by the pre-registered rule",
+      "targetLang": "pt"
+    },
+    "ca1ce17babd52f5c": {
+      "translation": "Formas de frases atribuídas por código",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "Sentence shapes assigned by code",
+      "targetLang": "pt"
+    },
+    "258bb7b889978e95": {
+      "translation": "⟦0⟧, em comparação com ⟦1⟧ para o prompt de referência. O teste de desenvolvimento falhou, portanto, não houve execução confirmatória. 16 versões por grupo (10%) nunca foram geradas, porque o prompt mais o orçamento de saída excederam o limite de contexto do escritor.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "⟦0⟧, against ⟦1⟧ for the baseline. The development gate failed, so there was no confirmatory run. 16 renderings per arm (10%) were never generated, because the prompt plus the output budget went over the writer's context limit.",
+      "targetLang": "pt"
+    },
+    "e4b260f06ec83fe0": {
+      "translation": "Movimentos de código e discurso reescrito (revisão 2)",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "Code moves and rewritten speech (revision 2)",
+      "targetLang": "pt"
+    },
+    "526176f105e25f1e": {
+      "translation": "A execução de desenvolvimento passou por todos os 7 portões pré-registrados. Primeiros rascunhos: ⟦0⟧, em comparação com um mínimo de 112; ⟦1⟧ após o pipeline. As trocas de código mantiveram ⟦2⟧. As reescritas de discurso mantiveram ⟦3⟧. 0 versões excederam o limite de contexto.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "The development run passed all 7 pre-registered gates. First drafts: ⟦0⟧, against a floor of 112; ⟦1⟧ after the pipeline. Code swaps kept ⟦2⟧. Speech rewrites kept ⟦3⟧. 0 renderings went over the context limit.",
+      "targetLang": "pt"
+    },
+    "664a278f6403ef22": {
+      "translation": "Passou pelos portões de desenvolvimento",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "Passed its development gates",
+      "targetLang": "pt"
+    },
+    "1dd1d0704a36426c": {
+      "translation": "**Ainda não demonstrado:**\n- nenhuma execução confirmatória selada da Etapa 5;\n- nenhum modelo treinado com dados do udlab;\n- nada ainda sobre se algum modelo compreende as pessoas em uma cena.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "**Not yet shown:**\n- no sealed confirmatory run of Stage 5;\n- no model trained on udlab data;\n- nothing yet about whether any model understands the people in a scene.",
+      "targetLang": "pt"
+    },
+    "5e2f2f077e17d9ee": {
+      "translation": "O que está aqui",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216958,
+      "source": "What is here",
+      "targetLang": "pt"
+    },
+    "27c8a5cc74e13645": {
+      "translation": "- **⟦0⟧**, o gerador. Ele planeja cenários, executa o pipeline da Etapa 5, sela as chaves de cada conjunto com uma semente privada e verifica um conjunto escrito renderizando-o novamente e comparando-o.\n- **Sondas de atalho**, executadas fora do loop. Elas testam se as características superficiais de uma cena revelam a resposta.\n- **O prompt do escritor** (⟦1⟧). O escritor é ⟦2⟧, executado localmente por meio do Ollama.\n- **Um lançador do Colab** (⟦3⟧) para executar o escritor em uma GPU alugada.\n- **753 testes.**",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216959,
+      "source": "- **⟦0⟧**, the generator. It plans scenarios, runs the Stage 5 pipeline, seals each set's keys with a private\n  seed, and verifies a written set by re-rendering and diffing it.\n- **Shortcut probes**, run out of fold. They test whether surface features of a scene give the answer away.\n- **The writer prompt** (⟦1⟧). The writer is ⟦2⟧, run locally through Ollama.\n- **A Colab launcher** (⟦3⟧) for running the writer on a rented GPU.\n- **753 tests.**",
+      "targetLang": "pt"
+    },
+    "b0261ced38105a36": {
+      "translation": "Tente sem uma GPU",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216959,
+      "source": "Try it without a GPU",
+      "targetLang": "pt"
+    },
+    "f605b7762ab61496": {
+      "translation": "O escritor padrão é um simulacro de CPU, portanto, todo o pipeline é executado em qualquer máquina:",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216959,
+      "source": "The default writer is a CPU mock, so the whole pipeline runs on any machine:",
+      "targetLang": "pt"
+    },
+    "4a948a2e928cb6de": {
+      "translation": "- Python 3.15 ou mais recente; ⟦0⟧ o instala, se necessário.\n- O primeiro comando grava uma parte pública (⟦1⟧) e um armazenamento selado (⟦2⟧) em ⟦3⟧, uma pasta que o Git ignora.\n- ⟦4⟧ lista todas as opções.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216959,
+      "source": "- Python 3.15 or newer; ⟦0⟧ installs it if needed.\n- The first command writes a public part (⟦1⟧) and a sealed store (⟦2⟧) under ⟦3⟧,\n  a folder Git ignores.\n- ⟦4⟧ lists every option.",
+      "targetLang": "pt"
+    },
+    "73dfefcfcee36c7f": {
+      "translation": "O que permanece privado",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216959,
+      "source": "What stays private",
+      "targetLang": "pt"
+    },
+    "58d16b77d9a5d1f0": {
+      "translation": "Isso permanece privado, porque publicá-los revelaria as respostas:\n- o banco de dados de testes selado e os bancos de sementes de desenvolvimento;\n- cada armazenamento selado e registro de geração;\n- os registros de execução com suas sementes de plano.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216959,
+      "source": "These stay private, because publishing them would give the answers away:\n- the sealed test bank and the development seed banks;\n- every sealed store and generation log;\n- the run records with their plan seeds.",
+      "targetLang": "pt"
+    },
+    "ecde931a8685890a": {
+      "translation": "Nenhum deles está neste repositório ou em seu histórico. Os testes usam apenas sementes sintéticas e cenas inventadas.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216959,
+      "source": "None of them is in this repository or its history. The tests use synthetic seeds and invented scenes only.",
+      "targetLang": "pt"
+    },
+    "c54bee122371ae10": {
+      "translation": "Segurança e confiança",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216959,
+      "source": "Security and trust",
+      "targetLang": "pt"
+    },
+    "b9deb92053fe51ae": {
+      "translation": "- **Dados acessados:** arquivos na ⟦0⟧ que você escolher e o prompt do escritor. Com ⟦1⟧, também chama um servidor local do Ollama.\n- **Dados não acessados:** nada fora da pasta de saída. Não há telemetria e nenhuma chamada de rede, exceto para o servidor local do Ollama e, se você o executar, o lançador do Colab.\n- **Permissões:** nenhuma além de ler e gravar na pasta de saída. No modo GPU, ele interrompe o servidor Ollama que iniciou se a memória de vídeo exceder ⟦2⟧.\n- Relate problemas de segurança conforme descrito em [SECURITY.md](⟦3⟧).",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216959,
+      "source": "- **Data touched:** files under the ⟦0⟧ you choose, and the writer prompt. With ⟦1⟧, it also\n  calls a local Ollama server.\n- **Data not touched:** nothing outside the output folder. There is no telemetry, and no network calls except to the\n  local Ollama server and, if you run it, the Colab launcher.\n- **Permissions:** none beyond reading and writing the output folder. In GPU mode, it stops the Ollama server it\n  started if video memory goes over ⟦2⟧.\n- Report security issues as [SECURITY.md](⟦3⟧) describes.",
+      "targetLang": "pt"
+    },
+    "8671cf828faf98e8": {
+      "translation": "Licença",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216959,
+      "source": "Licence",
+      "targetLang": "pt"
+    },
+    "1ee3d1150895d777": {
+      "translation": "O código e o texto do próprio repositório estão sob a [licença MIT](⟦0⟧). A definição citada sob o logotipo é do Wiktionary e permanece sob [CC ⟦1⟧ 4.0](⟦2⟧). Não é usado em nenhum conjunto de dados ou prompt.",
+      "model": "translategemma:27b",
+      "timestamp": 1793738216959,
+      "source": "The code and the repository's own text are under the [MIT licence](⟦0⟧). The definition quoted under the logo is\nfrom Wiktionary and stays under [CC ⟦1⟧ 4.0](⟦2⟧). It is not used in\nany dataset or prompt.",
+      "targetLang": "pt"
+    }
+  }
+}

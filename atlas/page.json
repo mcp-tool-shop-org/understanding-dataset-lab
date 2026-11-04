@@ -1,0 +1,287 @@
+{
+  "authored": [
+    ".github/",
+    "prompts/",
+    "root",
+    "site/"
+  ],
+  "breaks": [
+    {
+      "doors": 2,
+      "importedBy": [],
+      "importedByTests": [
+        "tests"
+      ],
+      "kind": "part",
+      "name": "src",
+      "partLabel": "src"
+    },
+    {
+      "doors": 1,
+      "importedBy": [],
+      "importedByTests": [
+        "tests"
+      ],
+      "kind": "part",
+      "name": "scripts",
+      "partLabel": "scripts"
+    }
+  ],
+  "changes": {
+    "fileCounts": {
+      "added": 1,
+      "changed": 3,
+      "moved": 0,
+      "parts": 3,
+      "removed": 0
+    },
+    "items": [
+      {
+        "kind": "counts",
+        "sentence": "Nothing structural changed since 2026-11-03; 1 file added and 3 changed content.",
+        "subjects": []
+      }
+    ],
+    "since": {
+      "commit": "d951db755b91a7e38466fa75e67e601ef90ca9e1",
+      "generatedAt": "2026-11-03T22:24:20.484Z"
+    },
+    "unchanged": true
+  },
+  "changesTogether": [
+    {
+      "a": "src/udlab_generator/render.py",
+      "b": "tests/test_generator.py",
+      "either": 40,
+      "partLabels": [
+        "src",
+        "tests"
+      ],
+      "parts": [
+        "src",
+        "tests"
+      ],
+      "relation": "b-imports-a",
+      "shared": 32
+    },
+    {
+      "a": "src/udlab_generator/keys.py",
+      "b": "src/udlab_generator/world.py",
+      "either": 9,
+      "partLabels": [
+        "src",
+        "src"
+      ],
+      "parts": [
+        "src",
+        "src"
+      ],
+      "relation": "inside",
+      "shared": 6
+    },
+    {
+      "a": "src/udlab_generator/__init__.py",
+      "b": "src/udlab_generator/render.py",
+      "either": 39,
+      "partLabels": [
+        "src",
+        "src"
+      ],
+      "parts": [
+        "src",
+        "src"
+      ],
+      "relation": "inside",
+      "shared": 25
+    },
+    {
+      "a": "src/udlab_generator/__init__.py",
+      "b": "tests/test_generator.py",
+      "either": 38,
+      "partLabels": [
+        "src",
+        "tests"
+      ],
+      "parts": [
+        "src",
+        "tests"
+      ],
+      "relation": "b-imports-a",
+      "shared": 22
+    },
+    {
+      "a": "src/udlab_generator/__init__.py",
+      "b": "src/udlab_generator/cli.py",
+      "either": 30,
+      "partLabels": [
+        "src",
+        "src"
+      ],
+      "parts": [
+        "src",
+        "src"
+      ],
+      "relation": "inside",
+      "shared": 16
+    }
+  ],
+  "changesTogetherNote": [
+    "Confidence is low: fewer than 25 source files reach 10 revisions in the window.",
+    "Window: 180 days; a pair counts from 3 shared commits, since 5 source files reach 10 revisions; the floor rises to 10 when 25 do."
+  ],
+  "changesTogetherWithTests": 0,
+  "commit": "81765f0771ad08be34a18e52305b9f39b5fb4421",
+  "defaultBranch": "main",
+  "derived": "7 parts, mostly Python (23 files), CSS (2), TypeScript (2), shell (2), Astro (1) and JavaScript (1). Work enters through 3 doors; the busiest is ci, which reaches 3 parts. It deploys a site to GitHub Pages. People run udlab-gen.",
+  "doors": [
+    {
+      "checks": [],
+      "checksCount": 0,
+      "checksMore": 0,
+      "file": ".github/workflows/ci.yml",
+      "id": ".github/workflows/ci.yml",
+      "landings": [],
+      "name": "ci",
+      "pushes": false,
+      "reach": [
+        {
+          "boundary": "tests",
+          "depth": 0,
+          "files": 11
+        },
+        {
+          "boundary": "scripts",
+          "depth": 1,
+          "files": 1
+        },
+        {
+          "boundary": "src",
+          "depth": 1,
+          "files": 11
+        }
+      ],
+      "runs": [
+        "tests/"
+      ],
+      "runsCount": 1,
+      "runsMore": 0,
+      "sends": [
+        "uploads coverage to Codecov"
+      ],
+      "stages": [],
+      "triggers": [
+        "on a pull request",
+        "on a push to main touching 10 paths",
+        "or by hand"
+      ]
+    },
+    {
+      "checks": [],
+      "checksCount": 0,
+      "checksMore": 0,
+      "file": ".github/workflows/pages.yml",
+      "id": ".github/workflows/pages.yml",
+      "landings": [],
+      "name": "Deploy site to GitHub Pages",
+      "pushes": false,
+      "reach": [
+        {
+          "boundary": "site",
+          "depth": 0,
+          "files": 5
+        }
+      ],
+      "runs": [
+        "site/astro.config.mjs",
+        "site/src/"
+      ],
+      "runsCount": 2,
+      "runsMore": 0,
+      "sends": [
+        "deploys the site"
+      ],
+      "stages": [],
+      "triggers": [
+        "on a push to main touching 2 paths",
+        "or by hand"
+      ]
+    },
+    {
+      "checks": [],
+      "checksCount": 0,
+      "checksMore": 0,
+      "file": "pyproject.toml",
+      "id": "pyproject.toml#udlab-gen",
+      "kind": "command",
+      "landings": [],
+      "name": "udlab-gen",
+      "pushes": false,
+      "reach": [
+        {
+          "boundary": "src",
+          "depth": 0,
+          "files": 10
+        }
+      ],
+      "runs": [
+        "src/udlab_generator/cli.py"
+      ],
+      "runsCount": 1,
+      "runsMore": 0,
+      "sends": [],
+      "stages": [],
+      "triggers": []
+    }
+  ],
+  "duplicates": [],
+  "duplicatesLead": null,
+  "duplicatesNote": [],
+  "edges": [],
+  "engine": "1.24.0",
+  "generated": [],
+  "generatedAt": "2026-11-04T00:27:13.428Z",
+  "limits": [
+    "7 reads use paths built at run time and are not named here.",
+    "26 writes and 56 reads go to a path their caller passes, not to this repository.",
+    "4 reads go to the directory the command is run in, not to this repository.",
+    "Statistics confidence is low: fewer than 25 source files reach 10 revisions in the window."
+  ],
+  "mainDoor": ".github/workflows/ci.yml",
+  "partLabels": {
+    ".github": ".github",
+    "prompts": "prompts",
+    "root": "the repository root",
+    "scripts": "scripts",
+    "site": "the site",
+    "src": "src",
+    "tests": "tests"
+  },
+  "parts": 7,
+  "readers": [],
+  "repo": "mcp-tool-shop-org/understanding-dataset-lab",
+  "sequences": [],
+  "startDoor": "pyproject.toml#udlab-gen",
+  "startHere": [
+    "src/udlab_generator/cli.py",
+    "src/udlab_generator/render.py",
+    "src/udlab_generator/stage5_pipeline.py",
+    "src/udlab_generator/sealing.py"
+  ],
+  "startReason": "This path follows udlab-gen (a command people run) from its entry, since ci runs only tests.",
+  "summary": "understanding-dataset-lab (a prototype) plans multi-party scenes in code, puts them into prose with a local writer model, checks every rendering against the plan, and seals the code-made answer keys with a private seed.",
+  "summaryFrom": "person",
+  "testFiles": 26,
+  "testedBy": {
+    "scripts": 1,
+    "src": 9
+  },
+  "unnamedWrites": 0,
+  "unread": [],
+  "unreadFiles": 0,
+  "unreadNote": [],
+  "untested": [],
+  "untestedNote": [
+    "verify.sh runs in no workflow."
+  ],
+  "written": 0
+}

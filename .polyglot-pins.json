@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "pins": {
+    "5c0b780ebcf0fff7:fr": {
+      "lang": "fr",
+      "source": "The development run passed all 7 pre-registered gates. First drafts: 126 of 160, against a floor of 112; 132 of 160 after the pipeline. Code swaps kept 2,501 of 2,501. Speech rewrites kept 350 of 358. 0 renderings went over the context limit.",
+      "translation": "L’exécution de développement a réussi toutes les 7 validations préenregistrées. Premières ébauches : 126/160, contre un minimum de 112 ; 132/160 après le pipeline. Les échanges de code ont permis de conserver 2,501/2,501. Les réécritures de discours ont permis de conserver 350/358. 0 rendu n’a dépassé la limite de contexte.",
+      "pinnedAt": "2026-11-03T20:37:35.086Z"
+    },
+    "5c0b780ebcf0fff7:ja": {
+      "lang": "ja",
+      "source": "The development run passed all 7 pre-registered gates. First drafts: 126 of 160, against a floor of 112; 132 of 160 after the pipeline. Code swaps kept 2,501 of 2,501. Speech rewrites kept 350 of 358. 0 renderings went over the context limit.",
+      "translation": "開発実行では、事前に登録された7つのゲートすべてに合格しました。最初のドラフト：126/160件、最低値は112件。パイプライン後：132/160件。コードの入れ替えにより、2,501/2,501件が維持されました。会話の書き換えにより、350/358件が維持されました。コンテキスト制限を超えるレンダリングは0件でした。",
+      "pinnedAt": "2026-11-03T20:37:34.350Z"
+    },
+    "5c0b780ebcf0fff7:zh": {
+      "lang": "zh",
+      "source": "The development run passed all 7 pre-registered gates. First drafts: 126 of 160, against a floor of 112; 132 of 160 after the pipeline. Code swaps kept 2,501 of 2,501. Speech rewrites kept 350 of 358. 0 renderings went over the context limit.",
+      "translation": "开发测试通过了所有 7 个预先注册的测试。初稿：126/160（最低要求为 112）；流水线之后为 132/160。代码交换保持 2,501/2,501。对话重写保持 350/358。0 次渲染超过上下文限制。",
+      "pinnedAt": "2026-11-03T20:37:34.490Z"
+    }
+  }
+}

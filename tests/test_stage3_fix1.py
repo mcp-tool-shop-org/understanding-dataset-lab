@@ -334,3 +334,17 @@ def test_n2_m3_was_verb_by_actor_from_to_order_pinned() -> None:
     )
     assert not _sentence_matches_event(sent_by_first, ev, world.noise_threshold, world=world, checker_profile="c")
     assert _sentence_matches_event(sent_by_first, ev, world.noise_threshold, world=world, checker_profile="d")
+
+
+def test_console_main_prints_internal_error_without_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The `udlab-gen` console entry turns an unexpected error into `error: INTERNAL` and exit 70, with no traceback."""
+    from udlab_generator.cli import INTERNAL_EXIT, console_main
+
+    code = console_main(["--probe-only", str(tmp_path / "missing.sealed.jsonl")])
+    err = capsys.readouterr().err
+    assert code == INTERNAL_EXIT == 70
+    assert "error: INTERNAL: FileNotFoundError:" in err
+    assert "hint:" in err
+    assert "Traceback" not in err
