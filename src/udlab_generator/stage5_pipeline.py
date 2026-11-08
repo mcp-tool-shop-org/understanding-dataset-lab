@@ -204,7 +204,7 @@ class Stage5RungSampleShortError(Stage5PipelineError):
 
 
 class Stage5PartialOffloadError(Stage5PipelineError):
-    """Raised when `/api/ps` on the owned endpoint or `127.0.0.1:11434` reports partial GPU offload (`size_vram < size`)."""
+    """Raised when `/api/ps` on the owned endpoint or `127.0.0.1:11434` reports partial GPU offload (`size_vram < size`), stating whether the offloaded model is the run's own model or another seat's model."""
 
     def __init__(
         self,
@@ -213,14 +213,17 @@ class Stage5PartialOffloadError(Stage5PipelineError):
         model: str,
         size: int,
         size_vram: int,
+        is_own_model: bool = True,
     ) -> None:
         self.endpoint = str(endpoint)
         self.model = str(model)
         self.size = int(size)
         self.size_vram = int(size_vram)
+        self.is_own_model = bool(is_own_model)
+        self.model_owner = "run's own model" if self.is_own_model else "another seat's model"
         msg = (
             f"STAGE5_PARTIAL_OFFLOAD: partial offload detected on {self.endpoint} "
-            f"for model={self.model} (size_vram={self.size_vram} < size={self.size})"
+            f"for model={self.model} ({self.model_owner}; size_vram={self.size_vram} < size={self.size})"
         )
         super().__init__("STAGE5_PARTIAL_OFFLOAD", msg)
 
@@ -999,19 +1002,64 @@ def _make_empty_step_timings() -> dict[str, dict[str, Any]]:
     return {step: _make_empty_step_timing() for step in ("b", "rung", "swap", "rewrite")}
 
 
+def _normalize_own_model_tags(
+    model_tag: str | Sequence[str] | set[str] | frozenset[str] | None = None,
+    *,
+    own_model_tags: Sequence[str] | set[str] | frozenset[str] | None = None,
+) -> tuple[str, ...]:
+    """Normalize the run's own model tag(s) (writer, critic, and any other model called by the run) into a deduplicated tuple."""
+    tags: list[str] = []
+    for source in (model_tag, own_model_tags):
+        if source is None:
+            continue
+        if isinstance(source, str):
+            cleaned = source.strip()
+            if cleaned and cleaned not in tags:
+                tags.append(cleaned)
+        elif isinstance(source, (Sequence, set, frozenset)):
+            for item in source:
+                if isinstance(item, str):
+                    cleaned = item.strip()
+                    if cleaned and cleaned not in tags:
+                        tags.append(cleaned)
+    if not tags:
+        tags.append(PINNED_WRITER_MODEL_TAG)
+    return tuple(tags)
+
+
+def _is_own_model_tag(model_name: str, own_tags: Sequence[str]) -> bool:
+    """Return True iff `model_name` matches one of the run's own model tags (`own_tags`)."""
+    cleaned = model_name.strip()
+    if not cleaned:
+        return False
+    for tag in own_tags:
+        t = tag.strip()
+        if not t:
+            continue
+        if cleaned == t:
+            return True
+        if ":" not in t and cleaned == f"{t}:latest":
+            return True
+        if t.endswith(":latest") and cleaned == t[:-7]:
+            return True
+    return False
+
+
 def check_endpoints_partial_offload(
     http_transport: OllamaHttpTransport,
     *,
     owned_base_url: str,
     default_base_url: str = DEFAULT_OLLAMA_BASE_URL,
-    model_tag: str | None = None,
+    model_tag: str | Sequence[str] | set[str] | frozenset[str] | None = None,
+    own_model_tags: Sequence[str] | set[str] | frozenset[str] | None = None,
 ) -> list[dict[str, object]]:
     """Check `GET /api/ps` on both `owned_base_url` and `default_base_url` (`127.0.0.1:11434`).
 
     Raises `Stage5PartialOffloadError` if any loaded model on either endpoint reports
-    `size <= 0` or `size_vram < size`.
+    `size <= 0` or `size_vram < size`, stating whether the offloaded model is the run's
+    own model or another seat's model.
     """
-    _ = model_tag
+    resolved_own_tags = _normalize_own_model_tags(model_tag, own_model_tags=own_model_tags)
     owned_ep = _format_model_endpoint(owned_base_url)
     default_ep = _format_model_endpoint(default_base_url)
     endpoints: list[str] = [owned_ep]
@@ -1028,6 +1076,7 @@ def check_endpoints_partial_offload(
             if not isinstance(entry, Mapping):
                 continue
             model_name = str(entry.get("model") or entry.get("name") or "unknown")
+            is_own = _is_own_model_tag(model_name, resolved_own_tags)
             size = int(entry.get("size", 0) or 0)
             size_vram = int(entry.get("size_vram", 0) or 0)
             if size <= 0 or size_vram < size:
@@ -1036,10 +1085,12 @@ def check_endpoints_partial_offload(
                     model=model_name,
                     size=size,
                     size_vram=size_vram,
+                    is_own_model=is_own,
                 )
             checked_models.append(
                 {
                     "model": model_name,
+                    "is_own_model": is_own,
                     "size": size,
                     "size_vram": size_vram,
                     "full_offload": True,
@@ -1059,10 +1110,16 @@ def unload_and_verify_default_endpoint_empty(
     http_transport: OllamaHttpTransport,
     *,
     default_base_url: str = DEFAULT_OLLAMA_BASE_URL,
-    model_tag: str | None = None,
+    model_tag: str | Sequence[str] | set[str] | frozenset[str] | None = None,
+    own_model_tags: Sequence[str] | set[str] | frozenset[str] | None = None,
 ) -> dict[str, object]:
-    """Unload (`keep_alive: 0`) any model loaded on `default_base_url` (`127.0.0.1:11434`) and record that `/api/ps` is empty."""
-    _ = model_tag
+    """Unload (`keep_alive: 0`) only models owned by this run on `default_base_url` (`127.0.0.1:11434`).
+
+    Foreign models belonging to other seats are never unloaded and are recorded by name in
+    `foreign_models` and `foreign_models_present`; `own_models_absent` is True when none of the
+    run's own model tags remains loaded on `default_base_url`.
+    """
+    resolved_own_tags = _normalize_own_model_tags(model_tag, own_model_tags=own_model_tags)
     default_ep = _format_model_endpoint(default_base_url)
     ps_url = f"{default_ep}/api/ps"
     chat_url = f"{default_ep}/api/chat"
@@ -1071,32 +1128,55 @@ def unload_and_verify_default_endpoint_empty(
     models_list = raw_models if isinstance(raw_models, list) else []
 
     unloaded_models: list[str] = []
+    foreign_models: list[str] = []
     for entry in models_list:
         if not isinstance(entry, Mapping):
             continue
         model_name = str(entry.get("model") or entry.get("name") or "").strip()
         if not model_name:
             continue
-        http_transport(
-            "POST",
-            chat_url,
-            {
-                "model": model_name,
-                "messages": [],
-                "keep_alive": 0,
-                "stream": False,
-            },
-        )
-        unloaded_models.append(model_name)
+        if _is_own_model_tag(model_name, resolved_own_tags):
+            http_transport(
+                "POST",
+                chat_url,
+                {
+                    "model": model_name,
+                    "messages": [],
+                    "keep_alive": 0,
+                    "stream": False,
+                },
+            )
+            unloaded_models.append(model_name)
+        else:
+            if model_name not in foreign_models:
+                foreign_models.append(model_name)
 
     after_resp = http_transport("GET", ps_url, None)
     after_raw_models = after_resp.get("models") if isinstance(after_resp, Mapping) else []
     after_models = after_raw_models if isinstance(after_raw_models, list) else []
+    own_models_after: list[str] = []
+    foreign_models_present: list[str] = []
+    for entry in after_models:
+        if not isinstance(entry, Mapping):
+            continue
+        model_name = str(entry.get("model") or entry.get("name") or "").strip()
+        if not model_name:
+            continue
+        if _is_own_model_tag(model_name, resolved_own_tags):
+            own_models_after.append(model_name)
+        else:
+            if model_name not in foreign_models_present:
+                foreign_models_present.append(model_name)
+            if model_name not in foreign_models:
+                foreign_models.append(model_name)
+
     return {
         "endpoint": default_ep,
         "unloaded_models": unloaded_models,
+        "foreign_models": foreign_models,
         "ps_after": dict(after_resp) if isinstance(after_resp, Mapping) else {"models": []},
-        "ps_empty": len(after_models) == 0,
+        "own_models_absent": len(own_models_after) == 0,
+        "foreign_models_present": foreign_models_present,
     }
 
 
@@ -1782,6 +1862,22 @@ def run_stage5_pipeline(
             prompt_token_counter=prompt_token_counter,
         )
 
+    run_own_model_tags: list[str] = []
+
+    def _record_own_model_tag(tag_value: object) -> None:
+        if isinstance(tag_value, str):
+            cleaned_tag = tag_value.strip()
+            if cleaned_tag and cleaned_tag not in run_own_model_tags:
+                run_own_model_tags.append(cleaned_tag)
+
+    _record_own_model_tag(effective_writer_pin.ollama_tag)
+    if ollama_writer is not None:
+        _record_own_model_tag(getattr(ollama_writer, "ollama_tag", None))
+    for _k in ("model", "writer_model", "critic_model", "rewrite_model"):
+        _record_own_model_tag(engine_block.get(_k))
+        if rewrite_client is not None:
+            _record_own_model_tag(getattr(rewrite_client, _k, None))
+
     def _check_partial_offload_or_stop(phase_name: str) -> None:
         if not guard_both_endpoints or ollama_writer is None:
             return
@@ -1792,6 +1888,7 @@ def run_stage5_pipeline(
                 owned_base_url=active_ollama_base_url,
                 default_base_url=DEFAULT_OLLAMA_BASE_URL,
                 model_tag=effective_writer_pin.ollama_tag,
+                own_model_tags=tuple(run_own_model_tags),
             )
         except Stage5PartialOffloadError as po_exc:
             record["stop_reason"] = "PARTIAL_OFFLOAD"
@@ -1800,6 +1897,8 @@ def run_stage5_pipeline(
                 "phase": phase_name,
                 "endpoint": po_exc.endpoint,
                 "model": po_exc.model,
+                "is_own_model": po_exc.is_own_model,
+                "model_owner": po_exc.model_owner,
                 "size": po_exc.size,
                 "size_vram": po_exc.size_vram,
             }
@@ -2305,6 +2404,8 @@ def run_stage5_pipeline(
             def _rung_client_proxy(payload: dict[str, Any]) -> Any:
                 nonlocal current_rung_attempt_calls
                 current_rung_attempt_calls += 1
+                if isinstance(payload, Mapping):
+                    _record_own_model_tag(payload.get("model"))
                 try:
                     return _invoke_rewrite_client(
                         active_rewrite_client,
@@ -2445,6 +2546,8 @@ def run_stage5_pipeline(
             _write_record_and_status(record_path, status_path, record, status_state="running")
 
         def _rewrite_client_proxy(payload: dict[str, Any]) -> Any:
+            if isinstance(payload, Mapping):
+                _record_own_model_tag(payload.get("model"))
             try:
                 return _invoke_rewrite_client(
                     active_rewrite_client,
@@ -2646,6 +2749,7 @@ def run_stage5_pipeline(
                     raw_transport,
                     default_base_url=DEFAULT_OLLAMA_BASE_URL,
                     model_tag=effective_writer_pin.ollama_tag,
+                    own_model_tags=tuple(run_own_model_tags),
                 )
                 record["default_endpoint_end"] = default_end_status
                 if record_path.is_file():

@@ -79,7 +79,7 @@
           "path": ".python-version"
         },
         {
-          "hash": "f06dfaed56d62ed78a7b0a22adc890b8e240f02f82365bad1fda0811bf7e4a45",
+          "hash": "f7b1f48dba94c42b1508d7b779f20a8bbced194f9932d9988be968f469af68fe",
           "path": "CHANGELOG.md"
         },
         {
@@ -744,7 +744,7 @@
           "path": "site/src/content/docs/handbook/index.md"
         },
         {
-          "hash": "09be82b5c900b4d1384b618a0a8c577a97dff1548e7b4d71e9cede5537c89b77",
+          "hash": "b396faf4deb5e28ebd3b675951627a88908df658e06fc3bc533e593ffa550632",
           "path": "site/src/content/docs/handbook/reference.md"
         },
         {
@@ -1851,7 +1851,7 @@
                   "inner": [
                     {
                       "branch": "seed_bank is not None",
-                      "line": 546,
+                      "line": 549,
                       "name": "_load_seed_bank_seeds",
                       "target": {
                         "file": "src/udlab_generator/render.py"
@@ -1860,7 +1860,7 @@
                     },
                     {
                       "branch": "seed_bank is not None",
-                      "line": 547,
+                      "line": 550,
                       "name": "world_from_scenario_seed",
                       "target": {
                         "file": "src/udlab_generator/render.py"
@@ -1869,13 +1869,13 @@
                     },
                     {
                       "branch": "seed_bank is not None",
-                      "line": 550,
+                      "line": 553,
                       "name": "read_bytes",
                       "target": null,
                       "via": "_resolve_stage5_worlds_and_seed_bank"
                     },
                     {
-                      "line": 556,
+                      "line": 559,
                       "name": "generate_world",
                       "target": {
                         "file": "src/udlab_generator/world.py"
@@ -1883,7 +1883,7 @@
                       "via": "_resolve_stage5_worlds_and_seed_bank"
                     },
                     {
-                      "line": 556,
+                      "line": 559,
                       "name": "make_balanced_configs",
                       "target": {
                         "file": "src/udlab_generator/world.py"
@@ -1891,14 +1891,14 @@
                       "via": "_resolve_stage5_worlds_and_seed_bank"
                     },
                     {
-                      "line": 589,
+                      "line": 592,
                       "name": "generate_stage5_shape_plan",
                       "target": {
                         "file": "src/udlab_generator/shape_templates.py"
                       }
                     },
                     {
-                      "line": 592,
+                      "line": 595,
                       "name": "SHAPE_PLAN_BLOCK_SIZE",
                       "passed": true,
                       "target": {
@@ -1906,35 +1906,35 @@
                       }
                     },
                     {
-                      "line": 621,
+                      "line": 624,
                       "name": "load_writer_prompt_template",
                       "target": {
                         "file": "src/udlab_generator/render.py"
                       }
                     },
                     {
-                      "line": 631,
+                      "line": 634,
                       "name": "format_writer_prompt",
                       "target": {
                         "file": "src/udlab_generator/render.py"
                       }
                     },
                     {
-                      "line": 642,
+                      "line": 645,
                       "name": "count_prompt_tokens_exact",
                       "target": {
                         "file": "src/udlab_generator/render.py"
                       }
                     },
                     {
-                      "line": 646,
+                      "line": 649,
                       "name": "estimate_prompt_tokens",
                       "target": {
                         "file": "src/udlab_generator/render.py"
                       }
                     },
                     {
-                      "line": 648,
+                      "line": 651,
                       "name": "prompt_fits_num_ctx_cap",
                       "target": {
                         "file": "src/udlab_generator/render.py"
@@ -1954,7 +1954,7 @@
                   "inner": [
                     {
                       "branch": "resolved_retry_form not in VALID_RETRY_FORMS",
-                      "line": 1359,
+                      "line": 1439,
                       "name": "VALID_RETRY_FORMS",
                       "passed": true,
                       "target": {
@@ -1963,7 +1963,7 @@
                     },
                     {
                       "branch": "goal_mode not in VALID_GOAL_MODES",
-                      "line": 1363,
+                      "line": 1443,
                       "name": "VALID_GOAL_MODES",
                       "passed": true,
                       "target": {
@@ -1972,14 +1972,14 @@
                     },
                     {
                       "branch": "max_num_ctx > DEFAULT_WRITER_MAX_NUM_CTX",
-                      "line": 1366,
+                      "line": 1446,
                       "name": "MaxNumCtxRefusalError",
                       "target": {
                         "file": "src/udlab_generator/render.py"
                       }
                     },
                     {
-                      "line": 1384,
+                      "line": 1464,
                       "name": "DEFAULT_WRITER_MODEL_PIN",
                       "passed": true,
                       "target": {
@@ -1987,13 +1987,13 @@
                       }
                     },
                     {
-                      "line": 1391,
+                      "line": 1471,
                       "name": "mkdir",
                       "target": null
                     },
                     {
                       "branch": "seed_bank is not None",
-                      "line": 546,
+                      "line": 549,
                       "name": "_load_seed_bank_seeds",
                       "target": {
                         "file": "src/udlab_generator/render.py"
@@ -2002,7 +2002,7 @@
                     },
                     {
                       "branch": "seed_bank is not None",
-                      "line": 547,
+                      "line": 550,
                       "name": "world_from_scenario_seed",
                       "target": {
                         "file": "src/udlab_generator/render.py"
@@ -2011,13 +2011,13 @@
                     },
                     {
                       "branch": "seed_bank is not None",
-                      "line": 550,
+                      "line": 553,
                       "name": "read_bytes",
                       "target": null,
                       "via": "_resolve_stage5_worlds_and_seed_bank"
                     },
                     {
-                      "line": 556,
+                      "line": 559,
                       "name": "generate_world",
                       "target": {
                         "file": "src/udlab_generator/world.py"
@@ -2025,7 +2025,7 @@
                       "via": "_resolve_stage5_worlds_and_seed_bank"
                     },
                     {
-                      "line": 556,
+                      "line": 559,
                       "name": "make_balanced_configs",
                       "target": {
                         "file": "src/udlab_generator/world.py"
@@ -2033,14 +2033,14 @@
                       "via": "_resolve_stage5_worlds_and_seed_bank"
                     },
                     {
-                      "line": 1472,
+                      "line": 1552,
                       "name": "generate_stage5_shape_plan",
                       "target": {
                         "file": "src/udlab_generator/shape_templates.py"
                       }
                     },
                     {
-                      "line": 1475,
+                      "line": 1555,
                       "name": "SHAPE_PLAN_BLOCK_SIZE",
                       "passed": true,
                       "target": {
@@ -8257,205 +8257,205 @@
             {
               "in": "decide_rung_input_mode",
               "kind": "raise",
-              "line": 250
+              "line": 253
             },
             {
               "in": "compute_event_folded_flags",
               "kind": "except",
-              "line": 300
+              "line": 303
             },
             {
               "in": "run_stage5_dry",
               "kind": "raise",
-              "line": 575
+              "line": 578
             },
             {
               "in": "_assemble_final_events_for_rendering",
               "kind": "raise",
-              "line": 806
+              "line": 809
             },
             {
               "in": "_read_sealed_b_prose_for_rendering",
               "kind": "except",
-              "line": 861
+              "line": 864
             },
             {
               "in": "_fsync_directory_if_supported",
               "kind": "except",
-              "line": 873
+              "line": 876
             },
             {
               "in": "_fsync_directory_if_supported",
               "kind": "except",
-              "line": 877
+              "line": 880
             },
             {
               "in": "_fsync_directory_if_supported",
               "kind": "except",
-              "line": 882
+              "line": 885
             },
             {
               "in": "check_endpoints_partial_offload",
               "kind": "raise",
-              "line": 1034
+              "line": 1083
             },
             {
               "in": "_sample_rung_events_at_most_one_per_rendering",
               "kind": "raise",
-              "line": 1215
+              "line": 1295
             },
             {
               "in": "_check_resume_environment_drift",
               "kind": "raise",
-              "line": 1306
+              "line": 1386
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 1353
+              "line": 1433
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 1355
+              "line": 1435
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 1358
+              "line": 1438
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 1362
+              "line": 1442
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 1366
+              "line": 1446
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 1371
+              "line": 1451
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 1402
+              "line": 1482
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 1407
+              "line": 1487
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 1412
+              "line": 1492
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 1417
+              "line": 1497
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 1527
+              "line": 1607
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 1544
+              "line": 1624
             },
             {
               "in": "_check_partial_offload_or_stop",
               "kind": "except",
-              "line": 1796
+              "line": 1893
             },
             {
               "in": "_check_partial_offload_or_stop",
               "kind": "raise",
-              "line": 1813
+              "line": 1912
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "except",
-              "line": 2023
+              "line": 2122
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "except",
-              "line": 2110
+              "line": 2209
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "except",
-              "line": 2265
+              "line": 2364
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 2277
+              "line": 2376
             },
             {
               "in": "_rung_client_proxy",
               "kind": "except",
-              "line": 2314
+              "line": 2415
             },
             {
               "in": "_rung_client_proxy",
               "kind": "raise",
-              "line": 2315
+              "line": 2416
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "except",
-              "line": 2341
+              "line": 2442
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 2342
+              "line": 2443
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "except",
-              "line": 2358
+              "line": 2459
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 2377
+              "line": 2478
             },
             {
               "in": "_rewrite_client_proxy",
               "kind": "except",
-              "line": 2454
+              "line": 2557
             },
             {
               "in": "_rewrite_client_proxy",
               "kind": "raise",
-              "line": 2455
+              "line": 2558
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "except",
-              "line": 2519
+              "line": 2622
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 2520
+              "line": 2623
             },
             {
               "in": "run_stage5_pipeline",
               "kind": "raise",
-              "line": 2620
+              "line": 2723
             }
           ],
-          "hash": "b7e41f3c0765e966985915d20459029bbac1db75f7d0622a47076f56cd9a1f76",
+          "hash": "c3a21c50f20e447fa103b14379caacf938f5a398a14047a8450cf567705c215d",
           "importsFiles": [
             "src/udlab_generator/render.py",
             "src/udlab_generator/rewrite.py",
@@ -8467,28 +8467,28 @@
             {
               "calls": [
                 {
-                  "line": 299,
+                  "line": 302,
                   "name": "splice_goal_tokens",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 302,
+                  "line": 305,
                   "name": "normalize_prose_line_endings",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 307,
+                  "line": 310,
                   "name": "_split_prose_sentences",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 328,
+                  "line": 331,
                   "name": "_sentence_matches_folded_leave_enter",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8503,21 +8503,21 @@
             {
               "calls": [
                 {
-                  "line": 364,
+                  "line": 367,
                   "name": "render_world_template_goal_tokens",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 366,
+                  "line": 369,
                   "name": "render_world_template",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 375,
+                  "line": 378,
                   "name": "swap_all_say",
                   "target": {
                     "file": "src/udlab_generator/shape_templates.py"
@@ -8532,7 +8532,7 @@
             {
               "calls": [
                 {
-                  "line": 393,
+                  "line": 396,
                   "name": "items",
                   "target": {
                     "file": "src/udlab_generator/rewrite.py"
@@ -8548,7 +8548,7 @@
               "calls": [
                 {
                   "branch": "seed_bank is not None",
-                  "line": 546,
+                  "line": 549,
                   "name": "_load_seed_bank_seeds",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8556,7 +8556,7 @@
                 },
                 {
                   "branch": "seed_bank is not None",
-                  "line": 547,
+                  "line": 550,
                   "name": "world_from_scenario_seed",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8564,19 +8564,19 @@
                 },
                 {
                   "branch": "seed_bank is not None",
-                  "line": 550,
+                  "line": 553,
                   "name": "read_bytes",
                   "target": null
                 },
                 {
-                  "line": 556,
+                  "line": 559,
                   "name": "generate_world",
                   "target": {
                     "file": "src/udlab_generator/world.py"
                   }
                 },
                 {
-                  "line": 556,
+                  "line": 559,
                   "name": "make_balanced_configs",
                   "target": {
                     "file": "src/udlab_generator/world.py"
@@ -8592,7 +8592,7 @@
               "calls": [
                 {
                   "branch": "seed_bank is not None",
-                  "line": 546,
+                  "line": 549,
                   "name": "_load_seed_bank_seeds",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8601,7 +8601,7 @@
                 },
                 {
                   "branch": "seed_bank is not None",
-                  "line": 547,
+                  "line": 550,
                   "name": "world_from_scenario_seed",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8610,13 +8610,13 @@
                 },
                 {
                   "branch": "seed_bank is not None",
-                  "line": 550,
+                  "line": 553,
                   "name": "read_bytes",
                   "target": null,
                   "via": "_resolve_stage5_worlds_and_seed_bank"
                 },
                 {
-                  "line": 556,
+                  "line": 559,
                   "name": "generate_world",
                   "target": {
                     "file": "src/udlab_generator/world.py"
@@ -8624,7 +8624,7 @@
                   "via": "_resolve_stage5_worlds_and_seed_bank"
                 },
                 {
-                  "line": 556,
+                  "line": 559,
                   "name": "make_balanced_configs",
                   "target": {
                     "file": "src/udlab_generator/world.py"
@@ -8632,14 +8632,14 @@
                   "via": "_resolve_stage5_worlds_and_seed_bank"
                 },
                 {
-                  "line": 589,
+                  "line": 592,
                   "name": "generate_stage5_shape_plan",
                   "target": {
                     "file": "src/udlab_generator/shape_templates.py"
                   }
                 },
                 {
-                  "line": 592,
+                  "line": 595,
                   "name": "SHAPE_PLAN_BLOCK_SIZE",
                   "passed": true,
                   "target": {
@@ -8647,42 +8647,42 @@
                   }
                 },
                 {
-                  "line": 621,
+                  "line": 624,
                   "name": "load_writer_prompt_template",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 631,
+                  "line": 634,
                   "name": "format_writer_prompt",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 642,
+                  "line": 645,
                   "name": "count_prompt_tokens_exact",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 646,
+                  "line": 649,
                   "name": "estimate_prompt_tokens",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 648,
+                  "line": 651,
                   "name": "prompt_fits_num_ctx_cap",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 652,
+                  "line": 655,
                   "name": "NUM_CTX_MARGIN_TOKENS",
                   "passed": true,
                   "target": {
@@ -8698,7 +8698,7 @@
             {
               "calls": [
                 {
-                  "line": 715,
+                  "line": 718,
                   "name": "event_shape_plan_variant",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8713,14 +8713,14 @@
             {
               "calls": [
                 {
-                  "line": 749,
+                  "line": 752,
                   "name": "match_rendering_event_forms",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 299,
+                  "line": 302,
                   "name": "splice_goal_tokens",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8728,7 +8728,7 @@
                   "via": "compute_event_folded_flags"
                 },
                 {
-                  "line": 302,
+                  "line": 305,
                   "name": "normalize_prose_line_endings",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8736,7 +8736,7 @@
                   "via": "compute_event_folded_flags"
                 },
                 {
-                  "line": 307,
+                  "line": 310,
                   "name": "_split_prose_sentences",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8744,7 +8744,7 @@
                   "via": "compute_event_folded_flags"
                 },
                 {
-                  "line": 328,
+                  "line": 331,
                   "name": "_sentence_matches_folded_leave_enter",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8752,7 +8752,7 @@
                   "via": "compute_event_folded_flags"
                 },
                 {
-                  "line": 812,
+                  "line": 815,
                   "name": "event_shape_plan_variant",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8767,17 +8767,17 @@
             {
               "calls": [
                 {
-                  "line": 838,
+                  "line": 841,
                   "name": "is_file",
                   "target": null
                 },
                 {
-                  "line": 841,
+                  "line": 844,
                   "name": "read_text",
                   "target": null
                 },
                 {
-                  "line": 860,
+                  "line": 863,
                   "name": "splice_goal_tokens",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8792,7 +8792,7 @@
             {
               "calls": [
                 {
-                  "line": 868,
+                  "line": 871,
                   "name": "is_dir",
                   "target": null
                 }
@@ -8805,17 +8805,17 @@
             {
               "calls": [
                 {
-                  "line": 888,
+                  "line": 891,
                   "name": "is_file",
                   "target": null
                 },
                 {
-                  "line": 889,
+                  "line": 892,
                   "name": "open",
                   "target": null
                 },
                 {
-                  "line": 868,
+                  "line": 871,
                   "name": "is_dir",
                   "target": null,
                   "via": "_fsync_directory_if_supported"
@@ -8829,26 +8829,26 @@
             {
               "calls": [
                 {
-                  "line": 900,
+                  "line": 903,
                   "name": "append_sealed_response",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 888,
+                  "line": 891,
                   "name": "is_file",
                   "target": null,
                   "via": "_flush_sealed_store"
                 },
                 {
-                  "line": 889,
+                  "line": 892,
                   "name": "open",
                   "target": null,
                   "via": "_flush_sealed_store"
                 },
                 {
-                  "line": 868,
+                  "line": 871,
                   "name": "is_dir",
                   "target": null,
                   "via": "_fsync_directory_if_supported"
@@ -8862,21 +8862,21 @@
             {
               "calls": [
                 {
-                  "line": 928,
+                  "line": 931,
                   "name": "compute_sealed_response_digests",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 931,
+                  "line": 934,
                   "name": "SealedResponseEntry",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 900,
+                  "line": 903,
                   "name": "append_sealed_response",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8884,19 +8884,19 @@
                   "via": "_append_and_flush_sealed_response"
                 },
                 {
-                  "line": 888,
+                  "line": 891,
                   "name": "is_file",
                   "target": null,
                   "via": "_flush_sealed_store"
                 },
                 {
-                  "line": 889,
+                  "line": 892,
                   "name": "open",
                   "target": null,
                   "via": "_flush_sealed_store"
                 },
                 {
-                  "line": 868,
+                  "line": 871,
                   "name": "is_dir",
                   "target": null,
                   "via": "_fsync_directory_if_supported"
@@ -8910,12 +8910,12 @@
             {
               "calls": [
                 {
-                  "line": 957,
+                  "line": 960,
                   "name": "with_name",
                   "target": null
                 },
                 {
-                  "line": 868,
+                  "line": 871,
                   "name": "is_dir",
                   "target": null,
                   "via": "_fsync_directory_if_supported"
@@ -8929,13 +8929,13 @@
             {
               "calls": [
                 {
-                  "line": 957,
+                  "line": 960,
                   "name": "with_name",
                   "target": null,
                   "via": "_atomic_write_json"
                 },
                 {
-                  "line": 868,
+                  "line": 871,
                   "name": "is_dir",
                   "target": null,
                   "via": "_fsync_directory_if_supported"
@@ -8950,7 +8950,7 @@
               "calls": [
                 {
                   "branch": "resolved_retry_form not in VALID_RETRY_FORMS",
-                  "line": 1359,
+                  "line": 1439,
                   "name": "VALID_RETRY_FORMS",
                   "passed": true,
                   "target": {
@@ -8959,7 +8959,7 @@
                 },
                 {
                   "branch": "goal_mode not in VALID_GOAL_MODES",
-                  "line": 1363,
+                  "line": 1443,
                   "name": "VALID_GOAL_MODES",
                   "passed": true,
                   "target": {
@@ -8968,14 +8968,14 @@
                 },
                 {
                   "branch": "max_num_ctx > DEFAULT_WRITER_MAX_NUM_CTX",
-                  "line": 1366,
+                  "line": 1446,
                   "name": "MaxNumCtxRefusalError",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 1384,
+                  "line": 1464,
                   "name": "DEFAULT_WRITER_MODEL_PIN",
                   "passed": true,
                   "target": {
@@ -8983,13 +8983,13 @@
                   }
                 },
                 {
-                  "line": 1391,
+                  "line": 1471,
                   "name": "mkdir",
                   "target": null
                 },
                 {
                   "branch": "seed_bank is not None",
-                  "line": 546,
+                  "line": 549,
                   "name": "_load_seed_bank_seeds",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -8998,7 +8998,7 @@
                 },
                 {
                   "branch": "seed_bank is not None",
-                  "line": 547,
+                  "line": 550,
                   "name": "world_from_scenario_seed",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -9007,13 +9007,13 @@
                 },
                 {
                   "branch": "seed_bank is not None",
-                  "line": 550,
+                  "line": 553,
                   "name": "read_bytes",
                   "target": null,
                   "via": "_resolve_stage5_worlds_and_seed_bank"
                 },
                 {
-                  "line": 556,
+                  "line": 559,
                   "name": "generate_world",
                   "target": {
                     "file": "src/udlab_generator/world.py"
@@ -9021,7 +9021,7 @@
                   "via": "_resolve_stage5_worlds_and_seed_bank"
                 },
                 {
-                  "line": 556,
+                  "line": 559,
                   "name": "make_balanced_configs",
                   "target": {
                     "file": "src/udlab_generator/world.py"
@@ -9029,14 +9029,14 @@
                   "via": "_resolve_stage5_worlds_and_seed_bank"
                 },
                 {
-                  "line": 1472,
+                  "line": 1552,
                   "name": "generate_stage5_shape_plan",
                   "target": {
                     "file": "src/udlab_generator/shape_templates.py"
                   }
                 },
                 {
-                  "line": 1475,
+                  "line": 1555,
                   "name": "SHAPE_PLAN_BLOCK_SIZE",
                   "passed": true,
                   "target": {
@@ -9044,40 +9044,40 @@
                   }
                 },
                 {
-                  "line": 1732,
+                  "line": 1812,
                   "name": "load_writer_prompt_template",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 1755,
+                  "line": 1835,
                   "name": "OllamaWriter",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 957,
+                  "line": 960,
                   "name": "with_name",
                   "target": null,
                   "via": "_atomic_write_json"
                 },
                 {
-                  "line": 868,
+                  "line": 871,
                   "name": "is_dir",
                   "target": null,
                   "via": "_fsync_directory_if_supported"
                 },
                 {
-                  "line": 1875,
+                  "line": 1974,
                   "name": "MockWriter",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 393,
+                  "line": 396,
                   "name": "items",
                   "target": {
                     "file": "src/udlab_generator/rewrite.py"
@@ -9085,7 +9085,7 @@
                   "via": "_build_default_mock_rewrite_client"
                 },
                 {
-                  "line": 1793,
+                  "line": 1889,
                   "name": "DEFAULT_OLLAMA_BASE_URL",
                   "passed": true,
                   "target": {
@@ -9094,19 +9094,19 @@
                   "via": "_check_partial_offload_or_stop"
                 },
                 {
-                  "line": 838,
+                  "line": 841,
                   "name": "is_file",
                   "target": null,
                   "via": "_read_sealed_b_prose_for_rendering"
                 },
                 {
-                  "line": 841,
+                  "line": 844,
                   "name": "read_text",
                   "target": null,
                   "via": "_read_sealed_b_prose_for_rendering"
                 },
                 {
-                  "line": 860,
+                  "line": 863,
                   "name": "splice_goal_tokens",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -9114,14 +9114,14 @@
                   "via": "_read_sealed_b_prose_for_rendering"
                 },
                 {
-                  "line": 1939,
+                  "line": 2038,
                   "name": "match_rendering_event_forms",
                   "target": {
                     "file": "src/udlab_generator/render.py"
                   }
                 },
                 {
-                  "line": 1950,
+                  "line": 2049,
                   "name": "format_writer_prompt",
                   "target": {
                     "file": "src/udlab_generator/render.py"
@@ -9382,6 +9382,14 @@
         {
           "hash": "bb68bc66195e1ce0a711fc28ab4722e4128c3645e880fc1288609129b8e6e35a",
           "path": "tests/fixtures/stage5/stage5_template_swap_fixtures.json"
+        },
+        {
+          "hash": "6ab8ee40b718693d7410fd44b5fecb92a011efd8d657d6dc43fd6830d6e21d53",
+          "path": "tests/fixtures/stage5_plan_statistics_fixture.json"
+        },
+        {
+          "hash": "6799cff607da85e23db808d0db03d5c644309f662a195a71b752efd8cf5a3fd9",
+          "path": "tests/fixtures/stage5_step_timings_fixture.json"
         },
         {
           "hash": "4372f91ff4f2480409ac5db7dbd7112ff6bc609912616e2c653a55bd68e0782c",
@@ -9711,6 +9719,8 @@
             "test_34_card_2026_11_08_b_partial_offload_guard_both_endpoints_and_11434_unload",
             "test_35_card_2026_11_08_c_step_timings_and_call_counts_match_fixture",
             "test_36_card_2026_11_08_d_plan_statistics_per_20_events_fixture",
+            "test_37_card_2026_11_08_fix1_own_and_foreign_model_unloads_own_only",
+            "test_38_card_2026_11_08_fix1_foreign_model_only_sends_no_unload_request",
             "test_3_s_passes_where_b_failed",
             "test_4_context_cap_and_4a_cap_decision_per_rendering",
             "test_5_plan_seed_draws_write_order_and_resume_refusal",
@@ -9719,7 +9729,7 @@
             "test_8_no_prose_in_record_stdout_or_stderr",
             "test_9_repin_and_testing_notes"
           ],
-          "hash": "92d89ea1d1efbe4dd25717907f382b4a9fa46c3f49dde023a05310dc72b67aae",
+          "hash": "852df53642274857449d42fcd1fccd68f0c286011e5bb7fbcee7deea79cb09d6",
           "importsFiles": [
             "src/udlab_generator/__init__.py",
             "src/udlab_generator/cli.py",
@@ -10219,8 +10229,8 @@
   ],
   "engine": "1.24.0",
   "generatedFrom": {
-    "commit": "e841cdf3f7bf492fd56dbb4eb7259c129b53c1fc",
-    "tracked": 84
+    "commit": "d14262f0a040bb6f83f49dece20678beebbe4971",
+    "tracked": 86
   },
   "landings": [
     {
@@ -10696,6 +10706,6 @@
   "overlaps": [],
   "submodules": [],
   "symlinks": [],
-  "testFiles": 26,
+  "testFiles": 28,
   "unassigned": []
 }

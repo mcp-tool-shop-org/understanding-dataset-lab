@@ -43,7 +43,7 @@ sidebar:
 
 | Option | What it does |
 |---|---|
-| `--stage5` | Run the Stage 5 pipeline (keeping one owned Ollama server across `b`, `rung`, `swap` and `rewrite`) and write `stage5_run_record.json` (with `model_endpoint` and `step_timings` per step). |
+| `--stage5` | Run the Stage 5 pipeline (keeping one owned Ollama server across `b`, `rung`, `swap` and `rewrite`, guarding both endpoints against partial GPU offload with owner attribution, and unloading only the run's own model on `127.0.0.1:11434` at the end while leaving foreign models untouched) and write `stage5_run_record.json` (with `model_endpoint`, `step_timings`, and `default_endpoint_end` recording `unloaded_models`, `foreign_models`, `own_models_absent`, and `foreign_models_present`). |
 | `--dry` | With `--stage5`: build the worlds and the plan, and print counts and per-20-event stream block balance without a writer or files. |
 | `--stage5-seed-bank FILE` | A JSON list of scenario seeds for `--stage5`. |
 | `--stage5-plan-seed`, `--stage5-rung-seed` | Fixed seeds, for replay and tests only. |

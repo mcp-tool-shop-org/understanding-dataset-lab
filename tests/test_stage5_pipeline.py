@@ -2735,8 +2735,10 @@ def test_34_card_2026_11_08_b_partial_offload_guard_both_endpoints_and_11434_unl
         )
     assert exc_owned.value.failure_class == "STAGE5_PARTIAL_OFFLOAD"
     assert exc_owned.value.endpoint == "http://127.0.0.1:11499"
+    assert exc_owned.value.is_own_model is True
+    assert "run's own model" in str(exc_owned.value)
 
-    # 2. Partial offload on default port (11434) halts with STAGE5_PARTIAL_OFFLOAD
+    # 2a. Partial offload on default port (11434) for the run's own model halts with STAGE5_PARTIAL_OFFLOAD
     h_def_partial = _make_dual_endpoint_harness(
         owned_vram=23_000_000_000,
         default_models_initial=[
@@ -2767,10 +2769,47 @@ def test_34_card_2026_11_08_b_partial_offload_guard_both_endpoints_and_11434_unl
         )
     assert exc_def.value.failure_class == "STAGE5_PARTIAL_OFFLOAD"
     assert exc_def.value.endpoint == "http://127.0.0.1:11434"
+    assert exc_def.value.is_own_model is True
+    assert "run's own model" in str(exc_def.value)
     assert "http://127.0.0.1:11499/api/ps" in h_def_partial["ps_checks"]
     assert "http://127.0.0.1:11434/api/ps" in h_def_partial["ps_checks"]
 
-    # 3. Full offload on both endpoints, with a model left loaded on 11434: unloaded (keep_alive: 0) at end and /api/ps empty recorded
+    # 2b. Partial offload on default port (11434) for another seat's model halts and identifies it as another seat's model
+    h_def_foreign_partial = _make_dual_endpoint_harness(
+        owned_vram=23_000_000_000,
+        default_models_initial=[
+            {
+                "name": "foreign-seat:70b",
+                "model": "foreign-seat:70b",
+                "size": 40_000_000_000,
+                "size_vram": 20_000_000_000,
+            }
+        ],
+    )
+    with pytest.raises(stage5_mod.Stage5PartialOffloadError) as exc_def_foreign:
+        run_stage5_pipeline(
+            count=n,
+            base_seed=base_seed,
+            output_dir=tmp_path / "run_34_def_foreign_partial",
+            writer_kind="ollama",
+            stage5_plan_seed=20261103,
+            stage5_rung_seed=20261104,
+            server_port=11499,
+            start_owned_server=True,
+            guard_both_endpoints=True,
+            popen_factory=h_def_foreign_partial["popen_factory"],
+            pid_killer=h_def_foreign_partial["pid_killer"],
+            http_transport=h_def_foreign_partial["http_transport"],
+            prompt_token_counter=lambda _: 3200,
+            worlds=worlds,
+        )
+    assert exc_def_foreign.value.failure_class == "STAGE5_PARTIAL_OFFLOAD"
+    assert exc_def_foreign.value.endpoint == "http://127.0.0.1:11434"
+    assert exc_def_foreign.value.model == "foreign-seat:70b"
+    assert exc_def_foreign.value.is_own_model is False
+    assert "another seat's model" in str(exc_def_foreign.value)
+
+    # 3. Full offload on both endpoints, with the run's own model left loaded on 11434: unloaded (keep_alive: 0) at end and new record shape recorded
     h_cleanup = _make_dual_endpoint_harness(
         owned_vram=23_000_000_000,
         default_models_initial=[
@@ -2807,9 +2846,12 @@ def test_34_card_2026_11_08_b_partial_offload_guard_both_endpoints_and_11434_unl
     assert rec["default_endpoint_end"] == {
         "endpoint": "http://127.0.0.1:11434",
         "unloaded_models": ["qwen3.6:35b"],
+        "foreign_models": [],
         "ps_after": {"models": []},
-        "ps_empty": True,
+        "own_models_absent": True,
+        "foreign_models_present": [],
     }
+    assert "ps_empty" not in rec["default_endpoint_end"]
 
 
 def test_35_card_2026_11_08_c_step_timings_and_call_counts_match_fixture(
@@ -2923,4 +2965,162 @@ def test_36_card_2026_11_08_d_plan_statistics_per_20_events_fixture() -> None:
         assert dry_res[k] == fixture[k]
 
 
+def test_37_card_2026_11_08_fix1_own_and_foreign_model_unloads_own_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Card 2026-11-08 PR #21 Fix 1 Test 1: When 11434 lists the run's own model and a foreign model, only the run's model gets `keep_alive: 0`; the foreign one gets no request at all, `foreign_models` names it, and `own_models_absent` is True."""
+    monkeypatch.setattr(stage5_mod, "STAGE5_RUNG_PER_TARGET", 1)
+    n = 4
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
 
+    base_harness = _make_fake_owned_server_stage5_harness(worlds, owned_port=11499)
+    inner_transport = base_harness["http_transport"]
+    owned_base = base_harness["owned_base_url"]
+    default_base = "http://127.0.0.1:11434"
+    default_models: list[dict[str, Any]] = [
+        {
+            "name": "qwen3.6:35b",
+            "model": "qwen3.6:35b",
+            "size": 23_000_000_000,
+            "size_vram": 23_000_000_000,
+        },
+        {
+            "name": "other-seat:14b",
+            "model": "other-seat:14b",
+            "size": 9_000_000_000,
+            "size_vram": 9_000_000_000,
+        },
+    ]
+    default_post_requests: list[dict[str, Any]] = []
+
+    def _transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if method == "GET" and url == f"{owned_base}/api/ps":
+            return {
+                "models": [
+                    {
+                        "name": "qwen3.6:35b",
+                        "model": "qwen3.6:35b",
+                        "size": 23_000_000_000,
+                        "size_vram": 23_000_000_000,
+                    }
+                ]
+            }
+        if method == "GET" and url == f"{default_base}/api/ps":
+            return {"models": [dict(m) for m in default_models]}
+        if method == "POST" and url.startswith(default_base):
+            default_post_requests.append({"url": url, "payload": dict(payload or {})})
+            if payload is not None and payload.get("keep_alive") == 0 and not payload.get("messages"):
+                unloaded_name = payload.get("model")
+                default_models[:] = [
+                    m
+                    for m in default_models
+                    if m.get("model") != unloaded_name and m.get("name") != unloaded_name
+                ]
+                return {"model": str(unloaded_name), "done": True}
+        return inner_transport(method, url, payload)
+
+    rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=tmp_path / "run_37_own_and_foreign",
+        writer_kind="ollama",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        server_port=11499,
+        start_owned_server=True,
+        guard_both_endpoints=True,
+        popen_factory=base_harness["popen_factory"],
+        pid_killer=base_harness["pid_killer"],
+        http_transport=_transport,
+        prompt_token_counter=lambda _: 3200,
+        worlds=worlds,
+    )
+
+    assert len(default_post_requests) == 1
+    assert default_post_requests[0]["url"] == "http://127.0.0.1:11434/api/chat"
+    assert default_post_requests[0]["payload"]["model"] == "qwen3.6:35b"
+    assert default_post_requests[0]["payload"]["keep_alive"] == 0
+    assert all(
+        req["payload"].get("model") != "other-seat:14b" for req in default_post_requests
+    )
+    assert [m["model"] for m in default_models] == ["other-seat:14b"]
+
+    end_rec = rec["default_endpoint_end"]
+    assert end_rec["endpoint"] == "http://127.0.0.1:11434"
+    assert end_rec["unloaded_models"] == ["qwen3.6:35b"]
+    assert end_rec["foreign_models"] == ["other-seat:14b"]
+    assert end_rec["own_models_absent"] is True
+    assert end_rec["foreign_models_present"] == ["other-seat:14b"]
+    assert "ps_empty" not in end_rec
+
+
+def test_38_card_2026_11_08_fix1_foreign_model_only_sends_no_unload_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Card 2026-11-08 PR #21 Fix 1 Test 2: When 11434 lists only a foreign model, no unload request is sent at all."""
+    monkeypatch.setattr(stage5_mod, "STAGE5_RUNG_PER_TARGET", 1)
+    n = 4
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+
+    base_harness = _make_fake_owned_server_stage5_harness(worlds, owned_port=11499)
+    inner_transport = base_harness["http_transport"]
+    owned_base = base_harness["owned_base_url"]
+    default_base = "http://127.0.0.1:11434"
+    default_models: list[dict[str, Any]] = [
+        {
+            "name": "bookkeeper:8b",
+            "model": "bookkeeper:8b",
+            "size": 5_000_000_000,
+            "size_vram": 5_000_000_000,
+        }
+    ]
+    default_post_requests: list[dict[str, Any]] = []
+
+    def _transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if method == "GET" and url == f"{owned_base}/api/ps":
+            return {
+                "models": [
+                    {
+                        "name": "qwen3.6:35b",
+                        "model": "qwen3.6:35b",
+                        "size": 23_000_000_000,
+                        "size_vram": 23_000_000_000,
+                    }
+                ]
+            }
+        if method == "GET" and url == f"{default_base}/api/ps":
+            return {"models": [dict(m) for m in default_models]}
+        if method == "POST" and url.startswith(default_base):
+            default_post_requests.append({"url": url, "payload": dict(payload or {})})
+            return {"done": True}
+        return inner_transport(method, url, payload)
+
+    rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=tmp_path / "run_38_foreign_only",
+        writer_kind="ollama",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        server_port=11499,
+        start_owned_server=True,
+        guard_both_endpoints=True,
+        popen_factory=base_harness["popen_factory"],
+        pid_killer=base_harness["pid_killer"],
+        http_transport=_transport,
+        prompt_token_counter=lambda _: 3200,
+        worlds=worlds,
+    )
+
+    assert default_post_requests == []
+    assert [m["model"] for m in default_models] == ["bookkeeper:8b"]
+
+    end_rec = rec["default_endpoint_end"]
+    assert end_rec["endpoint"] == "http://127.0.0.1:11434"
+    assert end_rec["unloaded_models"] == []
+    assert end_rec["foreign_models"] == ["bookkeeper:8b"]
+    assert end_rec["own_models_absent"] is True
+    assert end_rec["foreign_models_present"] == ["bookkeeper:8b"]
+    assert "ps_empty" not in end_rec

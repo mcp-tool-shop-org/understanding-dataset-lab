@@ -29,40 +29,24 @@
   ],
   "changes": {
     "fileCounts": {
-      "added": 0,
-      "changed": 7,
+      "added": 2,
+      "changed": 4,
       "moved": 0,
-      "parts": 5,
+      "parts": 4,
       "removed": 0
     },
     "items": [
       {
-        "kind": "landing",
-        "sentence": "tests/fixtures/stage5_plan_statistics_fixture.json is now read by tests/test_stage5_pipeline.py.",
-        "subjects": [
-          "tests/fixtures/stage5_plan_statistics_fixture.json",
-          "tests/test_stage5_pipeline.py"
-        ]
-      },
-      {
-        "kind": "landing",
-        "sentence": "tests/fixtures/stage5_step_timings_fixture.json is now read by tests/test_stage5_pipeline.py.",
-        "subjects": [
-          "tests/fixtures/stage5_step_timings_fixture.json",
-          "tests/test_stage5_pipeline.py"
-        ]
-      },
-      {
         "kind": "counts",
-        "sentence": "7 files changed content, across 5 parts.",
+        "sentence": "Nothing structural changed since 2026-11-08; 2 files added and 4 changed content.",
         "subjects": []
       }
     ],
     "since": {
-      "commit": "81765f0771ad08be34a18e52305b9f39b5fb4421",
-      "generatedAt": "2026-11-04T00:27:13.428Z"
+      "commit": "e841cdf3f7bf492fd56dbb4eb7259c129b53c1fc",
+      "generatedAt": "2026-11-08T08:14:14.168Z"
     },
-    "unchanged": false
+    "unchanged": true
   },
   "changesTogether": [
     {
@@ -146,7 +130,7 @@
     "Window: 180 days; a pair counts from 3 shared commits, since 5 source files reach 10 revisions; the floor rises to 10 when 25 do."
   ],
   "changesTogetherWithTests": 0,
-  "commit": "e841cdf3f7bf492fd56dbb4eb7259c129b53c1fc",
+  "commit": "d14262f0a040bb6f83f49dece20678beebbe4971",
   "defaultBranch": "main",
   "derived": "7 parts, mostly Python (23 files), CSS (2), TypeScript (2), shell (2), Astro (1) and JavaScript (1). Work enters through 3 doors; the busiest is ci, which reaches 3 parts. It deploys a site to GitHub Pages. People run udlab-gen.",
   "doors": [
@@ -255,7 +239,7 @@
   "edges": [],
   "engine": "1.24.0",
   "generated": [],
-  "generatedAt": "2026-11-08T08:14:14.168Z",
+  "generatedAt": "2026-11-08T08:56:36.465Z",
   "limits": [
     "7 reads use paths built at run time and are not named here.",
     "26 writes and 56 reads go to a path their caller passes, not to this repository.",
@@ -286,7 +270,7 @@
   "startReason": "This path follows udlab-gen (a command people run) from its entry, since ci runs only tests.",
   "summary": "understanding-dataset-lab (a prototype) plans multi-party scenes in code, puts them into prose with a local writer model, checks every rendering against the plan, and seals the code-made answer keys with a private seed.",
   "summaryFrom": "person",
-  "testFiles": 26,
+  "testFiles": 28,
   "testedBy": {
     "scripts": 1,
     "src": 9
