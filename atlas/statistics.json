@@ -83,7 +83,7 @@
       "confidence": "low",
       "highWater": null,
       "name": "site",
-      "qualifyingSourceCommits": 1,
+      "qualifyingSourceCommits": 0,
       "rebaseline": null
     },
     {
@@ -101,7 +101,7 @@
       "confidence": "full",
       "highWater": null,
       "name": "src",
-      "qualifyingSourceCommits": 45,
+      "qualifyingSourceCommits": 46,
       "rebaseline": null
     },
     {
@@ -132,8 +132,8 @@
         "path": ".gitattributes"
       },
       {
-        "commits": 2,
-        "lines": 69,
+        "commits": 1,
+        "lines": 81,
         "path": ".github/workflows/ci.yml"
       },
       {
@@ -162,8 +162,8 @@
         "path": ".python-version"
       },
       {
-        "commits": 2,
-        "lines": 29,
+        "commits": 3,
+        "lines": 43,
         "path": "CHANGELOG.md"
       },
       {
@@ -172,48 +172,48 @@
         "path": "LICENSE"
       },
       {
-        "commits": 2,
-        "lines": 112,
+        "commits": 1,
+        "lines": 110,
         "path": "README.es.md"
       },
       {
-        "commits": 2,
-        "lines": 98,
+        "commits": 1,
+        "lines": 96,
         "path": "README.fr.md"
       },
       {
-        "commits": 2,
-        "lines": 98,
+        "commits": 1,
+        "lines": 96,
         "path": "README.hi.md"
       },
       {
-        "commits": 2,
-        "lines": 98,
+        "commits": 1,
+        "lines": 96,
         "path": "README.it.md"
       },
       {
-        "commits": 2,
-        "lines": 98,
+        "commits": 1,
+        "lines": 96,
         "path": "README.ja.md"
       },
       {
-        "commits": 4,
-        "lines": 134,
+        "commits": 3,
+        "lines": 132,
         "path": "README.md"
       },
       {
-        "commits": 2,
-        "lines": 98,
+        "commits": 1,
+        "lines": 96,
         "path": "README.pt-BR.md"
       },
       {
-        "commits": 2,
-        "lines": 98,
+        "commits": 1,
+        "lines": 96,
         "path": "README.zh.md"
       },
       {
-        "commits": 1,
-        "lines": 49,
+        "commits": 2,
+        "lines": 113,
         "path": "SCORECARD.md"
       },
       {
@@ -222,13 +222,13 @@
         "path": "SECURITY.md"
       },
       {
-        "commits": 1,
-        "lines": 84,
+        "commits": 2,
+        "lines": 88,
         "path": "SHIP_GATE.md"
       },
       {
         "commits": 2,
-        "lines": 103,
+        "lines": 97,
         "path": "atlas/README.md"
       },
       {
@@ -238,17 +238,17 @@
       },
       {
         "commits": 2,
-        "lines": 317,
+        "lines": 321,
         "path": "atlas/page.json"
       },
       {
         "commits": 2,
-        "lines": 743,
+        "lines": 770,
         "path": "atlas/statistics.json"
       },
       {
         "commits": 2,
-        "lines": 10958,
+        "lines": 11007,
         "path": "atlas/structure.json"
       },
       {
@@ -312,8 +312,8 @@
         "path": "site/src/content.config.ts"
       },
       {
-        "commits": 2,
-        "lines": 62,
+        "commits": 1,
+        "lines": 60,
         "path": "site/src/content/docs/handbook/getting-started.md"
       },
       {
@@ -327,8 +327,8 @@
         "path": "site/src/content/docs/handbook/index.md"
       },
       {
-        "commits": 1,
-        "lines": 60,
+        "commits": 2,
+        "lines": 66,
         "path": "site/src/content/docs/handbook/reference.md"
       },
       {
@@ -347,8 +347,8 @@
         "path": "site/src/pages/index.astro"
       },
       {
-        "commits": 2,
-        "lines": 96,
+        "commits": 1,
+        "lines": 94,
         "path": "site/src/site-config.ts"
       },
       {
@@ -422,8 +422,8 @@
         "path": "src/udlab_generator/shape_templates.py"
       },
       {
-        "commits": 2,
-        "lines": 3616,
+        "commits": 3,
+        "lines": 3972,
         "path": "src/udlab_generator/stage5_pipeline.py"
       },
       {
@@ -435,6 +435,11 @@
         "commits": 1,
         "lines": 17,
         "path": "tests/TESTING-NOTES.md"
+      },
+      {
+        "commits": 1,
+        "lines": 55,
+        "path": "tests/conftest.py"
       },
       {
         "commits": 1,
@@ -503,12 +508,22 @@
       },
       {
         "commits": 1,
+        "lines": 117,
+        "path": "tests/fixtures/stage5_plan_statistics_fixture.json"
+      },
+      {
+        "commits": 1,
+        "lines": 43,
+        "path": "tests/fixtures/stage5_step_timings_fixture.json"
+      },
+      {
+        "commits": 1,
         "lines": 1240,
         "path": "tests/stage4_verdict_invariance_expected.json"
       },
       {
-        "commits": 2,
-        "lines": 2840,
+        "commits": 3,
+        "lines": 2854,
         "path": "tests/test_colab_launcher.py"
       },
       {
@@ -537,8 +552,8 @@
         "path": "tests/test_stage4_shape_plan.py"
       },
       {
-        "commits": 3,
-        "lines": 2599,
+        "commits": 4,
+        "lines": 2948,
         "path": "tests/test_stage5_pipeline.py"
       },
       {
@@ -572,9 +587,9 @@
     "level": "low",
     "reason": "fewer than 25 source files reach 10 revisions in the window"
   },
-  "generatedAt": "2026-11-04T00:27:13.428Z",
+  "generatedAt": "2026-11-08T08:56:36.465Z",
   "generatedFrom": {
-    "commit": "81765f0771ad08be34a18e52305b9f39b5fb4421"
+    "commit": "d14262f0a040bb6f83f49dece20678beebbe4971"
   },
   "pairs": [
     {
@@ -635,7 +650,7 @@
     }
   ],
   "parameters": {
-    "appliedChangesetLimit": 22.25,
+    "appliedChangesetLimit": 22.75,
     "changeset": 50,
     "changesetFraction": 0.25,
     "cohesionDrop": 0.2,
@@ -644,16 +659,16 @@
     "floor": "fallen",
     "floorHeld": false,
     "floorTrigger": "revision-depth",
-    "headDate": "2026-11-03T18:42:23-05:00",
-    "inScopeFiles": 89,
+    "headDate": "2026-11-08T03:26:11-05:00",
+    "inScopeFiles": 91,
     "pinnedStart": null,
     "priorFloor": "fallen",
-    "qualifyingCommits": 50,
+    "qualifyingCommits": 49,
     "qualifyingMinimum": 30,
     "revisions": 5,
     "shared": 10,
     "sharedFloorUsed": 3,
-    "since": "2026-05-07T23:42:23.000Z",
+    "since": "2026-05-12T08:26:11.000Z",
     "sourceExtensions": [
       ".js",
       ".mjs",

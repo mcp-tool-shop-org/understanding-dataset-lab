@@ -1,6 +1,6 @@
 # understanding-dataset-lab: how it works
 
-Mapped at 2026-11-04 from commit 81765f0 by Atlas 1.24.0.
+Mapped at 2026-11-08 from commit d14262f by Atlas 1.24.0.
 
 ## What this is
 
@@ -8,9 +8,9 @@ understanding-dataset-lab (a prototype) plans multi-party scenes in code, puts t
 
 7 parts, mostly Python (23 files), CSS (2), TypeScript (2), shell (2), Astro (1) and JavaScript (1). Work enters through 3 doors; the busiest is ci, which reaches 3 parts. It deploys a site to GitHub Pages. People run udlab-gen.
 
-## What changed since 2026-11-03 (d951db7)
+## What changed since 2026-11-08 (e841cdf)
 
-Nothing structural changed since 2026-11-03; 1 file added and 3 changed content.
+Nothing structural changed since 2026-11-08; 2 files added and 4 changed content.
 
 ## What comes in
 

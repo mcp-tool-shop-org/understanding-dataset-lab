@@ -29,22 +29,22 @@
   ],
   "changes": {
     "fileCounts": {
-      "added": 1,
-      "changed": 3,
+      "added": 2,
+      "changed": 4,
       "moved": 0,
-      "parts": 3,
+      "parts": 4,
       "removed": 0
     },
     "items": [
       {
         "kind": "counts",
-        "sentence": "Nothing structural changed since 2026-11-03; 1 file added and 3 changed content.",
+        "sentence": "Nothing structural changed since 2026-11-08; 2 files added and 4 changed content.",
         "subjects": []
       }
     ],
     "since": {
-      "commit": "d951db755b91a7e38466fa75e67e601ef90ca9e1",
-      "generatedAt": "2026-11-03T22:24:20.484Z"
+      "commit": "e841cdf3f7bf492fd56dbb4eb7259c129b53c1fc",
+      "generatedAt": "2026-11-08T08:14:14.168Z"
     },
     "unchanged": true
   },
@@ -130,7 +130,7 @@
     "Window: 180 days; a pair counts from 3 shared commits, since 5 source files reach 10 revisions; the floor rises to 10 when 25 do."
   ],
   "changesTogetherWithTests": 0,
-  "commit": "81765f0771ad08be34a18e52305b9f39b5fb4421",
+  "commit": "d14262f0a040bb6f83f49dece20678beebbe4971",
   "defaultBranch": "main",
   "derived": "7 parts, mostly Python (23 files), CSS (2), TypeScript (2), shell (2), Astro (1) and JavaScript (1). Work enters through 3 doors; the busiest is ci, which reaches 3 parts. It deploys a site to GitHub Pages. People run udlab-gen.",
   "doors": [
@@ -239,7 +239,7 @@
   "edges": [],
   "engine": "1.24.0",
   "generated": [],
-  "generatedAt": "2026-11-04T00:27:13.428Z",
+  "generatedAt": "2026-11-08T08:56:36.465Z",
   "limits": [
     "7 reads use paths built at run time and are not named here.",
     "26 writes and 56 reads go to a path their caller passes, not to this repository.",
@@ -270,7 +270,7 @@
   "startReason": "This path follows udlab-gen (a command people run) from its entry, since ci runs only tests.",
   "summary": "understanding-dataset-lab (a prototype) plans multi-party scenes in code, puts them into prose with a local writer model, checks every rendering against the plan, and seals the code-made answer keys with a private seed.",
   "summaryFrom": "person",
-  "testFiles": 26,
+  "testFiles": 28,
   "testedBy": {
     "scripts": 1,
     "src": 9

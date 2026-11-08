@@ -203,6 +203,32 @@ class Stage5RungSampleShortError(Stage5PipelineError):
         super().__init__("STAGE5_RUNG_SAMPLE_SHORT", msg)
 
 
+class Stage5PartialOffloadError(Stage5PipelineError):
+    """Raised when `/api/ps` on the owned endpoint or `127.0.0.1:11434` reports partial GPU offload (`size_vram < size`), stating whether the offloaded model is the run's own model or another seat's model."""
+
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        model: str,
+        size: int,
+        size_vram: int,
+        is_own_model: bool = True,
+    ) -> None:
+        self.endpoint = str(endpoint)
+        self.model = str(model)
+        self.size = int(size)
+        self.size_vram = int(size_vram)
+        self.is_own_model = bool(is_own_model)
+        self.model_owner = "run's own model" if self.is_own_model else "another seat's model"
+        msg = (
+            f"STAGE5_PARTIAL_OFFLOAD: partial offload detected on {self.endpoint} "
+            f"for model={self.model} ({self.model_owner}; size_vram={self.size_vram} < size={self.size})"
+        )
+        super().__init__("STAGE5_PARTIAL_OFFLOAD", msg)
+
+
+
 def compute_stage5_module_sha256s() -> dict[str, str]:
     """Compute SHA-256 digests of the checker, template, and guard modules (`render.py`, `shape_templates.py`, `rewrite.py`)."""
     pkg_dir = Path(__file__).resolve().parent
@@ -403,13 +429,59 @@ def _build_default_mock_rewrite_client(worlds: Sequence[World]) -> Callable[[dic
     return _mock_client
 
 
+class PlanStatisticsResult(tuple):  # type: ignore[type-arg]
+    """3-tuple `(counts_by_kind, counts_by_variant, max_spread_by_variant)` carrying per-20-events block spreads (including tail) and global spreads."""
+
+    counts_by_kind: dict[str, dict[str, int]]
+    counts_by_variant: dict[str, dict[str, int]]
+    block_balance_max_spread_by_variant: dict[str, int]
+    block_balance_max_spread: int
+    global_balance_max_spread_by_variant: dict[str, int]
+    global_balance_max_spread: int
+    stream_block_spreads_by_variant: dict[str, list[int]]
+    stream_lengths_by_variant: dict[str, int]
+
+    def __new__(
+        cls,
+        counts_by_kind: dict[str, dict[str, int]],
+        counts_by_variant: dict[str, dict[str, int]],
+        max_spread_by_variant: dict[str, int],
+        *,
+        global_spread_by_variant: dict[str, int],
+        stream_block_spreads_by_variant: dict[str, list[int]],
+        stream_lengths_by_variant: dict[str, int],
+    ) -> PlanStatisticsResult:
+        obj = super().__new__(cls, (counts_by_kind, counts_by_variant, max_spread_by_variant))
+        obj.counts_by_kind = counts_by_kind
+        obj.counts_by_variant = counts_by_variant
+        obj.block_balance_max_spread_by_variant = max_spread_by_variant
+        obj.block_balance_max_spread = max(max_spread_by_variant.values()) if max_spread_by_variant else 0
+        obj.global_balance_max_spread_by_variant = global_spread_by_variant
+        obj.global_balance_max_spread = max(global_spread_by_variant.values()) if global_spread_by_variant else 0
+        obj.stream_block_spreads_by_variant = stream_block_spreads_by_variant
+        obj.stream_lengths_by_variant = stream_lengths_by_variant
+        return obj
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "planned_form_counts_by_kind": self.counts_by_kind,
+            "planned_form_counts_by_variant": self.counts_by_variant,
+            "stream_lengths_by_variant": self.stream_lengths_by_variant,
+            "stream_block_spreads_by_variant": self.stream_block_spreads_by_variant,
+            "block_balance_max_spread_by_variant": self.block_balance_max_spread_by_variant,
+            "block_balance_max_spread": self.block_balance_max_spread,
+            "global_balance_max_spread_by_variant": self.global_balance_max_spread_by_variant,
+            "global_balance_max_spread": self.global_balance_max_spread,
+        }
+
+
 def _compute_plan_statistics(
     worlds: Sequence[World],
     plan_bundle: Mapping[str, Any],
     *,
     block_size: int = SHAPE_PLAN_BLOCK_SIZE,
-) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, int]], dict[str, int]]:
-    """Compute per-kind form counts, per-variant form counts, and block-balance max spread across `worlds`."""
+) -> PlanStatisticsResult:
+    """Compute per-kind form counts, per-variant form counts, per-stream 20-event block spreads (including tail), and global spread across `worlds`."""
     plan_by_sid: Mapping[str, Sequence[Mapping[str, Any]]] = plan_bundle["plan_by_scenario_id"]  # type: ignore[assignment]
     counts_by_kind: dict[str, dict[str, int]] = {
         "move": {f: 0 for f in (*MOVE_FORMS, "MOVE_0")},
@@ -432,6 +504,9 @@ def _compute_plan_statistics(
                 counts_by_variant[variant][form_id] += 1
 
     max_spread_by_variant: dict[str, int] = {v: 0 for v in STAGE5_ASSIGNED_VARIANTS}
+    global_spread_by_variant: dict[str, int] = {v: 0 for v in STAGE5_ASSIGNED_VARIANTS}
+    stream_block_spreads_by_variant: dict[str, list[int]] = {v: [] for v in STAGE5_ASSIGNED_VARIANTS}
+    stream_lengths_by_variant: dict[str, int] = {v: 0 for v in STAGE5_ASSIGNED_VARIANTS}
     for v, forms in STAGE5_ASSIGNED_VARIANTS.items():
         stream_forms: list[str] = [
             str(rec["form_id"])
@@ -439,15 +514,27 @@ def _compute_plan_statistics(
             for rec in plan_by_sid.get(w.scenario_id, ())
             if str(rec["variant"]) == v
         ]
+        stream_lengths_by_variant[v] = len(stream_forms)
         for b_start in range(0, len(stream_forms), block_size):
             block_forms = stream_forms[b_start : b_start + block_size]
             b_counts = Counter(block_forms)
             vals = [b_counts[f] for f in forms]
             spread = max(vals) - min(vals)
+            stream_block_spreads_by_variant[v].append(spread)
             if spread > max_spread_by_variant[v]:
                 max_spread_by_variant[v] = spread
+        if stream_forms:
+            g_vals = [counts_by_variant[v][f] for f in forms]
+            global_spread_by_variant[v] = max(g_vals) - min(g_vals)
 
-    return counts_by_kind, counts_by_variant, max_spread_by_variant
+    return PlanStatisticsResult(
+        counts_by_kind,
+        counts_by_variant,
+        max_spread_by_variant,
+        global_spread_by_variant=global_spread_by_variant,
+        stream_block_spreads_by_variant=stream_block_spreads_by_variant,
+        stream_lengths_by_variant=stream_lengths_by_variant,
+    )
 
 
 def _resolve_stage5_worlds_and_seed_bank(
@@ -507,11 +594,12 @@ def run_stage5_dry(
         seed=plan_seed,
         block_size=SHAPE_PLAN_BLOCK_SIZE,
     )
-    counts_by_kind, counts_by_variant, max_spread_by_variant = _compute_plan_statistics(
+    plan_stats = _compute_plan_statistics(
         resolved_worlds,
         plan_bundle,
         block_size=SHAPE_PLAN_BLOCK_SIZE,
     )
+    counts_by_kind, counts_by_variant, max_spread_by_variant = plan_stats
     num_scenarios = len(resolved_worlds)
     num_renderings = num_scenarios * 2
     say_events_per_rendering_pass = sum(
@@ -580,8 +668,12 @@ def run_stage5_dry(
         "ctx_over_cap": ctx_over_cap_count,
         "planned_form_counts_by_kind": counts_by_kind,
         "planned_form_counts_by_variant": counts_by_variant,
+        "stream_lengths_by_variant": plan_stats.stream_lengths_by_variant,
+        "stream_block_spreads_by_variant": plan_stats.stream_block_spreads_by_variant,
         "block_balance_max_spread_by_variant": max_spread_by_variant,
         "block_balance_max_spread": max_spread_overall,
+        "global_balance_max_spread_by_variant": plan_stats.global_balance_max_spread_by_variant,
+        "global_balance_max_spread": plan_stats.global_balance_max_spread,
         "expected_call_counts_is_upper_bound_before_ctx_cap": True,
         "expected_call_counts_upper_bound_before_ctx_cap": expected_call_counts,
         "expected_call_counts": expected_call_counts,
@@ -910,6 +1002,185 @@ def _make_empty_step_timings() -> dict[str, dict[str, Any]]:
     return {step: _make_empty_step_timing() for step in ("b", "rung", "swap", "rewrite")}
 
 
+def _normalize_own_model_tags(
+    model_tag: str | Sequence[str] | set[str] | frozenset[str] | None = None,
+    *,
+    own_model_tags: Sequence[str] | set[str] | frozenset[str] | None = None,
+) -> tuple[str, ...]:
+    """Normalize the run's own model tag(s) (writer, critic, and any other model called by the run) into a deduplicated tuple."""
+    tags: list[str] = []
+    for source in (model_tag, own_model_tags):
+        if source is None:
+            continue
+        if isinstance(source, str):
+            cleaned = source.strip()
+            if cleaned and cleaned not in tags:
+                tags.append(cleaned)
+        elif isinstance(source, (Sequence, set, frozenset)):
+            for item in source:
+                if isinstance(item, str):
+                    cleaned = item.strip()
+                    if cleaned and cleaned not in tags:
+                        tags.append(cleaned)
+    if not tags:
+        tags.append(PINNED_WRITER_MODEL_TAG)
+    return tuple(tags)
+
+
+def _is_own_model_tag(model_name: str, own_tags: Sequence[str]) -> bool:
+    """Return True iff `model_name` matches one of the run's own model tags (`own_tags`)."""
+    cleaned = model_name.strip()
+    if not cleaned:
+        return False
+    for tag in own_tags:
+        t = tag.strip()
+        if not t:
+            continue
+        if cleaned == t:
+            return True
+        if ":" not in t and cleaned == f"{t}:latest":
+            return True
+        if t.endswith(":latest") and cleaned == t[:-7]:
+            return True
+    return False
+
+
+def check_endpoints_partial_offload(
+    http_transport: OllamaHttpTransport,
+    *,
+    owned_base_url: str,
+    default_base_url: str = DEFAULT_OLLAMA_BASE_URL,
+    model_tag: str | Sequence[str] | set[str] | frozenset[str] | None = None,
+    own_model_tags: Sequence[str] | set[str] | frozenset[str] | None = None,
+) -> list[dict[str, object]]:
+    """Check `GET /api/ps` on both `owned_base_url` and `default_base_url` (`127.0.0.1:11434`).
+
+    Raises `Stage5PartialOffloadError` if any loaded model on either endpoint reports
+    `size <= 0` or `size_vram < size`, stating whether the offloaded model is the run's
+    own model or another seat's model.
+    """
+    resolved_own_tags = _normalize_own_model_tags(model_tag, own_model_tags=own_model_tags)
+    owned_ep = _format_model_endpoint(owned_base_url)
+    default_ep = _format_model_endpoint(default_base_url)
+    endpoints: list[str] = [owned_ep]
+    if default_ep not in endpoints:
+        endpoints.append(default_ep)
+
+    results: list[dict[str, object]] = []
+    for ep in endpoints:
+        resp = http_transport("GET", f"{ep}/api/ps", None)
+        raw_models = resp.get("models") if isinstance(resp, Mapping) else []
+        models_list = raw_models if isinstance(raw_models, list) else []
+        checked_models: list[dict[str, object]] = []
+        for entry in models_list:
+            if not isinstance(entry, Mapping):
+                continue
+            model_name = str(entry.get("model") or entry.get("name") or "unknown")
+            is_own = _is_own_model_tag(model_name, resolved_own_tags)
+            size = int(entry.get("size", 0) or 0)
+            size_vram = int(entry.get("size_vram", 0) or 0)
+            if size <= 0 or size_vram < size:
+                raise Stage5PartialOffloadError(
+                    endpoint=ep,
+                    model=model_name,
+                    size=size,
+                    size_vram=size_vram,
+                    is_own_model=is_own,
+                )
+            checked_models.append(
+                {
+                    "model": model_name,
+                    "is_own_model": is_own,
+                    "size": size,
+                    "size_vram": size_vram,
+                    "full_offload": True,
+                }
+            )
+        results.append(
+            {
+                "endpoint": ep,
+                "models": checked_models,
+                "full_offload": True,
+            }
+        )
+    return results
+
+
+def unload_and_verify_default_endpoint_empty(
+    http_transport: OllamaHttpTransport,
+    *,
+    default_base_url: str = DEFAULT_OLLAMA_BASE_URL,
+    model_tag: str | Sequence[str] | set[str] | frozenset[str] | None = None,
+    own_model_tags: Sequence[str] | set[str] | frozenset[str] | None = None,
+) -> dict[str, object]:
+    """Unload (`keep_alive: 0`) only models owned by this run on `default_base_url` (`127.0.0.1:11434`).
+
+    Foreign models belonging to other seats are never unloaded and are recorded by name in
+    `foreign_models` and `foreign_models_present`; `own_models_absent` is True when none of the
+    run's own model tags remains loaded on `default_base_url`.
+    """
+    resolved_own_tags = _normalize_own_model_tags(model_tag, own_model_tags=own_model_tags)
+    default_ep = _format_model_endpoint(default_base_url)
+    ps_url = f"{default_ep}/api/ps"
+    chat_url = f"{default_ep}/api/chat"
+    before_resp = http_transport("GET", ps_url, None)
+    raw_models = before_resp.get("models") if isinstance(before_resp, Mapping) else []
+    models_list = raw_models if isinstance(raw_models, list) else []
+
+    unloaded_models: list[str] = []
+    foreign_models: list[str] = []
+    for entry in models_list:
+        if not isinstance(entry, Mapping):
+            continue
+        model_name = str(entry.get("model") or entry.get("name") or "").strip()
+        if not model_name:
+            continue
+        if _is_own_model_tag(model_name, resolved_own_tags):
+            http_transport(
+                "POST",
+                chat_url,
+                {
+                    "model": model_name,
+                    "messages": [],
+                    "keep_alive": 0,
+                    "stream": False,
+                },
+            )
+            unloaded_models.append(model_name)
+        else:
+            if model_name not in foreign_models:
+                foreign_models.append(model_name)
+
+    after_resp = http_transport("GET", ps_url, None)
+    after_raw_models = after_resp.get("models") if isinstance(after_resp, Mapping) else []
+    after_models = after_raw_models if isinstance(after_raw_models, list) else []
+    own_models_after: list[str] = []
+    foreign_models_present: list[str] = []
+    for entry in after_models:
+        if not isinstance(entry, Mapping):
+            continue
+        model_name = str(entry.get("model") or entry.get("name") or "").strip()
+        if not model_name:
+            continue
+        if _is_own_model_tag(model_name, resolved_own_tags):
+            own_models_after.append(model_name)
+        else:
+            if model_name not in foreign_models_present:
+                foreign_models_present.append(model_name)
+            if model_name not in foreign_models:
+                foreign_models.append(model_name)
+
+    return {
+        "endpoint": default_ep,
+        "unloaded_models": unloaded_models,
+        "foreign_models": foreign_models,
+        "ps_after": dict(after_resp) if isinstance(after_resp, Mapping) else {"models": []},
+        "own_models_absent": len(own_models_after) == 0,
+        "foreign_models_present": foreign_models_present,
+    }
+
+
+
 class _RewriteClientAbort(BaseException):
     """Internal `BaseException` wrapper so transport exceptions escape `call_rewrite`'s `except Exception:`."""
 
@@ -1155,6 +1426,7 @@ def run_stage5_pipeline(
     rendering_execution_order: Sequence[tuple[str, int]] | None = None,
     utc_clock: Callable[[], datetime.datetime | str] | None = None,
     monotonic_clock: Callable[[], float] | None = None,
+    guard_both_endpoints: bool = False,
 ) -> dict[str, Any]:
     """Run the full Stage 5 pipeline (B -> Rung -> Swap & Rewrite -> Final Check -> S >= B Stop) and write `stage5_run_record.json`."""
     if writer_kind not in ("mock", "ollama"):
@@ -1435,6 +1707,50 @@ def run_stage5_pipeline(
         "rewrite": active_ollama_base_url,
     }
     step_timings_block: dict[str, dict[str, Any]] = _make_empty_step_timings()
+    prev_b_timing_complete = False
+    prev_rung_timing_complete = False
+    prev_swap_timing_complete = False
+    prev_rewrite_timing_complete = False
+    if existing_record is not None and isinstance(existing_record.get("step_timings"), Mapping):
+        prev_st = existing_record["step_timings"]
+        for step_k in ("b", "rung", "swap", "rewrite"):
+            raw_entry = prev_st.get(step_k)
+            if isinstance(raw_entry, Mapping):
+                raw_calls = int(raw_entry.get("calls", raw_entry.get("call_count", 0)) or 0)
+                step_timings_block[step_k] = {
+                    "start": raw_entry.get("start"),
+                    "end": raw_entry.get("end"),
+                    "seconds": float(raw_entry.get("seconds", 0.0) or 0.0),
+                    "calls": raw_calls,
+                    "call_count": int(raw_entry.get("call_count", raw_calls) or 0),
+                }
+        if (
+            not redo_b_flag
+            and len(existing_renderings_by_key) == total_renderings
+            and step_timings_block["b"].get("start") is not None
+            and step_timings_block["b"].get("end") is not None
+        ):
+            prev_b_timing_complete = True
+        if (
+            existing_rung_done
+            and step_timings_block["rung"].get("start") is not None
+            and step_timings_block["rung"].get("end") is not None
+        ):
+            prev_rung_timing_complete = True
+        if (
+            not redo_b_flag
+            and not redo_rung_flag
+            and step_timings_block["swap"].get("start") is not None
+            and step_timings_block["swap"].get("end") is not None
+        ):
+            prev_swap_timing_complete = True
+        if (
+            not redo_b_flag
+            and not redo_rung_flag
+            and step_timings_block["rewrite"].get("start") is not None
+            and step_timings_block["rewrite"].get("end") is not None
+        ):
+            prev_rewrite_timing_complete = True
 
     renderings_records: list[dict[str, Any]] = []
     record: dict[str, Any] = {
@@ -1509,11 +1825,16 @@ def run_stage5_pipeline(
         should_own_server = (
             start_owned_server
             if start_owned_server is not None
-            else (http_transport is None)
+            else (http_transport is None or popen_factory is not None)
+        )
+        effective_base_url = (
+            f"http://127.0.0.1:{int(server_port)}"
+            if (server_port is not None and ollama_base_url == DEFAULT_OLLAMA_BASE_URL)
+            else ollama_base_url
         )
         ollama_writer = OllamaWriter(
             model_pin=effective_writer_pin,
-            base_url=ollama_base_url,
+            base_url=effective_base_url,
             server_port=server_port,
             num_predict=resolved_num_predict,
             max_num_ctx=max_num_ctx,
@@ -1540,6 +1861,55 @@ def run_stage5_pipeline(
             popen_factory=popen_factory,
             prompt_token_counter=prompt_token_counter,
         )
+
+    run_own_model_tags: list[str] = []
+
+    def _record_own_model_tag(tag_value: object) -> None:
+        if isinstance(tag_value, str):
+            cleaned_tag = tag_value.strip()
+            if cleaned_tag and cleaned_tag not in run_own_model_tags:
+                run_own_model_tags.append(cleaned_tag)
+
+    _record_own_model_tag(effective_writer_pin.ollama_tag)
+    if ollama_writer is not None:
+        _record_own_model_tag(getattr(ollama_writer, "ollama_tag", None))
+    for _k in ("model", "writer_model", "critic_model", "rewrite_model"):
+        _record_own_model_tag(engine_block.get(_k))
+        if rewrite_client is not None:
+            _record_own_model_tag(getattr(rewrite_client, _k, None))
+
+    def _check_partial_offload_or_stop(phase_name: str) -> None:
+        if not guard_both_endpoints or ollama_writer is None:
+            return
+        raw_transport = getattr(ollama_writer._transport, "_raw", ollama_writer._transport)
+        try:
+            check_endpoints_partial_offload(
+                raw_transport,
+                owned_base_url=active_ollama_base_url,
+                default_base_url=DEFAULT_OLLAMA_BASE_URL,
+                model_tag=effective_writer_pin.ollama_tag,
+                own_model_tags=tuple(run_own_model_tags),
+            )
+        except Stage5PartialOffloadError as po_exc:
+            record["stop_reason"] = "PARTIAL_OFFLOAD"
+            record["stop_detail"] = {
+                "failure_class": "STAGE5_PARTIAL_OFFLOAD",
+                "phase": phase_name,
+                "endpoint": po_exc.endpoint,
+                "model": po_exc.model,
+                "is_own_model": po_exc.is_own_model,
+                "model_owner": po_exc.model_owner,
+                "size": po_exc.size,
+                "size_vram": po_exc.size_vram,
+            }
+            _write_record_and_status(
+                record_path,
+                status_path,
+                record,
+                status_state="stopped",
+                failure_class="STAGE5_PARTIAL_OFFLOAD",
+            )
+            raise
 
     try:
         if ollama_writer is not None:
@@ -1638,8 +2008,13 @@ def run_stage5_pipeline(
         )
 
         model_endpoint_block["b"] = active_ollama_base_url
-        step_timings_block["b"]["start"] = _read_utc()
-        b_mono_start = _read_mono()
+        if need_any_b:
+            _check_partial_offload_or_stop("b")
+        if not need_any_b and prev_b_timing_complete:
+            b_mono_start = None
+        else:
+            step_timings_block["b"]["start"] = _read_utc()
+            b_mono_start = _read_mono()
         try:
             for sid, r_idx in ordered_rendering_keys:
                 w = worlds_by_sid[sid]
@@ -1884,8 +2259,9 @@ def run_stage5_pipeline(
                     }
                 )
         finally:
-            step_timings_block["b"]["end"] = _read_utc()
-            step_timings_block["b"]["seconds"] = round(max(0.0, _read_mono() - b_mono_start), 6)
+            if b_mono_start is not None:
+                step_timings_block["b"]["end"] = _read_utc()
+                step_timings_block["b"]["seconds"] = round(max(0.0, _read_mono() - b_mono_start), 6)
             step_timings_block["b"]["calls"] = b_calls_made
             step_timings_block["b"]["call_count"] = b_calls_made
             if rendering_execution_order is not None:
@@ -1908,18 +2284,21 @@ def run_stage5_pipeline(
         # Phase 2: The Rewrite-Input Rung
         # -----------------------------------------------------------------------
         model_endpoint_block["rung"] = active_ollama_base_url
-        step_timings_block["rung"]["start"] = _read_utc()
-        rung_mono_start = _read_mono()
         if existing_rung_done and existing_rung is not None:
             chosen_input = str(existing_rung["chosen"])
             record["rung"] = existing_rung
             record["rung_scenario_overlap"] = int(existing_rung.get("rung_scenario_overlap", 0))
-            step_timings_block["rung"]["end"] = _read_utc()
-            step_timings_block["rung"]["seconds"] = round(max(0.0, _read_mono() - rung_mono_start), 6)
+            if not prev_rung_timing_complete:
+                step_timings_block["rung"]["start"] = _read_utc()
+                rung_mono_start = _read_mono()
+                step_timings_block["rung"]["end"] = _read_utc()
+                step_timings_block["rung"]["seconds"] = round(max(0.0, _read_mono() - rung_mono_start), 6)
             step_timings_block["rung"]["calls"] = rung_calls_made
             step_timings_block["rung"]["call_count"] = rung_calls_made
             _write_record_and_status(record_path, status_path, record, status_state="running")
         elif s_code_say:
+            step_timings_block["rung"]["start"] = _read_utc()
+            rung_mono_start = _read_mono()
             chosen_input = "facts_only"
             record["rung"] = {
                 "facts_only": {"attempts": 0, "kept": 0},
@@ -1937,6 +2316,11 @@ def run_stage5_pipeline(
             step_timings_block["rung"]["call_count"] = 0
             _write_record_and_status(record_path, status_path, record, status_state="running")
         else:
+            _check_partial_offload_or_stop("rung")
+            if ollama_writer is not None and not ollama_writer._verified_local_digest:
+                ollama_writer._ensure_verified()
+            step_timings_block["rung"]["start"] = _read_utc()
+            rung_mono_start = _read_mono()
             eligible_by_target: dict[str, list[tuple[str, int, int, str]]] = {
                 t: [] for t in STAGE5_RUNG_TARGETS
             }
@@ -2020,6 +2404,8 @@ def run_stage5_pipeline(
             def _rung_client_proxy(payload: dict[str, Any]) -> Any:
                 nonlocal current_rung_attempt_calls
                 current_rung_attempt_calls += 1
+                if isinstance(payload, Mapping):
+                    _record_own_model_tag(payload.get("model"))
                 try:
                     return _invoke_rewrite_client(
                         active_rewrite_client,
@@ -2119,9 +2505,17 @@ def run_stage5_pipeline(
         # -----------------------------------------------------------------------
         # Phase 3: Swap, Rewrite, Final Check, and S >= B Stop
         # -----------------------------------------------------------------------
+        any_s_needed = any(
+            not r_entry.get("ctx_over_cap")
+            and not (resume and (str(r_entry["scenario_id"]), int(r_entry["rendering_index"])) in s_completed_keys)
+            for r_entry in renderings_records
+        )
         model_endpoint_block["swap"] = active_ollama_base_url
-        step_timings_block["swap"]["start"] = _read_utc()
-        swap_mono_start = _read_mono()
+        if not any_s_needed and prev_swap_timing_complete:
+            swap_mono_start = None
+        else:
+            step_timings_block["swap"]["start"] = _read_utc()
+            swap_mono_start = _read_mono()
         swap_res_by_key: dict[tuple[str, int], SwapResult] = {}
         try:
             for r_entry in renderings_records:
@@ -2144,13 +2538,16 @@ def run_stage5_pipeline(
                     checker_profile="d",
                 )
         finally:
-            step_timings_block["swap"]["end"] = _read_utc()
-            step_timings_block["swap"]["seconds"] = round(max(0.0, _read_mono() - swap_mono_start), 6)
+            if swap_mono_start is not None:
+                step_timings_block["swap"]["end"] = _read_utc()
+                step_timings_block["swap"]["seconds"] = round(max(0.0, _read_mono() - swap_mono_start), 6)
             step_timings_block["swap"]["calls"] = 0
             step_timings_block["swap"]["call_count"] = 0
             _write_record_and_status(record_path, status_path, record, status_state="running")
 
         def _rewrite_client_proxy(payload: dict[str, Any]) -> Any:
+            if isinstance(payload, Mapping):
+                _record_own_model_tag(payload.get("model"))
             try:
                 return _invoke_rewrite_client(
                     active_rewrite_client,
@@ -2161,8 +2558,16 @@ def run_stage5_pipeline(
                 raise _RewriteClientAbort(exc) from exc
 
         model_endpoint_block["rewrite"] = active_ollama_base_url
-        step_timings_block["rewrite"]["start"] = _read_utc()
-        rewrite_mono_start = _read_mono()
+        if any_s_needed and not s_code_say:
+            _check_partial_offload_or_stop("rewrite")
+            if ollama_writer is not None and not ollama_writer._verified_local_digest:
+                ollama_writer._ensure_verified()
+        if not any_s_needed and prev_rewrite_timing_complete:
+            rewrite_mono_start = None
+        else:
+            step_timings_block["rewrite"]["start"] = _read_utc()
+            step_timings_block["rewrite"]["end"] = None
+            rewrite_mono_start = _read_mono()
         s_done_count = 0
         try:
             for r_entry in renderings_records:
@@ -2322,7 +2727,7 @@ def run_stage5_pipeline(
                         s_fault_rule_ids=s_fault_rule_ids,
                     )
         finally:
-            if step_timings_block["rewrite"]["end"] is None:
+            if rewrite_mono_start is not None and step_timings_block["rewrite"]["end"] is None:
                 step_timings_block["rewrite"]["end"] = _read_utc()
                 step_timings_block["rewrite"]["seconds"] = round(
                     max(0.0, _read_mono() - rewrite_mono_start), 6
@@ -2337,4 +2742,15 @@ def run_stage5_pipeline(
         return record
     finally:
         if ollama_writer is not None:
+            raw_transport = getattr(ollama_writer._transport, "_raw", ollama_writer._transport)
             ollama_writer.close()
+            if guard_both_endpoints:
+                default_end_status = unload_and_verify_default_endpoint_empty(
+                    raw_transport,
+                    default_base_url=DEFAULT_OLLAMA_BASE_URL,
+                    model_tag=effective_writer_pin.ollama_tag,
+                    own_model_tags=tuple(run_own_model_tags),
+                )
+                record["default_endpoint_end"] = default_end_status
+                if record_path.is_file():
+                    _atomic_write_json(record_path, record)
