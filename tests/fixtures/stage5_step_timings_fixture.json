@@ -1,0 +1,43 @@
+{
+  "base_seed": 20261103,
+  "call_counts": {
+    "b_calls": 8,
+    "rewrite_calls": 18,
+    "rung_aborted_calls": 0,
+    "rung_calls": 6
+  },
+  "count": 4,
+  "plan_seed": 20261103,
+  "rung_per_target": 1,
+  "rung_seed": 20261104,
+  "step_timings": {
+    "b": {
+      "call_count": 8,
+      "calls": 8,
+      "end": "2026-11-08T12:00:10Z",
+      "seconds": 12.5,
+      "start": "2026-11-08T12:00:00Z"
+    },
+    "rewrite": {
+      "call_count": 18,
+      "calls": 18,
+      "end": "2026-11-08T12:01:10Z",
+      "seconds": 15.75,
+      "start": "2026-11-08T12:01:00Z"
+    },
+    "rung": {
+      "call_count": 6,
+      "calls": 6,
+      "end": "2026-11-08T12:00:30Z",
+      "seconds": 8.25,
+      "start": "2026-11-08T12:00:20Z"
+    },
+    "swap": {
+      "call_count": 0,
+      "calls": 0,
+      "end": "2026-11-08T12:00:50Z",
+      "seconds": 0.5,
+      "start": "2026-11-08T12:00:40Z"
+    }
+  }
+}

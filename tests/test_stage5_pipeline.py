@@ -2276,7 +2276,8 @@ def _make_fake_owned_server_stage5_harness(
             opts = payload.get("options") or {}
             # Rewrite/rung calls set num_predict=80, num_ctx=2048; B calls set num_predict=DEFAULT_WRITER_NUM_PREDICT
             if int(opts.get("num_predict", 0)) == 80 and int(opts.get("num_ctx", 0)) == 2048:
-                is_rung = len(rewrite_calls) < 120
+                expected_rung_calls = 2 * len(stage5_mod.STAGE5_RUNG_TARGETS) * stage5_mod.STAGE5_RUNG_PER_TARGET
+                is_rung = len(rewrite_calls) < expected_rung_calls
                 recorded_requests.append((method, url, "rung" if is_rung else "rewrite"))
                 if not is_rung:
                     phase3_rewrite_calls += 1
@@ -2575,5 +2576,351 @@ def test_32_plan_statistics_per_stream_20_event_blocks_and_planted_imbalance() -
         worlds, tampered_bundle, block_size=20
     )
     assert planted_spread["say"] == 20
+
+
+def test_33_card_2026_11_08_a_owned_server_every_phase_no_default_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Card 2026-11-08 Test (a): A fake transport records every URL called; with an owned server set (including via `popen_factory`/`server_port` and on `--resume` after B into rung and rewrite), no request goes to the default URL (`127.0.0.1:11434`) in any phase, and the owned server verifies and unloads on its own URL."""
+    monkeypatch.setattr(stage5_mod, "STAGE5_RUNG_PER_TARGET", 1)
+    n = 4
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+    harness = _make_fake_owned_server_stage5_harness(worlds, owned_port=11499)
+
+    out_dir = tmp_path / "run_33_owned"
+    # 1. Owned server configured via popen_factory + server_port (without explicit start_owned_server=True)
+    rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        server_port=11499,
+        popen_factory=harness["popen_factory"],
+        pid_killer=harness["pid_killer"],
+        http_transport=harness["http_transport"],
+        prompt_token_counter=lambda _: 3200,
+        worlds=worlds,
+    )
+
+    reqs = harness["recorded_requests"]
+    owned_url = harness["owned_base_url"]
+    default_urls = [url for _, url, _ in reqs if url.startswith("http://127.0.0.1:11434")]
+    assert default_urls == [], f"Requests sent to default 11434 URL: {default_urls}"
+    outside_urls = [url for _, url, _ in reqs if not url.startswith(f"{owned_url}/")]
+    assert outside_urls == [], f"Requests sent outside owned URL {owned_url}: {outside_urls}"
+    assert sum(1 for _, _, kind in reqs if kind == "b") == 8
+    assert sum(1 for _, _, kind in reqs if kind == "rung") == 6
+    assert sum(1 for _, _, kind in reqs if kind == "rewrite") == 18
+    assert sum(1 for _, _, kind in reqs if kind == "unload") == 1
+    assert harness["stop_events"] == [len(reqs)]
+    assert rec["model_endpoint"] == {
+        "b": owned_url,
+        "rung": owned_url,
+        "swap": owned_url,
+        "rewrite": owned_url,
+    }
+
+    # 2. Resume after B is already done (only rung + swap + rewrite run): still verifies and unloads on owned URL, 0 requests to 11434
+    resume_harness = _make_fake_owned_server_stage5_harness(worlds, owned_port=11498)
+    resume_url = resume_harness["owned_base_url"]
+    run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        resume=True,
+        redo_rung=True,
+        server_port=11498,
+        popen_factory=resume_harness["popen_factory"],
+        pid_killer=resume_harness["pid_killer"],
+        http_transport=resume_harness["http_transport"],
+        prompt_token_counter=lambda _: 3200,
+        worlds=worlds,
+    )
+    resume_reqs = resume_harness["recorded_requests"]
+    assert [url for _, url, _ in resume_reqs if not url.startswith(f"{resume_url}/")] == []
+    assert sum(1 for _, _, kind in resume_reqs if kind == "tags") == 1
+    assert sum(1 for _, _, kind in resume_reqs if kind == "rung") == 6
+    assert sum(1 for _, _, kind in resume_reqs if kind == "rewrite") == 18
+    assert sum(1 for _, _, kind in resume_reqs if kind == "unload") == 1
+    assert resume_harness["stop_events"] == [len(resume_reqs)]
+
+
+def test_34_card_2026_11_08_b_partial_offload_guard_both_endpoints_and_11434_unload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Card 2026-11-08 Test (b): The partial-offload guard runs on both the owned endpoint and `127.0.0.1:11434`, halting when either reports `size_vram < size`, and at the end of a run any model left loaded on `127.0.0.1:11434` is unloaded (`keep_alive: 0`) and `/api/ps` empty is recorded."""
+    monkeypatch.setattr(stage5_mod, "STAGE5_RUNG_PER_TARGET", 1)
+    n = 4
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+
+    def _make_dual_endpoint_harness(
+        *,
+        owned_vram: int = 23_000_000_000,
+        default_models_initial: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        base_harness = _make_fake_owned_server_stage5_harness(worlds, owned_port=11499)
+        inner_transport = base_harness["http_transport"]
+        owned_base = base_harness["owned_base_url"]
+        default_base = "http://127.0.0.1:11434"
+        default_models: list[dict[str, Any]] = (
+            [dict(m) for m in default_models_initial] if default_models_initial is not None else []
+        )
+        ps_checks: list[str] = []
+        default_unloads: list[dict[str, Any]] = []
+
+        def _transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+            if method == "GET" and url == f"{owned_base}/api/ps":
+                ps_checks.append(url)
+                return {
+                    "models": [
+                        {
+                            "name": "qwen3.6:35b",
+                            "model": "qwen3.6:35b",
+                            "size": 23_000_000_000,
+                            "size_vram": owned_vram,
+                        }
+                    ]
+                }
+            if method == "GET" and url == f"{default_base}/api/ps":
+                ps_checks.append(url)
+                return {"models": [dict(m) for m in default_models]}
+            if (
+                method == "POST"
+                and url == f"{default_base}/api/chat"
+                and payload is not None
+                and payload.get("keep_alive") == 0
+                and not payload.get("messages")
+            ):
+                default_unloads.append(dict(payload))
+                unloaded_name = payload.get("model")
+                default_models[:] = [
+                    m
+                    for m in default_models
+                    if m.get("model") != unloaded_name and m.get("name") != unloaded_name
+                ]
+                return {"model": str(unloaded_name), "done": True}
+            return inner_transport(method, url, payload)
+
+        return {
+            **base_harness,
+            "http_transport": _transport,
+            "ps_checks": ps_checks,
+            "default_unloads": default_unloads,
+            "default_models": default_models,
+        }
+
+    # 1. Partial offload on owned port (11499) halts with STAGE5_PARTIAL_OFFLOAD
+    h_owned_partial = _make_dual_endpoint_harness(owned_vram=18_000_000_000)
+    with pytest.raises(stage5_mod.Stage5PartialOffloadError) as exc_owned:
+        run_stage5_pipeline(
+            count=n,
+            base_seed=base_seed,
+            output_dir=tmp_path / "run_34_owned_partial",
+            writer_kind="ollama",
+            stage5_plan_seed=20261103,
+            stage5_rung_seed=20261104,
+            server_port=11499,
+            start_owned_server=True,
+            guard_both_endpoints=True,
+            popen_factory=h_owned_partial["popen_factory"],
+            pid_killer=h_owned_partial["pid_killer"],
+            http_transport=h_owned_partial["http_transport"],
+            prompt_token_counter=lambda _: 3200,
+            worlds=worlds,
+        )
+    assert exc_owned.value.failure_class == "STAGE5_PARTIAL_OFFLOAD"
+    assert exc_owned.value.endpoint == "http://127.0.0.1:11499"
+
+    # 2. Partial offload on default port (11434) halts with STAGE5_PARTIAL_OFFLOAD
+    h_def_partial = _make_dual_endpoint_harness(
+        owned_vram=23_000_000_000,
+        default_models_initial=[
+            {
+                "name": "qwen3.6:35b",
+                "model": "qwen3.6:35b",
+                "size": 23_000_000_000,
+                "size_vram": 16_000_000_000,
+            }
+        ],
+    )
+    with pytest.raises(stage5_mod.Stage5PartialOffloadError) as exc_def:
+        run_stage5_pipeline(
+            count=n,
+            base_seed=base_seed,
+            output_dir=tmp_path / "run_34_def_partial",
+            writer_kind="ollama",
+            stage5_plan_seed=20261103,
+            stage5_rung_seed=20261104,
+            server_port=11499,
+            start_owned_server=True,
+            guard_both_endpoints=True,
+            popen_factory=h_def_partial["popen_factory"],
+            pid_killer=h_def_partial["pid_killer"],
+            http_transport=h_def_partial["http_transport"],
+            prompt_token_counter=lambda _: 3200,
+            worlds=worlds,
+        )
+    assert exc_def.value.failure_class == "STAGE5_PARTIAL_OFFLOAD"
+    assert exc_def.value.endpoint == "http://127.0.0.1:11434"
+    assert "http://127.0.0.1:11499/api/ps" in h_def_partial["ps_checks"]
+    assert "http://127.0.0.1:11434/api/ps" in h_def_partial["ps_checks"]
+
+    # 3. Full offload on both endpoints, with a model left loaded on 11434: unloaded (keep_alive: 0) at end and /api/ps empty recorded
+    h_cleanup = _make_dual_endpoint_harness(
+        owned_vram=23_000_000_000,
+        default_models_initial=[
+            {
+                "name": "qwen3.6:35b",
+                "model": "qwen3.6:35b",
+                "size": 23_000_000_000,
+                "size_vram": 23_000_000_000,
+            }
+        ],
+    )
+    rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=tmp_path / "run_34_cleanup",
+        writer_kind="ollama",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        server_port=11499,
+        start_owned_server=True,
+        guard_both_endpoints=True,
+        popen_factory=h_cleanup["popen_factory"],
+        pid_killer=h_cleanup["pid_killer"],
+        http_transport=h_cleanup["http_transport"],
+        prompt_token_counter=lambda _: 3200,
+        worlds=worlds,
+    )
+    assert "http://127.0.0.1:11499/api/ps" in h_cleanup["ps_checks"]
+    assert "http://127.0.0.1:11434/api/ps" in h_cleanup["ps_checks"]
+    assert len(h_cleanup["default_unloads"]) == 1
+    assert h_cleanup["default_unloads"][0]["keep_alive"] == 0
+    assert h_cleanup["default_unloads"][0]["model"] == "qwen3.6:35b"
+    assert h_cleanup["default_models"] == []
+    assert rec["default_endpoint_end"] == {
+        "endpoint": "http://127.0.0.1:11434",
+        "unloaded_models": ["qwen3.6:35b"],
+        "ps_after": {"models": []},
+        "ps_empty": True,
+    }
+
+
+def test_35_card_2026_11_08_c_step_timings_and_call_counts_match_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Card 2026-11-08 Test (c): The run record carries per-step seconds and call counts (`step_timings` and `call_counts` including `swap_calls`), matching `tests/fixtures/stage5_step_timings_fixture.json`, and preserves completed `b` and `rung` timings across `--resume`."""
+    import datetime
+
+    fixture_path = REPO_ROOT / "tests" / "fixtures" / "stage5_step_timings_fixture.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(stage5_mod, "STAGE5_RUNG_PER_TARGET", int(fixture["rung_per_target"]))
+    n = int(fixture["count"])
+    base_seed = int(fixture["base_seed"])
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+    client, _ = _make_fake_rewrite_client(worlds)
+
+    utc_base = datetime.datetime(2026, 11, 8, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    utc_step = 0
+    mono_values = iter([100.0, 112.5, 200.0, 208.25, 300.0, 300.5, 400.0, 415.75])
+
+    def _fake_utc_clock() -> str:
+        nonlocal utc_step
+        dt = utc_base + datetime.timedelta(seconds=utc_step * 10)
+        utc_step += 1
+        return dt.isoformat().replace("+00:00", "Z")
+
+    def _fake_mono_clock() -> float:
+        return next(mono_values)
+
+    out_dir = tmp_path / "run_35_fixture"
+    rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="mock",
+        stage5_plan_seed=int(fixture["plan_seed"]),
+        stage5_rung_seed=int(fixture["rung_seed"]),
+        rewrite_client=client,
+        worlds=worlds,
+        utc_clock=_fake_utc_clock,
+        monotonic_clock=_fake_mono_clock,
+    )
+
+    assert rec["step_timings"] == fixture["step_timings"]
+    assert rec["call_counts"] == fixture["call_counts"]
+
+    # Also verify that resuming when B and rung are already completed preserves their recorded step_timings
+    resume_mono = iter([500.0, 500.0, 600.0, 600.0, 700.0, 700.25, 800.0, 801.0])
+    rec_resumed = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="mock",
+        resume=True,
+        rewrite_client=client,
+        worlds=worlds,
+        utc_clock=_fake_utc_clock,
+        monotonic_clock=lambda: next(resume_mono),
+    )
+    assert rec_resumed["step_timings"] == fixture["step_timings"]
+    assert rec_resumed["call_counts"] == fixture["call_counts"]
+
+
+def test_36_card_2026_11_08_d_plan_statistics_per_20_events_fixture() -> None:
+    """Card 2026-11-08 Test (d): Plan statistics follow the per-20-events definition (including the tail block and global spread) on `tests/fixtures/stage5_plan_statistics_fixture.json`."""
+    fixture_path = REPO_ROOT / "tests" / "fixtures" / "stage5_plan_statistics_fixture.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    worlds = [
+        generate_world(cfg)
+        for cfg in make_balanced_configs(int(fixture["count"]), base_seed=int(fixture["base_seed"]))
+    ]
+    plan_bundle = generate_stage5_shape_plan(
+        worlds,
+        seed=int(fixture["plan_seed"]),
+        block_size=int(fixture["block_size"]),
+    )
+    stats = stage5_mod._compute_plan_statistics(
+        worlds,
+        plan_bundle,
+        block_size=int(fixture["block_size"]),
+    )
+    assert hasattr(stats, "to_dict")
+    stats_dict = stats.to_dict()
+    assert stats_dict["planned_form_counts_by_kind"] == fixture["planned_form_counts_by_kind"]
+    assert stats_dict["planned_form_counts_by_variant"] == fixture["planned_form_counts_by_variant"]
+    assert stats_dict["stream_lengths_by_variant"] == fixture["stream_lengths_by_variant"]
+    assert stats_dict["stream_block_spreads_by_variant"] == fixture["stream_block_spreads_by_variant"]
+    assert stats_dict["block_balance_max_spread_by_variant"] == fixture["block_balance_max_spread_by_variant"]
+    assert stats_dict["block_balance_max_spread"] == fixture["block_balance_max_spread"]
+    assert stats_dict["global_balance_max_spread_by_variant"] == fixture["global_balance_max_spread_by_variant"]
+    assert stats_dict["global_balance_max_spread"] == fixture["global_balance_max_spread"]
+
+    dry_res = run_stage5_dry(
+        count=int(fixture["count"]),
+        base_seed=int(fixture["base_seed"]),
+        stage5_plan_seed=int(fixture["plan_seed"]),
+        worlds=worlds,
+    )
+    for k in (
+        "planned_form_counts_by_kind",
+        "planned_form_counts_by_variant",
+        "stream_lengths_by_variant",
+        "stream_block_spreads_by_variant",
+        "block_balance_max_spread_by_variant",
+        "block_balance_max_spread",
+        "global_balance_max_spread_by_variant",
+        "global_balance_max_spread",
+    ):
+        assert dry_res[k] == fixture[k]
+
 
 

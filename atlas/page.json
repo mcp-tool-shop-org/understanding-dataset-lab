@@ -29,24 +29,40 @@
   ],
   "changes": {
     "fileCounts": {
-      "added": 1,
-      "changed": 3,
+      "added": 0,
+      "changed": 7,
       "moved": 0,
-      "parts": 3,
+      "parts": 5,
       "removed": 0
     },
     "items": [
       {
+        "kind": "landing",
+        "sentence": "tests/fixtures/stage5_plan_statistics_fixture.json is now read by tests/test_stage5_pipeline.py.",
+        "subjects": [
+          "tests/fixtures/stage5_plan_statistics_fixture.json",
+          "tests/test_stage5_pipeline.py"
+        ]
+      },
+      {
+        "kind": "landing",
+        "sentence": "tests/fixtures/stage5_step_timings_fixture.json is now read by tests/test_stage5_pipeline.py.",
+        "subjects": [
+          "tests/fixtures/stage5_step_timings_fixture.json",
+          "tests/test_stage5_pipeline.py"
+        ]
+      },
+      {
         "kind": "counts",
-        "sentence": "Nothing structural changed since 2026-11-03; 1 file added and 3 changed content.",
+        "sentence": "7 files changed content, across 5 parts.",
         "subjects": []
       }
     ],
     "since": {
-      "commit": "d951db755b91a7e38466fa75e67e601ef90ca9e1",
-      "generatedAt": "2026-11-03T22:24:20.484Z"
+      "commit": "81765f0771ad08be34a18e52305b9f39b5fb4421",
+      "generatedAt": "2026-11-04T00:27:13.428Z"
     },
-    "unchanged": true
+    "unchanged": false
   },
   "changesTogether": [
     {
@@ -130,7 +146,7 @@
     "Window: 180 days; a pair counts from 3 shared commits, since 5 source files reach 10 revisions; the floor rises to 10 when 25 do."
   ],
   "changesTogetherWithTests": 0,
-  "commit": "81765f0771ad08be34a18e52305b9f39b5fb4421",
+  "commit": "e841cdf3f7bf492fd56dbb4eb7259c129b53c1fc",
   "defaultBranch": "main",
   "derived": "7 parts, mostly Python (23 files), CSS (2), TypeScript (2), shell (2), Astro (1) and JavaScript (1). Work enters through 3 doors; the busiest is ci, which reaches 3 parts. It deploys a site to GitHub Pages. People run udlab-gen.",
   "doors": [
@@ -239,7 +255,7 @@
   "edges": [],
   "engine": "1.24.0",
   "generated": [],
-  "generatedAt": "2026-11-04T00:27:13.428Z",
+  "generatedAt": "2026-11-08T08:14:14.168Z",
   "limits": [
     "7 reads use paths built at run time and are not named here.",
     "26 writes and 56 reads go to a path their caller passes, not to this repository.",
