@@ -1,6 +1,6 @@
 # understanding-dataset-lab: how it works
 
-Mapped at 2026-11-08 from commit d14262f by Atlas 1.24.0.
+Mapped at 2026-11-11 from commit 88da837 by Atlas 1.26.0.
 
 ## What this is
 
@@ -8,9 +8,9 @@ understanding-dataset-lab (a prototype) plans multi-party scenes in code, puts t
 
 7 parts, mostly Python (23 files), CSS (2), TypeScript (2), shell (2), Astro (1) and JavaScript (1). Work enters through 3 doors; the busiest is ci, which reaches 3 parts. It deploys a site to GitHub Pages. People run udlab-gen.
 
-## What changed since 2026-11-08 (e841cdf)
+## What changed since 2026-11-08 (d14262f)
 
-Nothing structural changed since 2026-11-08; 2 files added and 4 changed content.
+Nothing structural changed since 2026-11-08; 1 file changed content.
 
 ## What comes in
 
@@ -75,15 +75,17 @@ People write .github/, prompts/, the repository root and site/. Nothing in this 
 
 ## Where to start
 
-src/udlab_generator/cli.py → src/udlab_generator/render.py → src/udlab_generator/stage5_pipeline.py → src/udlab_generator/sealing.py
+src/udlab_generator/cli.py → src/udlab_generator/render.py → src/udlab_generator/world.py → src/udlab_generator/keys.py
 
 Read those in order to follow one run of udlab-gen end to end. This path follows udlab-gen (a command people run) from its entry, since ci runs only tests.
+
+Beside the path, src/udlab_generator/cli.py also calls src/udlab_generator/stage5_pipeline.py and src/udlab_generator/sealing.py.
 
 ## What this map cannot see
 
 - 7 reads use paths built at run time and are not named here.
 - 26 writes and 56 reads go to a path their caller passes, not to this repository.
-- 4 reads go to the directory the command is run in, not to this repository.
+- 5 reads go to the directory the command is run in, not to this repository.
 - Statistics confidence is low: fewer than 25 source files reach 10 revisions in the window.
 
 Regenerate with `npx --yes @dogfood-lab/atlas map`.

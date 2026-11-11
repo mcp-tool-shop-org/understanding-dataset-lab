@@ -9,7 +9,7 @@
       "externals": 0,
       "files": [
         {
-          "hash": "6794ff25939b2734fdd0e061042c593f5770a223339c496f45f09bdea89b6d6d",
+          "hash": "c447f373dac3ee4c47d675443216e8ba0ce4f1e3b702241e7780e3951d21b5d6",
           "path": ".github/workflows/ci.yml"
         },
         {
@@ -9294,14 +9294,14 @@
           "writes": 10
         },
         {
-          "reads": 4,
+          "reads": 5,
           "where": [
             "cwd"
           ],
           "writes": 0
         }
       ],
-      "outsideReads": 47,
+      "outsideReads": 48,
       "outsideWrites": 10,
       "role": "code",
       "testRunners": [
@@ -10227,9 +10227,9 @@
       "to": "src"
     }
   ],
-  "engine": "1.24.0",
+  "engine": "1.26.0",
   "generatedFrom": {
-    "commit": "d14262f0a040bb6f83f49dece20678beebbe4971",
+    "commit": "88da837826e30519da8bf8fe2b47fb0d372b4c4f",
     "tracked": 86
   },
   "landings": [
