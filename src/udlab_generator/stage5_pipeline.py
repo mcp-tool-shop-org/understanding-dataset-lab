@@ -21,6 +21,7 @@ from dataclasses import replace
 import datetime
 from fractions import Fraction
 import hashlib
+import inspect
 from itertools import combinations
 import json
 import os
@@ -50,6 +51,7 @@ from .render import (
     NUM_CTX_MARGIN_TOKENS,
     OllamaHttpTransport,
     OllamaWriter,
+    PINNED_WRITER_MODEL_TAG,
     PromptTokenCounter,
     SEALED_RESPONSES_FILENAME,
     SHAPE_PLAN_BLOCK_SIZE,
@@ -114,6 +116,10 @@ STAGE5_ASSIGNED_VARIANTS: dict[str, tuple[str, ...]] = {
     "see_occluded": SEE_OCCLUDED_FORMS,
     "say": SAY_FORMS,
 }
+STAGE5_UNLOAD_SKIPPED_NO_11434_CALL_REASON: str = "no model call to 11434 in this run"
+MODEL_GENERATION_API_PATHS: frozenset[str] = frozenset(
+    {"/api/chat", "/api/generate", "/api/embed", "/api/embeddings"}
+)
 
 
 class Stage5PipelineError(RuntimeError):
@@ -976,6 +982,63 @@ def _format_model_endpoint(raw_url: str) -> str:
     return cleaned
 
 
+def _is_model_generation_call(
+    method: str,
+    url: str,
+    payload: Mapping[str, Any] | None = None,
+) -> bool:
+    """Return True iff `(method, url, payload)` is a model generation HTTP call (excluding `/api/ps`, metadata reads, and `keep_alive: 0` unloads)."""
+    if str(method).upper() != "POST":
+        return False
+    path = urlsplit(str(url).strip()).path.rstrip("/")
+    if path not in MODEL_GENERATION_API_PATHS:
+        return False
+    if isinstance(payload, Mapping):
+        ka = payload.get("keep_alive")
+        is_zero_keep_alive = not isinstance(ka, bool) and ka in (0, "0", "0s")
+        has_generation_input = bool(
+            payload.get("messages") or payload.get("prompt") or payload.get("input")
+        )
+        if is_zero_keep_alive and not has_generation_input:
+            return False
+    return True
+
+
+class _CountingTransportClientProxy:
+    """Non-callable proxy preserving `base_url` while counting HTTP model calls through `_transport`."""
+
+    def __init__(self, inner_client: Any, wrapped_transport: OllamaHttpTransport) -> None:
+        self._inner_client = inner_client
+        self._transport = wrapped_transport
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner_client, name)
+
+
+def _wrap_rewrite_client_for_endpoint_counts(
+    client: Any,
+    wrap_transport: Callable[[OllamaHttpTransport], OllamaHttpTransport],
+) -> Any:
+    """Wrap an injected `rewrite_client` so HTTP-transport calls count in `model_calls_by_endpoint` without counting 1-arg mock callables."""
+    if callable(client):
+        try:
+            sig = inspect.signature(client)
+        except (ValueError, TypeError):
+            return wrap_transport(client)
+        params = [
+            p
+            for p in sig.parameters.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
+        if not has_varargs and len(params) == 1:
+            return client
+        return wrap_transport(client)
+    if hasattr(client, "_transport") and callable(client._transport):
+        return _CountingTransportClientProxy(client, wrap_transport(client._transport))
+    return client
+
+
 def _default_utc_now() -> str:
     """Return the current UTC timestamp in ISO-8601 format (`...Z`)."""
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1112,20 +1175,53 @@ def unload_and_verify_default_endpoint_empty(
     default_base_url: str = DEFAULT_OLLAMA_BASE_URL,
     model_tag: str | Sequence[str] | set[str] | frozenset[str] | None = None,
     own_model_tags: Sequence[str] | set[str] | frozenset[str] | None = None,
+    model_calls_by_endpoint: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
-    """Unload (`keep_alive: 0`) only models owned by this run on `default_base_url` (`127.0.0.1:11434`).
+    """Unload (`keep_alive: 0`) own-tag models on `default_base_url` (`127.0.0.1:11434`) only when `model_calls_by_endpoint` shows at least one call to `default_base_url`.
 
-    Foreign models belonging to other seats are never unloaded and are recorded by name in
-    `foreign_models` and `foreign_models_present`; `own_models_absent` is True when none of the
-    run's own model tags remains loaded on `default_base_url`.
+    When `model_calls_by_endpoint` shows no calls to `default_base_url`, no `keep_alive: 0` request
+    is sent; `/api/ps` is still read and own-tag models are recorded under `own_tag_models_not_ours`,
+    foreign models under `foreign_models` and `foreign_models_present`, `own_models_absent` is True
+    (since this run loaded none on `default_base_url`), and `unload_skipped_reason` is set.
     """
     resolved_own_tags = _normalize_own_model_tags(model_tag, own_model_tags=own_model_tags)
     default_ep = _format_model_endpoint(default_base_url)
     ps_url = f"{default_ep}/api/ps"
     chat_url = f"{default_ep}/api/chat"
+    calls_to_default = sum(
+        int(cnt)
+        for ep_key, cnt in (model_calls_by_endpoint or {}).items()
+        if not isinstance(cnt, bool) and isinstance(cnt, int) and _format_model_endpoint(str(ep_key)) == default_ep
+    )
     before_resp = http_transport("GET", ps_url, None)
     raw_models = before_resp.get("models") if isinstance(before_resp, Mapping) else []
     models_list = raw_models if isinstance(raw_models, list) else []
+
+    if calls_to_default < 1:
+        own_tag_models_not_ours: list[str] = []
+        foreign_models_skipped: list[str] = []
+        for entry in models_list:
+            if not isinstance(entry, Mapping):
+                continue
+            model_name = str(entry.get("model") or entry.get("name") or "").strip()
+            if not model_name:
+                continue
+            if _is_own_model_tag(model_name, resolved_own_tags):
+                if model_name not in own_tag_models_not_ours:
+                    own_tag_models_not_ours.append(model_name)
+            else:
+                if model_name not in foreign_models_skipped:
+                    foreign_models_skipped.append(model_name)
+        return {
+            "endpoint": default_ep,
+            "unloaded_models": [],
+            "own_tag_models_not_ours": own_tag_models_not_ours,
+            "foreign_models": foreign_models_skipped,
+            "ps_after": dict(before_resp) if isinstance(before_resp, Mapping) else {"models": []},
+            "own_models_absent": True,
+            "foreign_models_present": list(foreign_models_skipped),
+            "unload_skipped_reason": STAGE5_UNLOAD_SKIPPED_NO_11434_CALL_REASON,
+        }
 
     unloaded_models: list[str] = []
     foreign_models: list[str] = []
@@ -1569,6 +1665,7 @@ def run_stage5_pipeline(
     rung_calls_made = 0
     rung_aborted_calls = 0
     rewrite_calls_made = 0
+    model_calls_by_endpoint: dict[str, int] = {}
 
     if existing_record is not None:
         prev_calls = existing_record.get("call_counts") or {}
@@ -1762,6 +1859,7 @@ def run_stage5_pipeline(
         "seed_bank_sha256": seed_bank_sha256,
         "seed_bank_size": seed_bank_size,
         "module_sha256s": current_module_sha256s,
+        "model_calls_by_endpoint": model_calls_by_endpoint,
         "model_endpoint": model_endpoint_block,
         "step_timings": step_timings_block,
         "rung": default_rung_block,
@@ -1816,9 +1914,26 @@ def run_stage5_pipeline(
         shape_plan="off",
     )
 
+    def _wrap_counting_transport(inner: OllamaHttpTransport) -> OllamaHttpTransport:
+        def _counted_transport(
+            method: str,
+            url: str,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            if _is_model_generation_call(method, url, payload):
+                ep = _format_model_endpoint(url)
+                model_calls_by_endpoint[ep] = model_calls_by_endpoint.get(ep, 0) + 1
+            return inner(method, url, payload)
+
+        return _counted_transport
+
     ollama_writer: OllamaWriter | None = None
     mock_writer: MockWriter | None = None
-    active_rewrite_client: Any = rewrite_client
+    active_rewrite_client: Any = (
+        _wrap_rewrite_client_for_endpoint_counts(rewrite_client, _wrap_counting_transport)
+        if rewrite_client is not None
+        else None
+    )
 
     need_any_b = len(existing_renderings_by_key) < total_renderings
     if writer_kind == "ollama":
@@ -1861,6 +1976,7 @@ def run_stage5_pipeline(
             popen_factory=popen_factory,
             prompt_token_counter=prompt_token_counter,
         )
+        ollama_writer._transport = _wrap_counting_transport(ollama_writer._transport)
 
     run_own_model_tags: list[str] = []
 
@@ -2750,6 +2866,7 @@ def run_stage5_pipeline(
                     default_base_url=DEFAULT_OLLAMA_BASE_URL,
                     model_tag=effective_writer_pin.ollama_tag,
                     own_model_tags=tuple(run_own_model_tags),
+                    model_calls_by_endpoint=model_calls_by_endpoint,
                 )
                 record["default_endpoint_end"] = default_end_status
                 if record_path.is_file():

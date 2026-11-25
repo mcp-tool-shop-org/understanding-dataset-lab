@@ -12,6 +12,7 @@
     "writer_kind": "mock"
   },
   "max_num_ctx": 9216,
+  "model_calls_by_endpoint": {},
   "model_endpoint": {
     "b": "http://127.0.0.1:11434",
     "rewrite": "http://127.0.0.1:11434",

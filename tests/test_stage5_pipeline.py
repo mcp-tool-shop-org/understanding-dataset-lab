@@ -183,6 +183,11 @@ def _assert_valid_stage5_record_schema(rec: Mapping[str, Any]) -> None:
     )
     assert isinstance(rec["module_sha256s"], dict)
     assert set(rec["module_sha256s"].keys()) == {"render.py", "shape_templates.py", "rewrite.py"}
+    assert isinstance(rec["model_calls_by_endpoint"], dict)
+    for ep_k, ep_cnt in rec["model_calls_by_endpoint"].items():
+        assert isinstance(ep_k, str) and ep_k.startswith(("http://", "https://"))
+        assert "/" not in ep_k.split("://", 1)[1]
+        assert isinstance(ep_cnt, int) and not isinstance(ep_cnt, bool) and ep_cnt >= 0
     assert isinstance(rec["model_endpoint"], dict)
     assert set(rec["model_endpoint"].keys()) == {"b", "rung", "swap", "rewrite"}
     for ep_val in rec["model_endpoint"].values():
@@ -2821,6 +2826,8 @@ def test_34_card_2026_11_08_b_partial_offload_guard_both_endpoints_and_11434_unl
             }
         ],
     )
+    from types import SimpleNamespace
+
     rec = run_stage5_pipeline(
         count=n,
         base_seed=base_seed,
@@ -2834,6 +2841,10 @@ def test_34_card_2026_11_08_b_partial_offload_guard_both_endpoints_and_11434_unl
         popen_factory=h_cleanup["popen_factory"],
         pid_killer=h_cleanup["pid_killer"],
         http_transport=h_cleanup["http_transport"],
+        rewrite_client=SimpleNamespace(
+            base_url="http://127.0.0.1:11434",
+            _transport=h_cleanup["http_transport"],
+        ),
         prompt_token_counter=lambda _: 3200,
         worlds=worlds,
     )
@@ -3020,6 +3031,8 @@ def test_37_card_2026_11_08_fix1_own_and_foreign_model_unloads_own_only(
                 return {"model": str(unloaded_name), "done": True}
         return inner_transport(method, url, payload)
 
+    from types import SimpleNamespace
+
     rec = run_stage5_pipeline(
         count=n,
         base_seed=base_seed,
@@ -3033,14 +3046,23 @@ def test_37_card_2026_11_08_fix1_own_and_foreign_model_unloads_own_only(
         popen_factory=base_harness["popen_factory"],
         pid_killer=base_harness["pid_killer"],
         http_transport=_transport,
+        rewrite_client=SimpleNamespace(
+            base_url=default_base,
+            _transport=_transport,
+        ),
         prompt_token_counter=lambda _: 3200,
         worlds=worlds,
     )
 
-    assert len(default_post_requests) == 1
-    assert default_post_requests[0]["url"] == "http://127.0.0.1:11434/api/chat"
-    assert default_post_requests[0]["payload"]["model"] == "qwen3.6:35b"
-    assert default_post_requests[0]["payload"]["keep_alive"] == 0
+    default_unload_requests = [
+        req
+        for req in default_post_requests
+        if req["payload"].get("keep_alive") == 0 and not req["payload"].get("messages")
+    ]
+    assert len(default_unload_requests) == 1
+    assert default_unload_requests[0]["url"] == "http://127.0.0.1:11434/api/chat"
+    assert default_unload_requests[0]["payload"]["model"] == "qwen3.6:35b"
+    assert default_unload_requests[0]["payload"]["keep_alive"] == 0
     assert all(
         req["payload"].get("model") != "other-seat:14b" for req in default_post_requests
     )
@@ -3124,3 +3146,341 @@ def test_38_card_2026_11_08_fix1_foreign_model_only_sends_no_unload_request(
     assert end_rec["own_models_absent"] is True
     assert end_rec["foreign_models_present"] == ["bookkeeper:8b"]
     assert "ps_empty" not in end_rec
+
+
+def _make_card_2026_11_11_recording_harness(
+    worlds: list[Any],
+    *,
+    owned_port: int = 11499,
+    default_models_initial: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build a fake dual-endpoint Stage 5 transport harness that records every HTTP request."""
+    base_harness = _make_fake_owned_server_stage5_harness(worlds, owned_port=owned_port)
+    inner_transport = base_harness["http_transport"]
+    owned_base = base_harness["owned_base_url"]
+    default_base = "http://127.0.0.1:11434"
+    default_models: list[dict[str, Any]] = (
+        [dict(m) for m in default_models_initial] if default_models_initial is not None else []
+    )
+    all_requests: list[dict[str, Any]] = []
+
+    def _transport(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        all_requests.append(
+            {
+                "method": method,
+                "url": url,
+                "payload": dict(payload) if isinstance(payload, Mapping) else payload,
+            }
+        )
+        if method == "GET" and url == f"{owned_base}/api/ps":
+            return {
+                "models": [
+                    {
+                        "name": PINNED_WRITER_MODEL_TAG,
+                        "model": PINNED_WRITER_MODEL_TAG,
+                        "size": 23_000_000_000,
+                        "size_vram": 23_000_000_000,
+                    }
+                ]
+            }
+        if method == "GET" and url == f"{default_base}/api/ps":
+            return {"models": [dict(m) for m in default_models]}
+        if (
+            method == "POST"
+            and url == f"{default_base}/api/chat"
+            and payload is not None
+            and payload.get("keep_alive") == 0
+            and not payload.get("messages")
+        ):
+            unloaded_name = payload.get("model")
+            default_models[:] = [
+                m
+                for m in default_models
+                if m.get("model") != unloaded_name and m.get("name") != unloaded_name
+            ]
+            return {"model": str(unloaded_name), "done": True}
+        return inner_transport(method, url, payload)
+
+    return {
+        **base_harness,
+        "http_transport": _transport,
+        "all_requests": all_requests,
+        "default_models": default_models,
+    }
+
+
+def test_39_card_2026_11_11_own_tag_on_11434_skipped_when_no_call_to_11434(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Card 2026-11-11 Test 1: With an own-tag model loaded on 11434 and a run whose calls all went to the owned server, no unload request is sent to 11434, `unload_skipped_reason` is set, and the model is listed in `own_tag_models_not_ours`."""
+    monkeypatch.setattr(stage5_mod, "STAGE5_RUNG_PER_TARGET", 1)
+    n = 4
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+
+    own_entry_11434 = {
+        "name": PINNED_WRITER_MODEL_TAG,
+        "model": PINNED_WRITER_MODEL_TAG,
+        "size": 23_000_000_000,
+        "size_vram": 23_000_000_000,
+    }
+    harness = _make_card_2026_11_11_recording_harness(
+        worlds,
+        owned_port=11499,
+        default_models_initial=[own_entry_11434],
+    )
+
+    out_dir = tmp_path / "run_39_no_11434_calls"
+    rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        server_port=11499,
+        start_owned_server=True,
+        guard_both_endpoints=True,
+        popen_factory=harness["popen_factory"],
+        pid_killer=harness["pid_killer"],
+        http_transport=harness["http_transport"],
+        prompt_token_counter=lambda _: 3200,
+        worlds=worlds,
+    )
+
+    reqs_11434 = [
+        r for r in harness["all_requests"] if str(r["url"]).startswith("http://127.0.0.1:11434")
+    ]
+    unload_reqs_11434 = [
+        r
+        for r in reqs_11434
+        if r["method"] == "POST"
+        and isinstance(r["payload"], Mapping)
+        and r["payload"].get("keep_alive") == 0
+    ]
+    assert unload_reqs_11434 == []
+    assert all(
+        r["method"] == "GET" and r["url"] == "http://127.0.0.1:11434/api/ps"
+        for r in reqs_11434
+    )
+    assert len(reqs_11434) >= 1
+    assert [m["model"] for m in harness["default_models"]] == [PINNED_WRITER_MODEL_TAG]
+
+    end_rec = rec["default_endpoint_end"]
+    assert end_rec == {
+        "endpoint": "http://127.0.0.1:11434",
+        "unloaded_models": [],
+        "own_tag_models_not_ours": [PINNED_WRITER_MODEL_TAG],
+        "foreign_models": [],
+        "ps_after": {"models": [own_entry_11434]},
+        "own_models_absent": True,
+        "foreign_models_present": [],
+        "unload_skipped_reason": "no model call to 11434 in this run",
+    }
+    persisted = json.loads((out_dir / STAGE5_RUN_RECORD_FILENAME).read_text(encoding="utf-8"))
+    assert persisted["default_endpoint_end"] == end_rec
+
+
+def test_40_card_2026_11_11_own_tag_on_11434_unloaded_when_run_called_11434(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Card 2026-11-11 Test 2: With the same own-tag model loaded on 11434 and a run with at least one call to 11434, the `keep_alive: 0` unload is sent as today."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(stage5_mod, "STAGE5_RUNG_PER_TARGET", 1)
+    n = 4
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+
+    own_entry_11434 = {
+        "name": PINNED_WRITER_MODEL_TAG,
+        "model": PINNED_WRITER_MODEL_TAG,
+        "size": 23_000_000_000,
+        "size_vram": 23_000_000_000,
+    }
+    harness = _make_card_2026_11_11_recording_harness(
+        worlds,
+        owned_port=11499,
+        default_models_initial=[own_entry_11434],
+    )
+
+    out_dir = tmp_path / "run_40_called_11434"
+    rec = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_dir,
+        writer_kind="ollama",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        server_port=11499,
+        start_owned_server=True,
+        guard_both_endpoints=True,
+        popen_factory=harness["popen_factory"],
+        pid_killer=harness["pid_killer"],
+        http_transport=harness["http_transport"],
+        rewrite_client=SimpleNamespace(
+            base_url="http://127.0.0.1:11434",
+            _transport=harness["http_transport"],
+        ),
+        prompt_token_counter=lambda _: 3200,
+        worlds=worlds,
+    )
+
+    reqs_11434 = [
+        r for r in harness["all_requests"] if str(r["url"]).startswith("http://127.0.0.1:11434")
+    ]
+    model_calls_11434 = [
+        r
+        for r in reqs_11434
+        if r["method"] == "POST"
+        and r["url"] == "http://127.0.0.1:11434/api/chat"
+        and isinstance(r["payload"], Mapping)
+        and bool(r["payload"].get("messages"))
+    ]
+    unload_reqs_11434 = [
+        r
+        for r in reqs_11434
+        if r["method"] == "POST"
+        and r["url"] == "http://127.0.0.1:11434/api/chat"
+        and isinstance(r["payload"], Mapping)
+        and r["payload"].get("keep_alive") == 0
+        and not r["payload"].get("messages")
+    ]
+    assert len(model_calls_11434) >= 1
+    assert len(unload_reqs_11434) == 1
+    assert unload_reqs_11434[0]["payload"]["model"] == PINNED_WRITER_MODEL_TAG
+    assert unload_reqs_11434[0]["payload"]["keep_alive"] == 0
+    assert harness["default_models"] == []
+
+    assert rec["default_endpoint_end"] == {
+        "endpoint": "http://127.0.0.1:11434",
+        "unloaded_models": [PINNED_WRITER_MODEL_TAG],
+        "foreign_models": [],
+        "ps_after": {"models": []},
+        "own_models_absent": True,
+        "foreign_models_present": [],
+    }
+    assert "unload_skipped_reason" not in rec["default_endpoint_end"]
+    assert "own_tag_models_not_ours" not in rec["default_endpoint_end"]
+
+
+def test_41_card_2026_11_11_model_calls_by_endpoint_counts_both_and_excludes_ps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Card 2026-11-11 Test 3: `model_calls_by_endpoint` counts each endpoint accurately over a run that calls both, and never counts `/api/ps` reads or `keep_alive: 0` unloads."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(stage5_mod, "STAGE5_RUNG_PER_TARGET", 1)
+    n = 4
+    base_seed = 20261103
+    worlds = [generate_world(cfg) for cfg in make_balanced_configs(n, base_seed=base_seed)]
+
+    own_entry_11434 = {
+        "name": PINNED_WRITER_MODEL_TAG,
+        "model": PINNED_WRITER_MODEL_TAG,
+        "size": 23_000_000_000,
+        "size_vram": 23_000_000_000,
+    }
+    harness_both = _make_card_2026_11_11_recording_harness(
+        worlds,
+        owned_port=11499,
+        default_models_initial=[own_entry_11434],
+    )
+
+    out_both = tmp_path / "run_41_both_endpoints"
+    rec_both = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_both,
+        writer_kind="ollama",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        server_port=11499,
+        start_owned_server=True,
+        guard_both_endpoints=True,
+        popen_factory=harness_both["popen_factory"],
+        pid_killer=harness_both["pid_killer"],
+        http_transport=harness_both["http_transport"],
+        rewrite_client=SimpleNamespace(
+            base_url="http://127.0.0.1:11434",
+            _transport=harness_both["http_transport"],
+        ),
+        prompt_token_counter=lambda _: 3200,
+        worlds=worlds,
+    )
+
+    ps_11499 = [
+        r for r in harness_both["all_requests"] if r["url"] == "http://127.0.0.1:11499/api/ps"
+    ]
+    ps_11434 = [
+        r for r in harness_both["all_requests"] if r["url"] == "http://127.0.0.1:11434/api/ps"
+    ]
+    assert len(ps_11499) == 3
+    assert len(ps_11434) == 5
+    assert rec_both["model_calls_by_endpoint"] == {
+        "http://127.0.0.1:11499": 8,
+        "http://127.0.0.1:11434": 24,
+    }
+    persisted_both = json.loads((out_both / STAGE5_RUN_RECORD_FILENAME).read_text(encoding="utf-8"))
+    assert persisted_both["model_calls_by_endpoint"] == {
+        "http://127.0.0.1:11499": 8,
+        "http://127.0.0.1:11434": 24,
+    }
+
+    # Verify an owned-only run reads 11434 `/api/ps` multiple times without adding 11434 to `model_calls_by_endpoint`,
+    # and resuming on a second owned port with a 3-arg HTTP transport counts only this run's calls.
+    harness_owned = _make_card_2026_11_11_recording_harness(
+        worlds,
+        owned_port=11499,
+        default_models_initial=[own_entry_11434],
+    )
+    out_owned = tmp_path / "run_41_owned_only"
+    rec_owned = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_owned,
+        writer_kind="ollama",
+        stage5_plan_seed=20261103,
+        stage5_rung_seed=20261104,
+        server_port=11499,
+        start_owned_server=True,
+        guard_both_endpoints=True,
+        popen_factory=harness_owned["popen_factory"],
+        pid_killer=harness_owned["pid_killer"],
+        http_transport=harness_owned["http_transport"],
+        prompt_token_counter=lambda _: 3200,
+        worlds=worlds,
+    )
+    ps_11434_owned = [
+        r for r in harness_owned["all_requests"] if r["url"] == "http://127.0.0.1:11434/api/ps"
+    ]
+    assert len(ps_11434_owned) == 4
+    assert rec_owned["model_calls_by_endpoint"] == {"http://127.0.0.1:11499": 32}
+    assert "http://127.0.0.1:11434" not in rec_owned["model_calls_by_endpoint"]
+
+    harness_resume = _make_card_2026_11_11_recording_harness(
+        worlds,
+        owned_port=11498,
+        default_models_initial=[own_entry_11434],
+    )
+    rec_resumed = run_stage5_pipeline(
+        count=n,
+        base_seed=base_seed,
+        output_dir=out_owned,
+        writer_kind="ollama",
+        resume=True,
+        redo_rung=True,
+        server_port=11498,
+        start_owned_server=True,
+        guard_both_endpoints=True,
+        popen_factory=harness_resume["popen_factory"],
+        pid_killer=harness_resume["pid_killer"],
+        http_transport=harness_resume["http_transport"],
+        rewrite_client=harness_resume["http_transport"],
+        prompt_token_counter=lambda _: 3200,
+        worlds=worlds,
+    )
+    assert rec_resumed["model_calls_by_endpoint"] == {
+        "http://127.0.0.1:11498": 24,
+    }
+    assert "http://127.0.0.1:11434" not in rec_resumed["model_calls_by_endpoint"]
