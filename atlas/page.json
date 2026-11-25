@@ -29,22 +29,22 @@
   ],
   "changes": {
     "fileCounts": {
-      "added": 2,
-      "changed": 4,
+      "added": 0,
+      "changed": 1,
       "moved": 0,
-      "parts": 4,
+      "parts": 1,
       "removed": 0
     },
     "items": [
       {
         "kind": "counts",
-        "sentence": "Nothing structural changed since 2026-11-08; 2 files added and 4 changed content.",
+        "sentence": "Nothing structural changed since 2026-11-08; 1 file changed content.",
         "subjects": []
       }
     ],
     "since": {
-      "commit": "e841cdf3f7bf492fd56dbb4eb7259c129b53c1fc",
-      "generatedAt": "2026-11-08T08:14:14.168Z"
+      "commit": "d14262f0a040bb6f83f49dece20678beebbe4971",
+      "generatedAt": "2026-11-08T08:56:36.465Z"
     },
     "unchanged": true
   },
@@ -130,7 +130,7 @@
     "Window: 180 days; a pair counts from 3 shared commits, since 5 source files reach 10 revisions; the floor rises to 10 when 25 do."
   ],
   "changesTogetherWithTests": 0,
-  "commit": "d14262f0a040bb6f83f49dece20678beebbe4971",
+  "commit": "88da837826e30519da8bf8fe2b47fb0d372b4c4f",
   "defaultBranch": "main",
   "derived": "7 parts, mostly Python (23 files), CSS (2), TypeScript (2), shell (2), Astro (1) and JavaScript (1). Work enters through 3 doors; the busiest is ci, which reaches 3 parts. It deploys a site to GitHub Pages. People run udlab-gen.",
   "doors": [
@@ -237,13 +237,13 @@
   "duplicatesLead": null,
   "duplicatesNote": [],
   "edges": [],
-  "engine": "1.24.0",
+  "engine": "1.26.0",
   "generated": [],
-  "generatedAt": "2026-11-08T08:56:36.465Z",
+  "generatedAt": "2026-11-11T22:50:00.448Z",
   "limits": [
     "7 reads use paths built at run time and are not named here.",
     "26 writes and 56 reads go to a path their caller passes, not to this repository.",
-    "4 reads go to the directory the command is run in, not to this repository.",
+    "5 reads go to the directory the command is run in, not to this repository.",
     "Statistics confidence is low: fewer than 25 source files reach 10 revisions in the window."
   ],
   "mainDoor": ".github/workflows/ci.yml",
@@ -260,12 +260,21 @@
   "readers": [],
   "repo": "mcp-tool-shop-org/understanding-dataset-lab",
   "sequences": [],
+  "startBeside": [
+    {
+      "files": [
+        "src/udlab_generator/stage5_pipeline.py",
+        "src/udlab_generator/sealing.py"
+      ],
+      "from": "src/udlab_generator/cli.py"
+    }
+  ],
   "startDoor": "pyproject.toml#udlab-gen",
   "startHere": [
     "src/udlab_generator/cli.py",
     "src/udlab_generator/render.py",
-    "src/udlab_generator/stage5_pipeline.py",
-    "src/udlab_generator/sealing.py"
+    "src/udlab_generator/world.py",
+    "src/udlab_generator/keys.py"
   ],
   "startReason": "This path follows udlab-gen (a command people run) from its entry, since ci runs only tests.",
   "summary": "understanding-dataset-lab (a prototype) plans multi-party scenes in code, puts them into prose with a local writer model, checks every rendering against the plan, and seals the code-made answer keys with a private seed.",
@@ -275,6 +284,7 @@
     "scripts": 1,
     "src": 9
   },
+  "testedCodeParts": 2,
   "unnamedWrites": 0,
   "unread": [],
   "unreadFiles": 0,

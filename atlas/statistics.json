@@ -228,7 +228,7 @@
       },
       {
         "commits": 2,
-        "lines": 97,
+        "lines": 95,
         "path": "atlas/README.md"
       },
       {
@@ -238,17 +238,17 @@
       },
       {
         "commits": 2,
-        "lines": 321,
+        "lines": 305,
         "path": "atlas/page.json"
       },
       {
         "commits": 2,
-        "lines": 770,
+        "lines": 790,
         "path": "atlas/statistics.json"
       },
       {
         "commits": 2,
-        "lines": 11007,
+        "lines": 11021,
         "path": "atlas/structure.json"
       },
       {
@@ -423,7 +423,7 @@
       },
       {
         "commits": 3,
-        "lines": 3972,
+        "lines": 4076,
         "path": "src/udlab_generator/stage5_pipeline.py"
       },
       {
@@ -553,7 +553,7 @@
       },
       {
         "commits": 4,
-        "lines": 2948,
+        "lines": 3148,
         "path": "tests/test_stage5_pipeline.py"
       },
       {
@@ -587,9 +587,9 @@
     "level": "low",
     "reason": "fewer than 25 source files reach 10 revisions in the window"
   },
-  "generatedAt": "2026-11-08T08:56:36.465Z",
+  "generatedAt": "2026-11-11T22:50:00.448Z",
   "generatedFrom": {
-    "commit": "d14262f0a040bb6f83f49dece20678beebbe4971"
+    "commit": "88da837826e30519da8bf8fe2b47fb0d372b4c4f"
   },
   "pairs": [
     {
@@ -659,7 +659,7 @@
     "floor": "fallen",
     "floorHeld": false,
     "floorTrigger": "revision-depth",
-    "headDate": "2026-11-08T03:26:11-05:00",
+    "headDate": "2026-11-08T04:24:32-05:00",
     "inScopeFiles": 91,
     "pinnedStart": null,
     "priorFloor": "fallen",
@@ -668,7 +668,7 @@
     "revisions": 5,
     "shared": 10,
     "sharedFloorUsed": 3,
-    "since": "2026-05-12T08:26:11.000Z",
+    "since": "2026-05-12T09:24:32.000Z",
     "sourceExtensions": [
       ".js",
       ".mjs",
